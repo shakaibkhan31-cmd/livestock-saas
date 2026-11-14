@@ -7,7 +7,7 @@ export default function LoginPage() {
     'use server'
     const email = formData.get('email') as string
     const password = formData.get('password') as string
-    const supabase = createClient()
+    const supabase = await createClient() // <--- await lagaya
 
     const { error } = await supabase.auth.signInWithPassword({ email, password })
     if (error) {
@@ -21,8 +21,9 @@ export default function LoginPage() {
     'use server'
     const email = formData.get('email') as string
     const password = formData.get('password') as string
-    const supabase = createClient()
-    const origin = headers().get('origin')
+    const supabase = await createClient() // <--- await lagaya
+    const headersList = await headers()
+    const origin = headersList.get('origin')
 
     const { error } = await supabase.auth.signUp({
       email,

@@ -5,12 +5,11 @@ export default function OnboardingPage() {
   const createFarm = async (formData: FormData) => {
     'use server'
     const farmName = formData.get('farmName') as string
-    const supabase = createClient()
+    const supabase = await createClient() // <--- await lagaya
 
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return redirect('/login')
 
-    // Insert into farms table
     const { error } = await supabase.from('farms').insert([
       { farm_name: farmName, owner_id: user.id }
     ])
