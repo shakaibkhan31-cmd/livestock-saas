@@ -2,8 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import Navbar from "@/components/Navbar";
-
-export const dynamic = 'force-dynamic';
+import { Suspense } from "react";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -16,8 +15,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "BAA BAA Shed SaaS",
-  description: "Multi-tenant urban livestock management platform",
+  title: "BAA BAA Shed - Livestock SaaS",
+  description: "Livestock management and tracking system",
 };
 
 export default function RootLayout({
@@ -28,8 +27,12 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased bg-gray-50 text-gray-900`}>
-        <Navbar />
-        <main>{children}</main>
+        <Suspense fallback={<div className="p-4 text-center">Loading...</div>}>
+          <Navbar />
+          <main className="max-w-7xl mx-auto px-4 py-6">
+            {children}
+          </main>
+        </Suspense>
       </body>
     </html>
   );
