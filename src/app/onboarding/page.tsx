@@ -5,7 +5,7 @@ export default function OnboardingPage() {
   const createFarm = async (formData: FormData) => {
     'use server'
     const farmName = formData.get('farmName') as string
-    const supabase = await createClient() // <--- await lagaya
+    const supabase = await createClient()
 
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return redirect('/login')
@@ -15,8 +15,9 @@ export default function OnboardingPage() {
     ])
 
     if (error) {
-      console.error('Error creating farm:', error)
-      return
+      console.error('Error creating farm:', error.message)
+      // Error ko screen par dekhne ke liye message pass karein
+      return redirect(`/onboarding?message=${encodeURIComponent(error.message)}`)
     }
 
     return redirect('/')

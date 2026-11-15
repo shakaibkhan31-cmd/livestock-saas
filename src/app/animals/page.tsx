@@ -22,12 +22,26 @@ export default async function AnimalsPage() {
     .eq('farm_id', farm.id)
     .order('created_at', { ascending: false })
 
+  // Delete Server Action
+  async function deleteAnimal(formData: FormData) {
+    'use server'
+    const animalId = formData.get('animalId') as string
+    const supabaseClient = await createClient()
+
+    await supabaseClient
+      .from('livestock_master')
+      .delete()
+      .eq('id', animalId)
+
+    return redirect('/animals')
+  }
+
   return (
     <div className="min-h-screen bg-gray-50 p-8">
       <div className="max-w-6xl mx-auto">
         <div className="flex justify-between items-center mb-6">
           <div>
-            <h1 className="text-3xl font-bold text-gray-800">{farm.farm_name}</h1>
+            <h1 className="3xl font-bold text-gray-800">{farm.farm_name}</h1>
             <p className="text-gray-500">Livestock Master & Inventory</p>
           </div>
           <Link
@@ -48,6 +62,7 @@ export default async function AnimalsPage() {
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sex</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Cost Basis (PKR)</th>
+                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
@@ -68,11 +83,28 @@ export default async function AnimalsPage() {
                       <span className="px-2 py-1 text-xs rounded-full bg-green-100 text-green-800">{animal.status}</span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-gray-700">Rs. {animal.cost_basis}</td>
+                    <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2">
+                      <Link
+                        href={`/animals/${animal.id}/edit`}
+                        className="text-indigo-600 hover:text-indigo-900 bg-indigo-50 px-3 py-1 rounded"
+                      >
+                        Edit
+                      </Link>
+                      <form action={deleteAnimal} className="inline-block">
+                        <input type="hidden" name="animalId" value={animal.id} />
+                        <button
+                          type="submit"
+                          className="text-red-600 hover:text-red-900 bg-red-50 px-3 py-1 rounded"
+                        >
+                          Delete
+                        </button>
+                      </form>
+                    </td>
                   </tr>
                 ))
               ) : (
                 <tr>
-                  <td colSpan={6} className="px-6 py-8 text-center text-gray-500">
+                  <td colSpan={7} className="px-6 py-8 text-center text-gray-500">
                     No animals registered yet. Click &quot;Add New Animal&quot; to get started.
                   </td>
                 </tr>
