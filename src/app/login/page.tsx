@@ -8,14 +8,16 @@ export default function LoginPage() {
     const email = formData.get('email') as string
     const password = formData.get('password') as string
     const supabase = await createClient()
+    const headersList = await headers()
+    const host = headersList.get('host') || 'livestock-saas.vercel.app'
+    const protocol = host.includes('localhost') ? 'http' : 'https'
 
     const { error } = await supabase.auth.signInWithPassword({ email, password })
     if (error) {
-      // Asal error message URL mein pass karein taake pata chale
-      return redirect(`/login?message=${encodeURIComponent(error.message)}`)
+      return redirect(`${protocol}://${host}/login?message=${encodeURIComponent(error.message)}`)
     }
 
-    return redirect('/')
+    return redirect(`${protocol}://${host}/`)
   }
 
   const handleSignup = async (formData: FormData) => {
@@ -24,21 +26,22 @@ export default function LoginPage() {
     const password = formData.get('password') as string
     const supabase = await createClient()
     const headersList = await headers()
-    const origin = headersList.get('origin')
+    const host = headersList.get('host') || 'livestock-saas.vercel.app'
+    const protocol = host.includes('localhost') ? 'http' : 'https'
 
     const { error } = await supabase.auth.signUp({
       email,
       password,
       options: {
-        emailRedirectTo: `${origin}/auth/callback`,
+        emailRedirectTo: `${protocol}://${host}/auth/callback`,
       },
     })
 
     if (error) {
-      return redirect(`/login?message=${encodeURIComponent(error.message)}`)
+      return redirect(`${protocol}://${host}/login?message=${encodeURIComponent(error.message)}`)
     }
 
-    return redirect('/login?message=Check email to continue sign in process')
+    return redirect(`${protocol}://${host}/login?message=${encodeURIComponent('Check email to continue sign in process')}`)
   }
 
   return (
