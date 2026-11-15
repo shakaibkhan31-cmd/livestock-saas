@@ -7,11 +7,12 @@ export default function LoginPage() {
     'use server'
     const email = formData.get('email') as string
     const password = formData.get('password') as string
-    const supabase = await createClient() // <--- await lagaya
+    const supabase = await createClient()
 
     const { error } = await supabase.auth.signInWithPassword({ email, password })
     if (error) {
-      return redirect('/login?message=Could not authenticate user')
+      // Asal error message URL mein pass karein taake pata chale
+      return redirect(`/login?message=${encodeURIComponent(error.message)}`)
     }
 
     return redirect('/')
@@ -21,7 +22,7 @@ export default function LoginPage() {
     'use server'
     const email = formData.get('email') as string
     const password = formData.get('password') as string
-    const supabase = await createClient() // <--- await lagaya
+    const supabase = await createClient()
     const headersList = await headers()
     const origin = headersList.get('origin')
 
@@ -34,7 +35,7 @@ export default function LoginPage() {
     })
 
     if (error) {
-      return redirect('/login?message=Could not create user')
+      return redirect(`/login?message=${encodeURIComponent(error.message)}`)
     }
 
     return redirect('/login?message=Check email to continue sign in process')
