@@ -1,6 +1,8 @@
 import { createClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
 
+export const dynamic = 'force-dynamic'
+
 export default function NewAnimalPage() {
   const registerAnimal = async (formData: FormData) => {
     'use server'
@@ -36,7 +38,7 @@ export default function NewAnimalPage() {
         client_name: client_name || null,
         sex,
         dob: dob || null,
-        acquisition_date: acquisition_date || new Date().toISOString().split('T')[0], // Onboarding date
+        acquisition_date: acquisition_date || new Date().toISOString().split('T')[0],
         cost_basis: cost_basis ? parseFloat(cost_basis) : 0,
         monthly_boarding_rate: monthly_boarding_rate ? parseFloat(monthly_boarding_rate) : 0,
       },
@@ -49,6 +51,8 @@ export default function NewAnimalPage() {
 
     return redirect('/animals')
   }
+
+  const todayStr = new Date().toISOString().split('T')[0]
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col justify-center items-center py-12">
@@ -106,14 +110,13 @@ export default function NewAnimalPage() {
             </div>
           </div>
 
-          {/* Onboarding / Acquisition Date & Date of Birth */}
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Onboarding Date</label>
               <input 
                 name="acquisition_date" 
                 type="date" 
-                defaultValue={new Date().toISOString().split('T')[0]} 
+                defaultValue={todayStr} 
                 className="w-full px-4 py-2 border rounded-md focus:ring-2 focus:ring-green-500" 
               />
             </div>
