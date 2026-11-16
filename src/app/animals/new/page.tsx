@@ -7,7 +7,6 @@ export default function NewAnimalPage() {
     const tag_id = formData.get('tag_id') as string
     const species = formData.get('species') as string
     const rawOwnership = formData.get('ownership') as string
-    // Ownership ko standardize karne ke liye (Self ya Palai)
     const ownership = rawOwnership.includes('Palai') || rawOwnership === 'Client' ? 'Palai' : 'Self'
     
     const client_name = formData.get('client_name') as string
@@ -30,26 +29,25 @@ export default function NewAnimalPage() {
 
     if (!farm) return redirect('/onboarding')
 
-    const { error } = await supabase.from('livestock_master').insert([
-      {
-        farm_id: farm.id,
-        tag_id,
-        species,
-        ownership,
-        client_name: ownership === 'Palai' ? client_name : null,
-        sex,
-        dob: dob || null,
-        acquisition_date: acquisition_date || new Date().toISOString().split('T')[0],
-        cost_basis: cost_basis ? parseFloat(cost_basis) : 0,
-        monthly_boarding_rate: monthly_boarding_rate ? parseFloat(monthly_boarding_rate) : 0,
-        status: 'Active', // Ensure status is explicitly Active
-      },
-    ])
+    const insertData = {
+      farm_id: farm.id,
+      tag_id,
+      species,
+      ownership,
+      client_name: ownership === 'Palai' ? (client_name || 'Client') : null,
+      sex,
+      dob: dob || null,
+      acquisition_date: acquisition_date || new Date().toISOString().split('T')[0],
+      cost_basis: cost_basis ? parseFloat(cost_basis) : 0,
+      monthly_boarding_rate: monthly_boarding_rate ? parseFloat(monthly_boarding_rate) : 0,
+      status: 'Active',
+    }
+
+    const { error } = await supabase.from('livestock_master').insert([insertData])
 
     if (error) {
-      console.error('Error adding animal:', error.message)
-      // Error ko URL mein bhej kar UI par dikha sakte hain
-      return redirect(`/animals/new?error=${encodeURIComponent(error.message)}`)
+      console.error('Supabase Insert Error:', error)
+      throw new Error(`Failed to insert animal: ${error.message}`)
     }
 
     return redirect('/animals')
