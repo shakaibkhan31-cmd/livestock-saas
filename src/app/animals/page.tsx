@@ -16,10 +16,12 @@ export default async function AnimalsPage() {
 
   if (!farm) return redirect('/onboarding')
 
+  // Sirf Active animals fetch karne ke liye .eq('status', 'Active') laga diya hai
   const { data: animals } = await supabase
     .from('livestock_master')
     .select('*')
     .eq('farm_id', farm.id)
+    .eq('status', 'Active')
     .order('created_at', { ascending: false })
 
   // Delete Server Action
@@ -41,8 +43,8 @@ export default async function AnimalsPage() {
       <div className="max-w-6xl mx-auto">
         <div className="flex justify-between items-center mb-6">
           <div>
-            <h1 className="3xl font-bold text-gray-800">{farm.farm_name}</h1>
-            <p className="text-gray-500">Livestock Master & Inventory</p>
+            <h1 className="text-3xl font-bold text-gray-800">{farm.farm_name}</h1>
+            <p className="text-gray-500">Livestock Master & Inventory (Active Stock)</p>
           </div>
           <Link
             href="/animals/new"
@@ -105,7 +107,7 @@ export default async function AnimalsPage() {
               ) : (
                 <tr>
                   <td colSpan={7} className="px-6 py-8 text-center text-gray-500">
-                    No animals registered yet. Click &quot;Add New Animal&quot; to get started.
+                    No active animals registered yet. Click &quot;Add New Animal&quot; to get started.
                   </td>
                 </tr>
               )}
