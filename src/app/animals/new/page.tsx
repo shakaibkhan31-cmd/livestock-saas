@@ -14,7 +14,9 @@ export default async function NewAnimalPage({
     const tag_id = formData.get('tag_id') as string
     const species = formData.get('species') as string
     const rawOwnership = formData.get('ownership') as string
-    const ownership = rawOwnership.includes('Palai') || rawOwnership === 'Client' ? 'Palai' : 'Self'
+    
+    // Database ke enum_status ke mutabiq 'Client' ya 'Self' pass kar rahe hain
+    const ownership = rawOwnership.includes('Palai') || rawOwnership === 'Client' ? 'Client' : 'Self'
     
     const client_name = formData.get('client_name') as string
     const sex = formData.get('sex') as string
@@ -36,13 +38,12 @@ export default async function NewAnimalPage({
 
     if (!farm) return redirect('/onboarding')
 
-    // Sirf wohi fields bhej rahe hain jo table mein confirm hain
     const insertData: any = {
       farm_id: farm.id,
       tag_id,
       species,
       ownership,
-      client_name: ownership === 'Palai' ? (client_name || 'Client') : null,
+      client_name: ownership === 'Client' ? (client_name || 'Client') : null,
       sex,
       cost_basis: cost_basis ? parseFloat(cost_basis) : 0,
       monthly_boarding_rate: monthly_boarding_rate ? parseFloat(monthly_boarding_rate) : 0,
@@ -104,7 +105,7 @@ export default async function NewAnimalPage({
               <label className="block text-sm font-medium text-gray-700 mb-1">Ownership</label>
               <select name="ownership" className="w-full px-4 py-2 border rounded-md focus:ring-2 focus:ring-green-500">
                 <option value="Self">Self (Farm Owned)</option>
-                <option value="Palai">Palai (Client Owned)</option>
+                <option value="Client">Palai (Client Owned)</option>
               </select>
             </div>
             <div>
