@@ -10,6 +10,7 @@ export default function NewAnimalPage() {
     const client_name = formData.get('client_name') as string
     const sex = formData.get('sex') as string
     const dob = formData.get('dob') as string
+    const acquisition_date = formData.get('acquisition_date') as string
     const cost_basis = formData.get('cost_basis') as string
     const monthly_boarding_rate = formData.get('monthly_boarding_rate') as string
 
@@ -35,9 +36,9 @@ export default function NewAnimalPage() {
         client_name: client_name || null,
         sex,
         dob: dob || null,
+        acquisition_date: acquisition_date || new Date().toISOString().split('T')[0], // Onboarding date
         cost_basis: cost_basis ? parseFloat(cost_basis) : 0,
         monthly_boarding_rate: monthly_boarding_rate ? parseFloat(monthly_boarding_rate) : 0,
-        acquisition_date: new Date().toISOString().split('T')[0],
       },
     ])
 
@@ -85,7 +86,7 @@ export default function NewAnimalPage() {
               <label className="block text-sm font-medium text-gray-700 mb-1">Ownership</label>
               <select name="ownership" className="w-full px-4 py-2 border rounded-md focus:ring-2 focus:ring-green-500">
                 <option value="Self">Self (Farm Owned)</option>
-                <option value="Client">Client (Palai)</option>
+                <option value="Palai">Palai (Client Owned)</option>
               </select>
             </div>
             <div>
@@ -105,9 +106,21 @@ export default function NewAnimalPage() {
             </div>
           </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Date of Birth (Approx)</label>
-            <input name="dob" type="date" className="w-full px-4 py-2 border rounded-md focus:ring-2 focus:ring-green-500" />
+          {/* Onboarding / Acquisition Date & Date of Birth */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Onboarding Date</label>
+              <input 
+                name="acquisition_date" 
+                type="date" 
+                defaultValue={new Date().toISOString().split('T')[0]} 
+                className="w-full px-4 py-2 border rounded-md focus:ring-2 focus:ring-green-500" 
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Date of Birth (Approx)</label>
+              <input name="dob" type="date" className="w-full px-4 py-2 border rounded-md focus:ring-2 focus:ring-green-500" />
+            </div>
           </div>
 
           <div className="flex justify-end gap-4 mt-4">
