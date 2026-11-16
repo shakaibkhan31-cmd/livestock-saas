@@ -1,8 +1,6 @@
 import { createClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
 
-export const dynamic = 'force-dynamic'
-
 export default function NewAnimalPage() {
   const registerAnimal = async (formData: FormData) => {
     'use server'
@@ -51,8 +49,6 @@ export default function NewAnimalPage() {
 
     return redirect('/animals')
   }
-
-  const todayStr = new Date().toISOString().split('T')[0]
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col justify-center items-center py-12">
@@ -116,7 +112,7 @@ export default function NewAnimalPage() {
               <input 
                 name="acquisition_date" 
                 type="date" 
-                defaultValue={todayStr} 
+                required
                 className="w-full px-4 py-2 border rounded-md focus:ring-2 focus:ring-green-500" 
               />
             </div>
