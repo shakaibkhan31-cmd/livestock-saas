@@ -1,120 +1,43 @@
-import { createClient } from '@/utils/supabase/server'
-import { redirect } from 'next/navigation'
+'use client'
+
+import { useState, useTransition } from 'react'
+import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 
-export default async function NewAnimalPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ error?: string }>
-}) {
-  const params = await searchParams
-  const errorMessage = params.error
+export default function NewAnimalPage() {
+  const router = useRouter()
+  const [isPending, startTransition] = useTransition()
+  
+  // Form Interactive States
+  const [ownership, setOwnership] = useState('Self')
+  const [species, setSpecies] = useState('Goat')
+  const [error, setError] = useState('')
 
-  const supabase = await createClient()
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    setError('')
 
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return redirect('/login')
+    const formData = new FormData(e.currentTarget)
 
-  const { data: farm } = await supabase
-    .from('farms')
-    .select('id')
-    .eq('owner_id', user.id)
-    .single()
+    startTransition(async () => {
+      try {
+        const response = await fetch('/api/animals/create', {
+          method: 'POST',
+          body: formData,
+        })
 
-  if (!farm) return redirect('/onboarding')
+        const result = await response.json()
 
-  // 1. Existing animals fetch karein (Auto Tag generation aur Client names ke liye)
-  const { data: existingAnimals } = await supabase
-    .from('livestock_master')
-    .select('tag_id, client_name')
-    .eq('farm_id', farm.id)
+        if (!response.ok || result.error) {
+          throw new Error(result.error || 'Failed to register animal.')
+        }
 
-  // 2. Breeds fetch karein database se
-  const { data: breeds } = await supabase
-    .from('species_breeds')
-    .select('id, breed_name, species')
-    .order('breed_name', { ascending: true })
-
-  // Smart Tag Auto-Suggestion (Maslan G-06 ke baad G-07 suggest karega)
-  let suggestedTag = 'G-01'
-  if (existingAnimals && existingAnimals.length > 0) {
-    const goatTags = existingAnimals
-      .map(a => a.tag_id)
-      .filter((tag): tag is string => Boolean(tag) && tag.toUpperCase().startsWith('G-'))
-
-    if (goatTags.length > 0) {
-      const numbers = goatTags.map(tag => {
-        const num = parseInt(tag.replace(/[^0-9]/g, ''), 10)
-        return isNaN(num) ? 0 : num
-      })
-      const maxNum = Math.max(...numbers, 0)
-      suggestedTag = `G-${String(maxNum + 1).padStart(2, '0')}`
-    }
-  }
-
-  // Unique Client Names list (Autocomplete suggestions ke liye)
-  const existingClients = Array.from(
-    new Set(
-      existingAnimals
-        ?.map(a => a.client_name)
-        .filter((name): name is string => Boolean(name)) || []
-    )
-  )
-
-  // Server Action for Form Submission
-  const registerAnimal = async (formData: FormData) => {
-    'use server'
-    const tag_id = formData.get('tag_id') as string
-    const species = formData.get('species') as string
-    const breed_id = formData.get('breed_id') as string
-    const rawOwnership = formData.get('ownership') as string
-    const ownership = rawOwnership.includes('Palai') || rawOwnership === 'Client' ? 'Client' : 'Self'
-
-    const client_name = formData.get('client_name') as string
-    const sex = formData.get('sex') as string
-    const dob = formData.get('dob') as string
-    const acquisition_date = formData.get('acquisition_date') as string
-    const status = (formData.get('status') as string) || 'Active'
-    const cost_basis = formData.get('cost_basis') as string
-    const monthly_boarding_rate = formData.get('monthly_boarding_rate') as string
-
-    const supabaseClient = await createClient()
-
-    const { data: { user: currentUser } } = await supabaseClient.auth.getUser()
-    if (!currentUser) return redirect('/login')
-
-    const { data: currentFarm } = await supabaseClient
-      .from('farms')
-      .select('id')
-      .eq('owner_id', currentUser.id)
-      .single()
-
-    if (!currentFarm) return redirect('/onboarding')
-
-    const insertData: Record<string, any> = {
-      farm_id: currentFarm.id,
-      tag_id,
-      species,
-      ownership,
-      client_name: ownership === 'Client' ? (client_name || 'Client') : null,
-      sex,
-      status,
-      cost_basis: cost_basis ? parseFloat(cost_basis) : 0,
-      monthly_boarding_rate: monthly_boarding_rate ? parseFloat(monthly_boarding_rate) : 0,
-    }
-
-    if (breed_id) insertData.breed_id = breed_id
-    if (dob) insertData.dob = dob
-    if (acquisition_date) insertData.acquisition_date = acquisition_date
-
-    const { error } = await supabaseClient.from('livestock_master').insert([insertData])
-
-    if (error) {
-      console.error('Supabase Insert Error:', error.message)
-      return redirect(`/animals/new?error=${encodeURIComponent(error.message)}`)
-    }
-
-    return redirect('/animals')
+        router.push('/animals')
+        router.refresh()
+      } catch (err: any) {
+        setError(err.message || 'Something went wrong.')
+      }
+    })
   }
 
   return (
@@ -124,7 +47,7 @@ export default async function NewAnimalPage({
         <div className="mb-6 flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Register New Animal</h1>
-            <p className="text-sm text-slate-500 mt-0.5">Add livestock inventory details with smart auto-tagging.</p>
+            <p className="text-sm text-slate-500 mt-0.5">Add multi-species livestock inventory with dynamic ownership rules.</p>
           </div>
           <Link
             href="/animals"
@@ -136,13 +59,14 @@ export default async function NewAnimalPage({
 
         {/* Main Card */}
         <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-          {errorMessage && (
-            <div className="p-4 bg-red-50 border-b border-red-200 text-red-700 text-sm flex items-center gap-2">
-              <span className="font-semibold">Database Error:</span> {decodeURIComponent(errorMessage)}
+          {error && (
+            <div className="p-4 bg-red-50 border-b border-red-200 text-red-700 text-sm flex items-center justify-between">
+              <span><strong>Error:</strong> {error}</span>
+              <button onClick={() => setError('')} className="text-red-500 font-bold">×</button>
             </div>
           )}
 
-          <form action={registerAnimal} className="p-6 sm:p-8 space-y-6">
+          <form onSubmit={handleSubmit} className="p-6 sm:p-8 space-y-6">
             
             {/* Section 1: Identification & Classification */}
             <div>
@@ -150,15 +74,13 @@ export default async function NewAnimalPage({
               <div className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">
-                    Tag ID / Ear Tag <span className="text-red-500">*</span>
-                    <span className="text-xs text-green-600 font-normal ml-2">(Auto-suggested: {suggestedTag})</span>
+                    Tag ID / Identifier <span className="text-red-500">*</span>
                   </label>
                   <input 
                     name="tag_id" 
                     type="text" 
                     required 
-                    defaultValue={suggestedTag}
-                    placeholder="e.g., G-07, C-102" 
+                    placeholder="e.g., G-07, C-102, CH-01" 
                     className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 font-mono font-medium placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-green-600 focus:border-transparent transition" 
                   />
                 </div>
@@ -166,25 +88,33 @@ export default async function NewAnimalPage({
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div>
                     <label className="block text-sm font-medium text-slate-700 mb-1.5">Species</label>
-                    <select name="species" className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-green-600 transition">
+                    <select 
+                      name="species" 
+                      value={species}
+                      onChange={(e) => setSpecies(e.target.value)}
+                      className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-green-600 transition"
+                    >
                       <option value="Goat">Goat</option>
                       <option value="Sheep">Sheep</option>
                       <option value="Cattle">Cattle</option>
                       <option value="Buffalo">Buffalo</option>
+                      <option value="Chicken">Chicken</option>
+                      <option value="Rabbit">Rabbit</option>
+                      <option value="Horse">Horse</option>
+                      <option value="Dog">Dog</option>
+                      <option value="Quail">Quail</option>
                       <option value="Other">Other</option>
                     </select>
                   </div>
 
                   <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1.5">Breed</label>
-                    <select name="breed_id" className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-green-600 transition">
-                      <option value="">Select Breed (Optional)</option>
-                      {breeds && breeds.map((b) => (
-                        <option key={b.id} value={b.id}>
-                          {b.breed_name} ({b.species})
-                        </option>
-                      ))}
-                    </select>
+                    <label className="block text-sm font-medium text-slate-700 mb-1.5">Breed / Type</label>
+                    <input 
+                      name="breed_name" 
+                      type="text" 
+                      placeholder="e.g., Gulabi, Beetal, Desi" 
+                      className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-green-600 transition" 
+                    />
                   </div>
 
                   <div>
@@ -201,33 +131,39 @@ export default async function NewAnimalPage({
 
             <hr className="border-slate-100" />
 
-            {/* Section 2: Ownership & Financials */}
+            {/* Section 2: Ownership & Financial Terms */}
             <div>
               <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-4">2. Ownership & Financial Terms</h2>
               <div className="space-y-4">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-sm font-medium text-slate-700 mb-1.5">Ownership Structure</label>
-                    <select name="ownership" className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-green-600 transition">
+                    <select 
+                      name="ownership" 
+                      value={ownership}
+                      onChange={(e) => setOwnership(e.target.value)}
+                      className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-green-600 transition"
+                    >
                       <option value="Self">Self (Farm Owned)</option>
                       <option value="Client">Palai (Client Owned)</option>
                     </select>
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1.5">Client Name (if Palai)</label>
-                    <input 
-                      name="client_name" 
-                      type="text" 
-                      list="clients-list"
-                      placeholder="Select or type client name..." 
-                      className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-green-600 transition" 
-                    />
-                    <datalist id="clients-list">
-                      {existingClients.map((client, idx) => (
-                        <option key={idx} value={client} />
-                      ))}
-                    </datalist>
-                  </div>
+
+                  {/* Client Name: Only shows if Palai is selected */}
+                  {ownership === 'Client' && (
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                        Client Name <span className="text-red-500">*</span>
+                      </label>
+                      <input 
+                        name="client_name" 
+                        type="text" 
+                        required={ownership === 'Client'}
+                        placeholder="Enter client name..." 
+                        className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-green-600 transition" 
+                      />
+                    </div>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -241,16 +177,20 @@ export default async function NewAnimalPage({
                       className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-green-600 transition" 
                     />
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1.5">Monthly Boarding Rate (PKR)</label>
-                    <input 
-                      name="monthly_boarding_rate" 
-                      type="number" 
-                      step="0.01" 
-                      placeholder="0.00" 
-                      className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-green-600 transition" 
-                    />
-                  </div>
+
+                  {/* Monthly Boarding Rate: Only shows if Palai is selected */}
+                  {ownership === 'Client' && (
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1.5">Monthly Boarding Rate (PKR)</label>
+                      <input 
+                        name="monthly_boarding_rate" 
+                        type="number" 
+                        step="0.01" 
+                        placeholder="0.00" 
+                        className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-green-600 transition" 
+                      />
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -268,6 +208,7 @@ export default async function NewAnimalPage({
                       name="acquisition_date" 
                       type="date" 
                       required
+                      defaultValue={new Date().toISOString().split('T')[0]}
                       className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-green-600 transition" 
                     />
                   </div>
@@ -303,9 +244,10 @@ export default async function NewAnimalPage({
               </Link>
               <button
                 type="submit"
-                className="px-6 py-2.5 rounded-xl bg-green-600 text-white font-medium hover:bg-green-700 shadow-sm transition text-sm"
+                disabled={isPending}
+                className="px-6 py-2.5 rounded-xl bg-green-600 text-white font-medium hover:bg-green-700 shadow-sm transition text-sm disabled:opacity-50"
               >
-                Save Animal Record
+                {isPending ? 'Saving Record...' : 'Save Animal Record'}
               </button>
             </div>
 
