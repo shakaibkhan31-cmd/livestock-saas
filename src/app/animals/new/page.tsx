@@ -6,7 +6,10 @@ export default function NewAnimalPage() {
     'use server'
     const tag_id = formData.get('tag_id') as string
     const species = formData.get('species') as string
-    const ownership = formData.get('ownership') as string
+    const rawOwnership = formData.get('ownership') as string
+    // Ownership ko standardize karne ke liye (Self ya Palai)
+    const ownership = rawOwnership.includes('Palai') || rawOwnership === 'Client' ? 'Palai' : 'Self'
+    
     const client_name = formData.get('client_name') as string
     const sex = formData.get('sex') as string
     const dob = formData.get('dob') as string
@@ -33,18 +36,20 @@ export default function NewAnimalPage() {
         tag_id,
         species,
         ownership,
-        client_name: client_name || null,
+        client_name: ownership === 'Palai' ? client_name : null,
         sex,
         dob: dob || null,
         acquisition_date: acquisition_date || new Date().toISOString().split('T')[0],
         cost_basis: cost_basis ? parseFloat(cost_basis) : 0,
         monthly_boarding_rate: monthly_boarding_rate ? parseFloat(monthly_boarding_rate) : 0,
+        status: 'Active', // Ensure status is explicitly Active
       },
     ])
 
     if (error) {
-      console.error('Error adding animal:', error)
-      return
+      console.error('Error adding animal:', error.message)
+      // Error ko URL mein bhej kar UI par dikha sakte hain
+      return redirect(`/animals/new?error=${encodeURIComponent(error.message)}`)
     }
 
     return redirect('/animals')
