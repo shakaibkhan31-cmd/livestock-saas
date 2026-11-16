@@ -23,37 +23,28 @@ export default async function NewAnimalPage({
 
   if (!farm) return redirect('/onboarding')
 
-  // Fetch existing animals for smart tag generation
+  // Smart Tag Auto-Suggestion
   const { data: existingAnimals } = await supabase
     .from('livestock_master')
     .select('tag_id')
     .eq('farm_id', farm.id)
 
-  // Smart Tag Auto-Suggestion
   let suggestedTag = 'G-01'
   if (existingAnimals && existingAnimals.length > 0) {
-    const tags = existingAnimals
-      .map(a => a.tag_id)
-      .filter((tag): tag is string => Boolean(tag))
-
-    if (tags.length > 0) {
-      const numbers = tags.map(tag => {
-        const num = parseInt(tag.replace(/[^0-9]/g, ''), 10)
-        return isNaN(num) ? 0 : num
-      })
-      const maxNum = Math.max(...numbers, 0)
-      suggestedTag = `G-${String(maxNum + 1).padStart(2, '0')}`
-    }
+    const numbers = existingAnimals
+      .map(a => parseInt((a.tag_id || '').replace(/[^0-9]/g, ''), 10))
+      .filter(num => !isNaN(num))
+    const maxNum = Math.max(...numbers, 0)
+    suggestedTag = `G-${String(maxNum + 1).padStart(2, '0')}`
   }
 
-  // Server Action for Form Submission
+  // Server Action for Form & Photo Upload
   const registerAnimal = async (formData: FormData) => {
     'use server'
     const tag_id = formData.get('tag_id') as string
     const species = formData.get('species') as string
     const breed_name = formData.get('breed_name') as string
-    const ownership = formData.get('ownership') as string // 'Self' or 'Client'
-
+    const ownership = formData.get('ownership') as string
     const client_name = formData.get('client_name') as string
     const sex = formData.get('sex') as string
     const dob = formData.get('dob') as string
@@ -61,6 +52,7 @@ export default async function NewAnimalPage({
     const status = (formData.get('status') as string) || 'Active'
     const cost_basis = formData.get('cost_basis') as string
     const monthly_boarding_rate = formData.get('monthly_boarding_rate') as string
+    const photoFile = formData.get('photo') as File | null
 
     const supabaseClient = await createClient()
 
@@ -75,6 +67,32 @@ export default async function NewAnimalPage({
 
     if (!currentFarm) return redirect('/onboarding')
 
+    let photo_url: string | null = null
+
+    // Upload Photo to Supabase Storage if selected
+    if (photoFile && photoFile.size > 0) {
+      const fileExt = photoFile.name.split('.').pop() || 'jpg'
+      const fileName = `${currentFarm.id}/${tag_id}-${Date.now()}.${fileExt}`
+
+      const { error: uploadError } = await supabaseClient.storage
+        .from('animal-photos')
+        .upload(fileName, photoFile, {
+          cacheControl: '3600',
+          upsert: false,
+        })
+
+      if (uploadError) {
+        console.error('Photo Upload Error:', uploadError.message)
+        return redirect(`/animals/new?error=${encodeURIComponent('Photo upload failed: ' + uploadError.message)}`)
+      }
+
+      const { data: publicUrlData } = supabaseClient.storage
+        .from('animal-photos')
+        .getPublicUrl(fileName)
+
+      photo_url = publicUrlData.publicUrl
+    }
+
     const insertData: Record<string, any> = {
       farm_id: currentFarm.id,
       tag_id,
@@ -85,6 +103,7 @@ export default async function NewAnimalPage({
       status,
       cost_basis: cost_basis ? parseFloat(cost_basis) : 0,
       monthly_boarding_rate: ownership === 'Client' && monthly_boarding_rate ? parseFloat(monthly_boarding_rate) : 0,
+      photo_url,
     }
 
     if (breed_name) insertData.breed_name = breed_name
@@ -108,7 +127,7 @@ export default async function NewAnimalPage({
         <div className="mb-6 flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Register New Animal</h1>
-            <p className="text-sm text-slate-500 mt-0.5">Add multi-species livestock inventory with dynamic ownership rules.</p>
+            <p className="text-sm text-slate-500 mt-0.5">Add visual profile, multi-species classification & ownership terms.</p>
           </div>
           <Link
             href="/animals"
@@ -128,9 +147,33 @@ export default async function NewAnimalPage({
 
           <form action={registerAnimal} className="p-6 sm:p-8 space-y-6">
             
+            {/* Section 0: Visual Identification (Photo Upload) */}
+            <div>
+              <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-4">1. Visual Identification</h2>
+              <div className="flex items-center gap-5 p-4 bg-slate-50 border border-dashed border-slate-300 rounded-xl">
+                <div className="h-20 w-20 rounded-xl bg-white border border-slate-200 flex items-center justify-center overflow-hidden shrink-0 shadow-sm">
+                  <img id="photo-preview" src="" alt="Preview" className="h-full w-full object-cover hidden" />
+                  <span id="photo-placeholder" className="text-2xl text-slate-400">📷</span>
+                </div>
+                <div className="flex-1">
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Animal Photo (Optional)</label>
+                  <input
+                    name="photo"
+                    type="file"
+                    accept="image/*"
+                    id="photo-input"
+                    className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-green-50 file:text-green-700 hover:file:bg-green-100 transition cursor-pointer"
+                  />
+                  <p className="text-xs text-slate-400 mt-1">JPG, PNG or WEBP. Helps identify animals quickly in master view.</p>
+                </div>
+              </div>
+            </div>
+
+            <hr className="border-slate-100" />
+
             {/* Section 1: Identification & Classification */}
             <div>
-              <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-4">1. Identification & Classification</h2>
+              <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-4">2. Identification & Classification</h2>
               <div className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">
@@ -190,17 +233,17 @@ export default async function NewAnimalPage({
 
             {/* Section 2: Ownership & Financial Terms */}
             <div>
-              <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-4">2. Ownership & Financial Terms</h2>
+              <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-4">3. Ownership & Financial Terms</h2>
               <div className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-2">Ownership Structure</label>
                   <div className="grid grid-cols-2 gap-4">
-                    <label className="relative flex items-center p-3 rounded-xl border border-slate-200 bg-slate-50 cursor-pointer hover:bg-slate-100 transition">
-                      <input type="radio" name="ownership" value="Self" defaultChecked id="ownership-self" className="peer sr-only" />
+                    <label className="relative flex items-center gap-2.5 p-3 rounded-xl border border-slate-200 bg-slate-50 cursor-pointer hover:bg-slate-100 transition">
+                      <input type="radio" name="ownership" value="Self" defaultChecked className="accent-green-600 h-4 w-4" />
                       <span className="text-sm font-medium text-slate-800">Self (Farm Owned)</span>
                     </label>
-                    <label className="relative flex items-center p-3 rounded-xl border border-slate-200 bg-slate-50 cursor-pointer hover:bg-slate-100 transition">
-                      <input type="radio" name="ownership" value="Client" id="ownership-client" className="peer sr-only" />
+                    <label className="relative flex items-center gap-2.5 p-3 rounded-xl border border-slate-200 bg-slate-50 cursor-pointer hover:bg-slate-100 transition">
+                      <input type="radio" name="ownership" value="Client" className="accent-purple-600 h-4 w-4" />
                       <span className="text-sm font-medium text-slate-800">Palai (Client Owned)</span>
                     </label>
                   </div>
@@ -250,7 +293,7 @@ export default async function NewAnimalPage({
 
             {/* Section 3: Timeline & Status */}
             <div>
-              <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-4">3. Timeline & Status</h2>
+              <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-4">4. Timeline & Status</h2>
               <div className="space-y-4">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
@@ -305,16 +348,27 @@ export default async function NewAnimalPage({
         </div>
       </div>
 
-      {/* Tiny client script for toggle visibility of Palai section */}
+      {/* Client Script for Palai Toggle + Live Photo Preview */}
       <script dangerouslySetInnerHTML={{ __html: `
         document.addEventListener('change', function(e) {
           if (e.target.name === 'ownership') {
-            const palaiSection = document.getElementById('palai-space') || document.getElementById('palai-section');
-            if (e.target.value === 'Client') {
-              palaiSection.style.display = 'block';
-            } else {
-              palaiSection.style.display = 'none';
+            const palaiSection = document.getElementById('palai-section');
+            if (palaiSection) {
+              palaiSection.style.display = e.target.value === 'Client' ? 'block' : 'none';
             }
+          }
+          if (e.target.id === 'photo-input' && e.target.files && e.target.files[0]) {
+            const reader = new FileReader();
+            reader.onload = function(ev) {
+              const img = document.getElementById('photo-preview');
+              const placeholder = document.getElementById('photo-placeholder');
+              if (img && placeholder) {
+                img.src = ev.target.result;
+                img.classList.remove('hidden');
+                placeholder.classList.add('hidden');
+              }
+            };
+            reader.readAsDataURL(e.target.files[0]);
           }
         });
       ` }} />
