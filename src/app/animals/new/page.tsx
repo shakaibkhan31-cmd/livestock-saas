@@ -1,7 +1,14 @@
 import { createClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
 
-export default function NewAnimalPage() {
+export default async function NewAnimalPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string }>
+}) {
+  const params = await searchParams
+  const errorMessage = params.error
+
   const registerAnimal = async (formData: FormData) => {
     'use server'
     const tag_id = formData.get('tag_id') as string
@@ -29,25 +36,26 @@ export default function NewAnimalPage() {
 
     if (!farm) return redirect('/onboarding')
 
-    const insertData = {
+    // Sirf wohi fields bhej rahe hain jo table mein confirm hain
+    const insertData: any = {
       farm_id: farm.id,
       tag_id,
       species,
       ownership,
       client_name: ownership === 'Palai' ? (client_name || 'Client') : null,
       sex,
-      dob: dob || null,
-      acquisition_date: acquisition_date || new Date().toISOString().split('T')[0],
       cost_basis: cost_basis ? parseFloat(cost_basis) : 0,
       monthly_boarding_rate: monthly_boarding_rate ? parseFloat(monthly_boarding_rate) : 0,
-      status: 'Active',
     }
+
+    if (dob) insertData.dob = dob
+    if (acquisition_date) insertData.acquisition_date = acquisition_date
 
     const { error } = await supabase.from('livestock_master').insert([insertData])
 
     if (error) {
-      console.error('Supabase Insert Error:', error)
-      throw new Error(`Failed to insert animal: ${error.message}`)
+      console.error('Supabase Insert Error:', error.message)
+      return redirect(`/animals/new?error=${encodeURIComponent(error.message)}`)
     }
 
     return redirect('/animals')
@@ -57,6 +65,13 @@ export default function NewAnimalPage() {
     <div className="min-h-screen bg-gray-50 flex flex-col justify-center items-center py-12">
       <div className="bg-white p-8 rounded-lg shadow-md w-full max-w-lg">
         <h1 className="text-2xl font-bold text-gray-800 mb-6">Register New Animal</h1>
+
+        {errorMessage && (
+          <div className="mb-4 p-3 bg-red-100 text-red-700 rounded-md text-sm border border-red-300">
+            <strong>Database Error:</strong> {decodeURIComponent(errorMessage)}
+          </div>
+        )}
+
         <form action={registerAnimal} className="flex flex-col gap-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Tag ID / Ear Tag</label>
@@ -115,7 +130,6 @@ export default function NewAnimalPage() {
               <input 
                 name="acquisition_date" 
                 type="date" 
-                required
                 className="w-full px-4 py-2 border rounded-md focus:ring-2 focus:ring-green-500" 
               />
             </div>
