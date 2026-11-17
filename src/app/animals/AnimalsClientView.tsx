@@ -19,153 +19,448 @@ interface Animal {
 interface AnimalsClientViewProps {
   animals: Animal[]
   deleteAction: (formData: FormData) => Promise<void>
+  bulkUpdateAction: (formData: FormData) => Promise<void>
+  bulkImportAction: (formData: FormData) => Promise<void>
 }
 
-export default function AnimalsClientView({ animals, deleteAction }: AnimalsClientViewProps) {
+export default function AnimalsClientView({
+  animals,
+  deleteAction,
+  bulkUpdateAction,
+  bulkImportAction,
+}: AnimalsClientViewProps) {
   const [searchQuery, setSearchQuery] = useState('')
   const [filterOwnership, setFilterOwnership] = useState('All')
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [showImportModal, setShowImportModal] = useState(false)
+  const [parsedRows, setParsedRows] = useState<Array<Record<string, string>>>([])
+  const [csvError, setCsvError] = useState('')
 
+  // Filter animals
   const filteredAnimals = animals.filter(animal => {
-    const matchesSearch = 
+    const matchesSearch =
       animal.tag_id.toLowerCase().includes(searchQuery.toLowerCase()) ||
       animal.species.toLowerCase().includes(searchQuery.toLowerCase()) ||
       (animal.breed_name && animal.breed_name.toLowerCase().includes(searchQuery.toLowerCase())) ||
       (animal.client_name && animal.client_name.toLowerCase().includes(searchQuery.toLowerCase()))
 
     const matchesOwnership = filterOwnership === 'All' || animal.ownership === filterOwnership
-
     return matchesSearch && matchesOwnership
   })
 
+  // Toggle Single Checkbox
+  const toggleSelect = (id: string) => {
+    setSelectedIds(prev =>
+      prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]
+    )
+  }
+
+  // Toggle Select All Visible
+  const toggleSelectAll = () => {
+    if (selectedIds.length === filteredAnimals.length && filteredAnimals.length > 0) {
+      setSelectedIds([])
+    } else {
+      setSelectedIds(filteredAnimals.map(a => a.id))
+    }
+  }
+
+  // Download Sample CSV Template
+  const downloadSampleCsv = () => {
+    const headers = 'tag_id,species,breed_name,sex,ownership,client_name,cost_basis,monthly_boarding_rate,acquisition_date'
+    const sample1 = 'G-08,Goat,Gulabi,Male,Self,,28000,0,2026-11-17'
+    const sample2 = 'G-09,Goat,Kamori,Male,Client,Zainab,0,5000,2026-11-17'
+    const csvContent = 'data:text/csv;charset=utf-8,' + [headers, sample1, sample2].join('\n')
+    const encodedUri = encodeURI(csvContent)
+    const link = document.createElement('a')
+    link.setAttribute('href', encodedUri)
+    link.setAttribute('download', 'baabaashed_bulk_template.csv')
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+
+  // Parse Uploaded CSV File
+  const handleCsvFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setCsvError('')
+    setParsedRows([])
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result as string
+        const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+        if (lines.length < 2) {
+          setCsvError('CSV file must contain a header row and at least one data row.')
+          return
+        }
+
+        const headers = lines[0].split(',').map(h => h.trim().toLowerCase())
+        const rows = lines.slice(1).map(line => {
+          const values = line.split(',')
+          const obj: Record<string, string> = {}
+          headers.forEach((h, i) => {
+            obj[h] = values[i] ? values[i].trim() : ''
+          })
+          return obj
+        })
+
+        setParsedRows(rows)
+      } catch (err) {
+        setCsvError('Failed to parse CSV file. Please use the sample template format.')
+      }
+    }
+    reader.readAsText(file)
+  }
+
+  // Export Current Filtered Stock to CSV
+  const exportFilteredCsv = () => {
+    const headers = ['Tag ID', 'Species', 'Breed', 'Ownership', 'Client Name', 'Sex', 'Status', 'Cost Basis (PKR)']
+    const rows = filteredAnimals.map(a => [
+      a.tag_id,
+      a.species,
+      a.breed_name || '',
+      a.ownership,
+      a.client_name || '',
+      a.sex,
+      a.status,
+      a.cost_basis || 0,
+    ])
+    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(r => r.join(','))].join('\n')
+    const link = document.createElement('a')
+    link.setAttribute('href', encodeURI(csvContent))
+    link.setAttribute('download', `livestock_export_${new Date().toISOString().split('T')[0]}.csv`)
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+
   return (
-    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+    <div className="space-y-4">
       
-      {/* Search & Filter Bar */}
-      <div className="p-4 sm:p-6 border-b border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-4 bg-slate-50/50">
-        <div className="w-full sm:w-80">
-          <input
-            type="text"
-            placeholder="Search by Tag ID, Species, Breed, Client..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full px-4 py-2 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-600 transition"
-          />
+      {/* Multi-Select Bulk Action Bar (Appears when 1+ animals selected) */}
+      {selectedIds.length > 0 && (
+        <div className="bg-slate-900 text-white px-5 py-3.5 rounded-2xl shadow-lg flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <span className="px-2.5 py-1 bg-green-500 text-slate-950 font-bold text-xs rounded-lg">
+              {selectedIds.length} Selected
+            </span>
+            <span className="text-sm text-slate-300">Apply bulk status change or action:</span>
+          </div>
+
+          <form action={bulkUpdateAction} className="flex flex-wrap items-center gap-2">
+            <input type="hidden" name="selectedIds" value={JSON.stringify(selectedIds)} />
+            
+            <button
+              type="submit"
+              name="bulkAction"
+              value="Sold"
+              className="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-semibold text-xs rounded-lg transition"
+            >
+              Mark Sold
+            </button>
+            <button
+              type="submit"
+              name="bulkAction"
+              value="Returned"
+              className="px-3 py-1.5 bg-purple-500 hover:bg-purple-600 text-white font-semibold text-xs rounded-lg transition"
+            >
+              Mark Returned
+            </button>
+            <button
+              type="submit"
+              name="bulkAction"
+              value="Deceased"
+              className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-200 font-semibold text-xs rounded-lg transition"
+            >
+              Mark Deceased
+            </button>
+            <button
+              type="submit"
+              name="bulkAction"
+              value="DELETE"
+              className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-semibold text-xs rounded-lg transition"
+            >
+              Delete Selected
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedIds([])}
+              className="px-2.5 py-1.5 text-slate-400 hover:text-white text-xs"
+            >
+              Clear
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* Main Card */}
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        
+        {/* Search, Filter & Bulk CSV Toolbar */}
+        <div className="p-4 sm:p-6 border-b border-slate-100 flex flex-col lg:flex-row items-center justify-between gap-4 bg-slate-50/50">
+          <div className="w-full lg:w-80">
+            <input
+              type="text"
+              placeholder="Search by Tag ID, Species, Breed, Client..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full px-4 py-2 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-600 transition"
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto justify-between lg:justify-end">
+            {/* Ownership Filter Pills */}
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => setFilterOwnership('All')}
+                className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${
+                  filterOwnership === 'All' ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                All Stock
+              </button>
+              <button
+                onClick={() => setFilterOwnership('Self')}
+                className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${
+                  filterOwnership === 'Self' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                Self Owned
+              </button>
+              <button
+                onClick={() => setFilterOwnership('Client')}
+                className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${
+                  filterOwnership === 'Client' ? 'bg-purple-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                Palai (Client)
+              </button>
+            </div>
+
+            <div className="h-5 w-px bg-slate-200 hidden sm:block mx-1"></div>
+
+            {/* Bulk Import & Export Buttons */}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowImportModal(true)}
+                className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition"
+              >
+                ↑ Bulk CSV Import
+              </button>
+              <button
+                type="button"
+                onClick={exportFilteredCsv}
+                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-white text-slate-700 border border-slate-200 hover:bg-slate-100 transition"
+              >
+                ↓ Export CSV
+              </button>
+            </div>
+          </div>
         </div>
 
-        <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
-          <button
-            onClick={() => setFilterOwnership('All')}
-            className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${
-              filterOwnership === 'All' ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
-            }`}
-          >
-            All Stock
-          </button>
-          <button
-            onClick={() => setFilterOwnership('Self')}
-            className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${
-              filterOwnership === 'Self' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
-            }`}
-          >
-            Self Owned
-          </button>
-          <button
-            onClick={() => setFilterOwnership('Client')}
-            className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${
-              filterOwnership === 'Client' ? 'bg-purple-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
-            }`}
-          >
-            Palai (Client)
-          </button>
-        </div>
-      </div>
-
-      {/* Table */}
-      <div className="overflow-x-auto">
-        <table className="min-w-full divide-y divide-slate-100">
-          <thead className="bg-slate-50">
-            <tr>
-              <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Animal / Tag ID</th>
-              <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Species & Breed</th>
-              <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Ownership</th>
-              <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Sex</th>
-              <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Status</th>
-              <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Cost Basis (PKR)</th>
-              <th className="px-6 py-3.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wider">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="bg-white divide-y divide-slate-100">
-            {filteredAnimals.length > 0 ? (
-              filteredAnimals.map((animal) => (
-                <tr key={animal.id} className="hover:bg-slate-50/80 transition-colors">
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="flex items-center gap-3">
-                      <div className="h-10 w-10 rounded-xl bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center shrink-0">
-                        {animal.photo_url ? (
-                          <img src={animal.photo_url} alt={animal.tag_id} className="h-full w-full object-cover" />
-                        ) : (
-                          <span className="text-base">🐐</span>
-                        )}
-                      </div>
-                      <Link 
-                        href={`/animals/${animal.id}`}
-                        className="font-mono font-semibold text-green-700 hover:text-green-800 hover:underline bg-green-50 px-2.5 py-1 rounded-lg border border-green-200 inline-block"
-                      >
-                        {animal.tag_id}
-                      </Link>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="text-sm font-medium text-slate-800">{animal.species}</div>
-                    {animal.breed_name && <div className="text-xs text-slate-400">{animal.breed_name}</div>}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <span className={`inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-full ${
-                      animal.ownership === 'Self' 
-                        ? 'bg-blue-50 text-blue-700 border border-blue-200' 
-                        : 'bg-purple-50 text-purple-700 border border-purple-200'
-                    }`}>
-                      {animal.ownership} {animal.client_name ? `(${animal.client_name})` : ''}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-600">{animal.sex}</td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <span className="inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-                      {animal.status}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-slate-900">
-                    Rs. {Number(animal.cost_basis || 0).toLocaleString()}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2">
-                    <Link
-                      href={`/animals/${animal.id}/edit`}
-                      className="inline-flex items-center px-3 py-1.5 rounded-lg text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 transition text-xs font-medium"
+        {/* Table */}
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-slate-100">
+            <thead className="bg-slate-50">
+              <tr>
+                <th className="px-4 py-3.5 text-left w-10">
+                  <input
+                    type="checkbox"
+                    checked={filteredAnimals.length > 0 && selectedIds.length === filteredAnimals.length}
+                    onChange={toggleSelectAll}
+                    className="h-4 w-4 rounded border-slate-300 accent-green-600 cursor-pointer"
+                  />
+                </th>
+                <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Animal / Tag ID</th>
+                <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Species & Breed</th>
+                <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Ownership</th>
+                <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Sex</th>
+                <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Status</th>
+                <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Cost Basis (PKR)</th>
+                <th className="px-6 py-3.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wider">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="bg-white divide-y divide-slate-100">
+              {filteredAnimals.length > 0 ? (
+                filteredAnimals.map((animal) => {
+                  const isChecked = selectedIds.includes(animal.id)
+                  return (
+                    <tr
+                      key={animal.id}
+                      className={`transition-colors ${isChecked ? 'bg-green-50/50' : 'hover:bg-slate-50/80'}`}
                     >
-                      Edit
-                    </Link>
-                    <form action={deleteAction} className="inline-block">
-                      <input type="hidden" name="animalId" value={animal.id} />
-                      <button
-                        type="submit"
-                        className="inline-flex items-center px-3 py-1.5 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 transition text-xs font-medium"
-                      >
-                        Delete
-                      </button>
-                    </form>
+                      <td className="px-4 py-4 whitespace-nowrap">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => toggleSelect(animal.id)}
+                          className="h-4 w-4 rounded border-slate-300 accent-green-600 cursor-pointer"
+                        />
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center gap-3">
+                          <div className="h-10 w-10 rounded-xl bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center shrink-0">
+                            {animal.photo_url ? (
+                              <img src={animal.photo_url} alt={animal.tag_id} className="h-full w-full object-cover" />
+                            ) : (
+                              <span className="text-base">🐐</span>
+                            )}
+                          </div>
+                          <Link
+                            href={`/animals/${animal.id}`}
+                            className="font-mono font-semibold text-green-700 hover:text-green-800 hover:underline bg-green-50 px-2.5 py-1 rounded-lg border border-green-200 inline-block"
+                          >
+                            {animal.tag_id}
+                          </Link>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm font-medium text-slate-800">{animal.species}</div>
+                        {animal.breed_name && <div className="text-xs text-slate-400">{animal.breed_name}</div>}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <span className={`inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-full ${
+                          animal.ownership === 'Self'
+                            ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                            : 'bg-purple-50 text-purple-700 border border-purple-200'
+                        }`}>
+                          {animal.ownership} {animal.client_name ? `(${animal.client_name})` : ''}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-600">{animal.sex}</td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <span className="inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                          {animal.status}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-slate-900">
+                        Rs. {Number(animal.cost_basis || 0).toLocaleString()}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2">
+                        <Link
+                          href={`/animals/${animal.id}/edit`}
+                          className="inline-flex items-center px-3 py-1.5 rounded-lg text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 transition text-xs font-medium"
+                        >
+                          Edit
+                        </Link>
+                        <form action={deleteAction} className="inline-block">
+                          <input type="hidden" name="animalId" value={animal.id} />
+                          <button
+                            type="submit"
+                            className="inline-flex items-center px-3 py-1.5 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 transition text-xs font-medium"
+                          >
+                            Delete
+                          </button>
+                        </form>
+                      </td>
+                    </tr>
+                  )
+                })
+              ) : (
+                <tr>
+                  <td colSpan={8} className="px-6 py-12 text-center text-slate-500">
+                    No animals found matching your search or filter.
                   </td>
                 </tr>
-              ))
-            ) : (
-              <tr>
-                <td colSpan={7} className="px-6 py-12 text-center text-slate-500">
-                  No animals found matching your search or filter.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
+
+      {/* Bulk CSV Import Modal */}
+      {showImportModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-lg w-full overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+              <h3 className="text-base font-bold text-slate-900">Bulk Import Animals via CSV</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowImportModal(false)
+                  setParsedRows([])
+                  setCsvError('')
+                }}
+                className="text-slate-400 hover:text-slate-700 font-bold text-lg"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-semibold text-slate-800">Step 1: Download Sample Template</p>
+                  <p className="text-[11px] text-slate-500">Fill your Mandi purchase or Palai batch in Excel/CSV.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={downloadSampleCsv}
+                  className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold rounded-lg transition"
+                >
+                  Download CSV
+                </button>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Step 2: Upload Filled CSV File</label>
+                <input
+                  type="file"
+                  accept=".csv"
+                  onChange={handleCsvFileUpload}
+                  className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-green-50 file:text-green-700 hover:file:bg-green-100 cursor-pointer"
+                />
+              </div>
+
+              {csvError && (
+                <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xl">
+                  {csvError}
+                </div>
+              )}
+
+              {parsedRows.length > 0 && (
+                <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl space-y-2">
+                  <p className="text-xs font-semibold text-emerald-800">
+                    Ready to import {parsedRows.length} animal record(s):
+                  </p>
+                  <div className="max-h-32 overflow-y-auto text-xs text-emerald-700 font-mono space-y-1">
+                    {parsedRows.map((row, idx) => (
+                      <div key={idx}>
+                        • {row.tag_id || 'Auto-Tag'} — {row.species || 'Goat'} ({row.ownership || 'Self'})
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <form action={bulkImportAction} className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                <input type="hidden" name="csvRows" value={JSON.stringify(parsedRows)} />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowImportModal(false)
+                    setParsedRows([])
+                  }}
+                  className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-medium hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={parsedRows.length === 0}
+                  onClick={() => setShowImportModal(false)}
+                  className="px-5 py-2 rounded-xl bg-green-600 text-white text-xs font-semibold hover:bg-green-700 disabled:opacity-40 transition"
+                >
+                  Import {parsedRows.length > 0 ? `${parsedRows.length} Animals` : ''}
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   )

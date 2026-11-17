@@ -3,7 +3,15 @@ import { redirect } from 'next/navigation'
 import Link from 'next/link'
 import AnimalsClientView from './AnimalsClientView'
 
-export default async function AnimalsPage() {
+export default async function AnimalsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ msg?: string; error?: string }>
+}) {
+  const params = await searchParams
+  const statusMsg = params.msg
+  const errorMsg = params.error
+
   const supabase = await createClient()
 
   const { data: { user } } = await supabase.auth.getUser()
@@ -25,7 +33,7 @@ export default async function AnimalsPage() {
     .eq('status', 'Active')
     .order('created_at', { ascending: false })
 
-  // Delete Server Action
+  // 1. Single Delete Server Action
   async function deleteAnimal(formData: FormData) {
     'use server'
     const animalId = formData.get('animalId') as string
@@ -37,6 +45,92 @@ export default async function AnimalsPage() {
       .eq('id', animalId)
 
     return redirect('/animals')
+  }
+
+  // 2. Bulk Status Update / Delete Server Action
+  async function bulkUpdateAnimals(formData: FormData) {
+    'use server'
+    const idsRaw = formData.get('selectedIds') as string
+    const bulkAction = formData.get('bulkAction') as string
+
+    if (!idsRaw || !bulkAction) return redirect('/animals')
+    const ids = JSON.parse(idsRaw) as string[]
+    if (ids.length === 0) return redirect('/animals')
+
+    const supabaseClient = await createClient()
+
+    if (bulkAction === 'DELETE') {
+      const { error } = await supabaseClient
+        .from('livestock_master')
+        .delete()
+        .in('id', ids)
+
+      if (error) return redirect(`/animals?error=${encodeURIComponent(error.message)}`)
+      return redirect(`/animals?msg=${encodeURIComponent(`${ids.length} animal(s) deleted successfully.`)}`)
+    } else {
+      const { error } = await supabaseClient
+        .from('livestock_master')
+        .update({ status: bulkAction })
+        .in('id', ids)
+
+      if (error) return redirect(`/animals?error=${encodeURIComponent(error.message)}`)
+      return redirect(`/animals?msg=${encodeURIComponent(`${ids.length} animal(s) marked as ${bulkAction}.`)}`)
+    }
+  }
+
+  // 3. Bulk CSV Import Server Action
+  async function bulkImportCsv(formData: FormData) {
+    'use server'
+    const csvRowsRaw = formData.get('csvRows') as string
+    if (!csvRowsRaw) return redirect('/animals?error=No+CSV+data+provided')
+
+    const rows = JSON.parse(csvRowsRaw) as Array<Record<string, string>>
+    if (!rows || rows.length === 0) return redirect('/animals?error=CSV+file+is+empty')
+
+    const supabaseClient = await createClient()
+    const { data: { user: currentUser } } = await supabaseClient.auth.getUser()
+    if (!currentUser) return redirect('/login')
+
+    const { data: currentFarm } = await supabaseClient
+      .from('farms')
+      .select('id')
+      .eq('owner_id', currentUser.id)
+      .single()
+
+    if (!currentFarm) return redirect('/onboarding')
+
+    const today = new Date().toISOString().split('T')[0]
+
+    const recordsToInsert = rows.map((r, idx) => {
+      const rawOwn = (r.ownership || 'Self').trim()
+      const ownership = rawOwn.toLowerCase().includes('client') || rawOwn.toLowerCase().includes('palai')
+        ? 'Client'
+        : 'Self'
+
+      return {
+        farm_id: currentFarm.id,
+        tag_id: (r.tag_id || `IMP-${Date.now()}-${idx + 1}`).trim(),
+        species: (r.species || 'Goat').trim(),
+        breed_name: r.breed_name ? r.breed_name.trim() : null,
+        sex: (r.sex || 'Male').trim(),
+        ownership,
+        client_name: ownership === 'Client' ? (r.client_name?.trim() || 'Client') : null,
+        cost_basis: r.cost_basis ? parseFloat(r.cost_basis) || 0 : 0,
+        monthly_boarding_rate: ownership === 'Client' && r.monthly_boarding_rate ? parseFloat(r.monthly_boarding_rate) || 0 : 0,
+        acquisition_date: r.acquisition_date?.trim() || today,
+        status: 'Active',
+      }
+    })
+
+    const { error } = await supabaseClient
+      .from('livestock_master')
+      .insert(recordsToInsert)
+
+    if (error) {
+      return redirect(`/animals?error=${encodeURIComponent('CSV Import Failed: ' + error.message)}`)
+    }
+
+    return redirect(`/animals?msg=${encodeURIComponent(`Successfully imported ${recordsToInsert.length} animals!`)}`)
   }
 
   // Calculate Quick Stats
@@ -70,6 +164,20 @@ export default async function AnimalsPage() {
           </Link>
         </div>
 
+        {/* Feedback Banners */}
+        {statusMsg && (
+          <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-2xl text-sm flex items-center justify-between">
+            <span><strong>Success:</strong> {decodeURIComponent(statusMsg)}</span>
+            <Link href="/animals" className="text-emerald-600 font-bold hover:text-emerald-900">×</Link>
+          </div>
+        )}
+        {errorMsg && (
+          <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-2xl text-sm flex items-center justify-between">
+            <span><strong>Error:</strong> {decodeURIComponent(errorMsg)}</span>
+            <Link href="/animals" className="text-red-500 font-bold hover:text-red-800">×</Link>
+          </div>
+        )}
+
         {/* Quick KPI Summary Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
@@ -90,8 +198,13 @@ export default async function AnimalsPage() {
           </div>
         </div>
 
-        {/* Interactive Search & Table Component */}
-        <AnimalsClientView animals={animals || []} deleteAction={deleteAnimal} />
+        {/* Interactive Search, Bulk Import & Multi-Select Table */}
+        <AnimalsClientView
+          animals={animals || []}
+          deleteAction={deleteAnimal}
+          bulkUpdateAction={bulkUpdateAnimals}
+          bulkImportAction={bulkImportCsv}
+        />
 
       </div>
     </div>
