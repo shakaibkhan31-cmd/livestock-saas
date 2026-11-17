@@ -37,12 +37,19 @@ export default async function AnimalDetailPage({
 
   if (!animal) return redirect('/animals')
 
-  // Fetch weight logs for this animal
+  // Fetch weight logs
   const { data: weightLogs } = await supabase
     .from('animal_weight_logs')
     .select('*')
     .eq('animal_id', id)
     .order('recorded_date', { ascending: false })
+
+  // Fetch financial logs
+  const { data: financialLogs } = await supabase
+    .from('animal_financial_logs')
+    .select('*')
+    .eq('animal_id', id)
+    .order('transaction_date', { ascending: false })
 
   // 1. Server Action: Add Weight Log
   const addWeightLog = async (formData: FormData) => {
@@ -52,7 +59,6 @@ export default async function AnimalDetailPage({
     const notes = formData.get('notes') as string
 
     const supabaseClient = await createClient()
-
     const { error } = await supabaseClient.from('animal_weight_logs').insert([{
       animal_id: id,
       farm_id: farm.id,
@@ -61,10 +67,7 @@ export default async function AnimalDetailPage({
       notes: notes || null,
     }])
 
-    if (error) {
-      return redirect(`/animals/${id}?error=${encodeURIComponent(error.message)}`)
-    }
-
+    if (error) return redirect(`/animals/${id}?error=${encodeURIComponent(error.message)}`)
     return redirect(`/animals/${id}`)
   }
 
@@ -77,7 +80,6 @@ export default async function AnimalDetailPage({
     const notes = formData.get('notes') as string
 
     const supabaseClient = await createClient()
-
     const { error } = await supabaseClient
       .from('animal_weight_logs')
       .update({
@@ -88,10 +90,7 @@ export default async function AnimalDetailPage({
       .eq('id', logId)
       .eq('animal_id', id)
 
-    if (error) {
-      return redirect(`/animals/${id}?error=${encodeURIComponent(error.message)}`)
-    }
-
+    if (error) return redirect(`/animals/${id}?error=${encodeURIComponent(error.message)}`)
     return redirect(`/animals/${id}`)
   }
 
@@ -107,10 +106,47 @@ export default async function AnimalDetailPage({
       .eq('id', logId)
       .eq('animal_id', id)
 
-    if (error) {
-      return redirect(`/animals/${id}?error=${encodeURIComponent(error.message)}`)
-    }
+    if (error) return redirect(`/animals/${id}?error=${encodeURIComponent(error.message)}`)
+    return redirect(`/animals/${id}`)
+  }
 
+  // 4. Server Action: Add Financial Transaction
+  const addFinancialLog = async (formData: FormData) => {
+    'use server'
+    const entry_type = formData.get('entry_type') as string
+    const category = formData.get('category') as string
+    const amount = formData.get('amount') as string
+    const transaction_date = formData.get('transaction_date') as string
+    const notes = formData.get('notes') as string
+
+    const supabaseClient = await createClient()
+    const { error } = await supabaseClient.from('animal_financial_logs').insert([{
+      animal_id: id,
+      farm_id: farm.id,
+      entry_type,
+      category,
+      amount: parseFloat(amount),
+      transaction_date: transaction_date || new Date().toISOString().split('T')[0],
+      notes: notes || null,
+    }])
+
+    if (error) return redirect(`/animals/${id}?error=${encodeURIComponent(error.message)}`)
+    return redirect(`/animals/${id}`)
+  }
+
+  // 5. Server Action: Delete Financial Transaction
+  const deleteFinancialLog = async (formData: FormData) => {
+    'use server'
+    const finId = formData.get('finId') as string
+    const supabaseClient = await createClient()
+
+    const { error } = await supabaseClient
+      .from('animal_financial_logs')
+      .delete()
+      .eq('id', finId)
+      .eq('animal_id', id)
+
+    if (error) return redirect(`/animals/${id}?error=${encodeURIComponent(error.message)}`)
     return redirect(`/animals/${id}`)
   }
 
@@ -119,7 +155,19 @@ export default async function AnimalDetailPage({
   const initialWeight = weightLogs && weightLogs.length > 0 ? Number(weightLogs[weightLogs.length - 1].weight_kg) : null
   const netGain = latestWeight !== null && initialWeight !== null ? (latestWeight - initialWeight).toFixed(1) : null
 
-  // QR Code URL pointing directly to this animal's live profile
+  // Financial & P&L Calculations
+  const purchaseCost = Number(animal.cost_basis || 0)
+  const loggedExpenses = (financialLogs || [])
+    .filter(f => f.entry_type === 'Expense')
+    .reduce((sum, f) => sum + Number(f.amount || 0), 0)
+  const loggedRevenue = (financialLogs || [])
+    .filter(f => f.entry_type === 'Revenue')
+    .reduce((sum, f) => sum + Number(f.amount || 0), 0)
+
+  const totalCostOutflow = (animal.ownership === 'Self' ? purchaseCost : 0) + loggedExpenses
+  const netPnL = loggedRevenue - totalCostOutflow
+
+  // QR Code URL
   const animalProfileUrl = `https://livestock-saas.vercel.app/animals/${animal.id}`
   const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(animalProfileUrl)}`
 
@@ -172,7 +220,7 @@ export default async function AnimalDetailPage({
           </div>
         )}
 
-        {/* Grid Layout: Left Profile + QR Tag | Right Weight Logs */}
+        {/* Grid Layout: Left Profile + QR Tag | Right Weight & Financial Ledgers */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           
           {/* Left Column */}
@@ -190,7 +238,7 @@ export default async function AnimalDetailPage({
 
               <div>
                 <p className="text-xs text-slate-500">Cost Basis / Purchase Price</p>
-                <p className="text-sm font-semibold text-slate-900 mt-0.5">Rs. {Number(animal.cost_basis || 0).toLocaleString()}</p>
+                <p className="text-sm font-semibold text-slate-900 mt-0.5">Rs. {purchaseCost.toLocaleString()}</p>
               </div>
 
               {animal.ownership === 'Client' && (
@@ -208,7 +256,7 @@ export default async function AnimalDetailPage({
               </div>
             </div>
 
-            {/* Phase 3: Smart QR Code Ear Tag Card */}
+            {/* Smart QR Code Ear Tag Card */}
             <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm text-center space-y-4">
               <div className="flex items-center justify-between">
                 <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Smart QR Ear Tag</h3>
@@ -243,7 +291,7 @@ export default async function AnimalDetailPage({
             </div>
           </div>
 
-          {/* Right Column: Weight Logs & Growth Tracking */}
+          {/* Right Column: Weight Tracking & Automated Financial Ledger */}
           <div className="lg:col-span-2 space-y-6">
             
             {/* Growth Summary Mini-Bar */}
@@ -311,7 +359,7 @@ export default async function AnimalDetailPage({
               </form>
             </div>
 
-            {/* Weight History Table with Inline Edit & Delete */}
+            {/* Weight History Table */}
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
               <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
                 <h3 className="font-semibold text-slate-800 text-sm">Weight History & Growth Logs</h3>
@@ -410,6 +458,157 @@ export default async function AnimalDetailPage({
                       <tr>
                         <td colSpan={4} className="px-6 py-8 text-center text-slate-400 text-sm">
                           No weight logs recorded yet. Add the first weight entry above.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* PHASE 5: Automated Financial Ledger & Live P&L */}
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="px-6 py-4 border-b border-slate-100 bg-slate-900 text-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <div>
+                  <h3 className="font-bold text-sm">Automated Financial Ledger & P&L</h3>
+                  <p className="text-[11px] text-slate-400">Track per-animal expenses, Palai fees & real-time profitability</p>
+                </div>
+                <div className="flex items-center gap-3 text-xs font-mono">
+                  <span className="px-2.5 py-1 rounded-lg bg-slate-800 text-rose-300">
+                    Outflow: Rs. {totalCostOutflow.toLocaleString()}
+                  </span>
+                  <span className="px-2.5 py-1 rounded-lg bg-slate-800 text-emerald-300">
+                    Inflow: Rs. {loggedRevenue.toLocaleString()}
+                  </span>
+                  <span className={`px-2.5 py-1 rounded-lg font-bold ${netPnL >= 0 ? 'bg-emerald-500 text-slate-950' : 'bg-rose-500 text-white'}`}>
+                    Net P&L: {netPnL >= 0 ? `+Rs. ${netPnL.toLocaleString()}` : `-Rs. ${Math.abs(netPnL).toLocaleString()}`}
+                  </span>
+                </div>
+              </div>
+
+              {/* Add Financial Entry Form */}
+              <div className="p-6 border-b border-slate-100 bg-slate-50/50">
+                <form action={addFinancialLog} className="grid grid-cols-1 sm:grid-cols-5 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Type *</label>
+                    <select
+                      name="entry_type"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-medium focus:ring-2 focus:ring-green-600"
+                    >
+                      <option value="Expense">Expense (-)</option>
+                      <option value="Revenue">Revenue (+)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Category *</label>
+                    <select
+                      name="category"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-green-600"
+                    >
+                      <option value="Feed & Ration">Feed & Ration</option>
+                      <option value="Medicine & Vaccine">Medicine & Vaccine</option>
+                      <option value="Palai Monthly Fee">Palai Monthly Fee</option>
+                      <option value="Sale / Qurbani">Sale / Qurbani</option>
+                      <option value="Transport / Mandi">Transport / Mandi</option>
+                      <option value="Other">Other</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Amount (PKR) *</label>
+                    <input
+                      name="amount"
+                      type="number"
+                      step="1"
+                      required
+                      placeholder="e.g., 5000"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono focus:ring-2 focus:ring-green-600"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Date *</label>
+                    <input
+                      name="transaction_date"
+                      type="date"
+                      required
+                      defaultValue={new Date().toISOString().split('T')[0]}
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-green-600"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Notes</label>
+                    <div className="flex gap-1.5">
+                      <input
+                        name="notes"
+                        type="text"
+                        placeholder="Optional..."
+                        className="w-full px-2.5 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-green-600"
+                      />
+                      <button
+                        type="submit"
+                        className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold shrink-0 transition"
+                      >
+                        Add
+                      </button>
+                    </div>
+                  </div>
+                </form>
+              </div>
+
+              {/* Financial Transactions Table */}
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-slate-100">
+                  <thead className="bg-slate-50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Date</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Category</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Amount</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Notes</th>
+                      <th className="px-6 py-3 text-right text-xs font-semibold text-slate-500 uppercase">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-slate-100">
+                    {financialLogs && financialLogs.length > 0 ? (
+                      financialLogs.map((fin) => (
+                        <tr key={fin.id} className="hover:bg-slate-50 transition-colors">
+                          <td className="px-6 py-3.5 text-xs text-slate-700">
+                            {new Date(fin.transaction_date).toLocaleDateString()}
+                          </td>
+                          <td className="px-6 py-3.5">
+                            <span className={`inline-flex items-center px-2.5 py-0.5 text-[11px] font-semibold rounded-full ${
+                              fin.entry_type === 'Revenue'
+                                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                : 'bg-rose-50 text-rose-700 border border-rose-200'
+                            }`}>
+                              {fin.category}
+                            </span>
+                          </td>
+                          <td className={`px-6 py-3.5 text-xs font-bold font-mono ${
+                            fin.entry_type === 'Revenue' ? 'text-emerald-700' : 'text-rose-700'
+                          }`}>
+                            {fin.entry_type === 'Revenue' ? '+' : '-'} Rs. {Number(fin.amount).toLocaleString()}
+                          </td>
+                          <td className="px-6 py-3.5 text-xs text-slate-500">{fin.notes || '—'}</td>
+                          <td className="px-6 py-3.5 text-right">
+                            <form action={deleteFinancialLog} className="inline-block">
+                              <input type="hidden" name="finId" value={fin.id} />
+                              <button
+                                type="submit"
+                                className="px-2.5 py-1 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-xs font-medium transition"
+                              >
+                                Delete
+                              </button>
+                            </form>
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={5} className="px-6 py-8 text-center text-slate-400 text-xs">
+                          No financial transactions logged yet. Purchase Cost Basis (Rs. {purchaseCost.toLocaleString()}) is already factored into Net P&L.
                         </td>
                       </tr>
                     )}
