@@ -2,7 +2,32 @@ import { createClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
 import Link from 'next/link'
 
-export default async function FinancesPage() {
+// Helper: Consistent DD/MM/YYYY Date Formatter
+function formatDateDDMMYYYY(dateInput?: string | null): string {
+  if (!dateInput) return 'N/A'
+  const datePart = String(dateInput).split('T')[0]
+  const parts = datePart.split('-')
+  if (parts.length === 3) {
+    const [year, month, day] = parts
+    return `${day}/${month}/${year}`
+  }
+  const d = new Date(dateInput)
+  if (isNaN(d.getTime())) return 'N/A'
+  const day = String(d.getDate()).padStart(2, '0')
+  const month = String(d.getMonth() + 1).padStart(2, '0')
+  const year = d.getFullYear()
+  return `${day}/${month}/${year}`
+}
+
+export default async function FinancesPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ msg?: string; error?: string }>
+}) {
+  const params = await searchParams
+  const statusMsg = params.msg
+  const errorMsg = params.error
+
   const supabase = await createClient()
 
   const { data: { user } } = await supabase.auth.getUser()
@@ -45,7 +70,7 @@ export default async function FinancesPage() {
 
     const supabaseClient = await createClient()
 
-    await supabaseClient.from('transactions').insert([
+    const { error } = await supabaseClient.from('transactions').insert([
       {
         farm_id: farm.id,
         type,
@@ -55,76 +80,152 @@ export default async function FinancesPage() {
         description: description || null,
       },
     ])
+
+    if (error) {
+      return redirect(`/finances?error=${encodeURIComponent(error.message)}`)
+    }
+
+    return redirect(`/finances?msg=${encodeURIComponent('Transaction recorded successfully.')}`)
   }
 
+  // Server Action to Delete Transaction
+  const deleteTransaction = async (formData: FormData) => {
+    'use server'
+    const txnId = formData.get('txnId') as string
+    const supabaseClient = await createClient()
+
+    const { error } = await supabaseClient
+      .from('transactions')
+      .delete()
+      .eq('id', txnId)
+      .eq('farm_id', farm.id)
+
+    if (error) {
+      return redirect(`/finances?error=${encodeURIComponent(error.message)}`)
+    }
+
+    return redirect(`/finances?msg=${encodeURIComponent('Transaction deleted successfully.')}`)
+  }
+
+  const todayStr = new Date().toISOString().split('T')[0]
+
   return (
-    <div className="min-h-screen bg-gray-50 p-8">
-      <div className="max-w-6xl mx-auto">
-        <div className="mb-6 flex justify-between items-center">
+    <div className="min-h-screen bg-slate-50 py-10 px-4 sm:px-6 lg:px-8">
+      <div className="max-w-7xl mx-auto space-y-8">
+        
+        {/* Top Header */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
-            <Link href="/animals" className="text-green-600 hover:underline font-medium">
-              &larr; Back to Livestock Master
-            </Link>
-            <h1 className="text-3xl font-bold text-gray-800 mt-2">Financial Ledger & Billing</h1>
-            <p className="text-gray-500">Track farm income, boarding dues, and operational expenses</p>
+            <div className="flex items-center gap-2">
+              <span className="h-2.5 w-2.5 rounded-full bg-emerald-500"></span>
+              <span className="text-xs font-semibold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
+                Global Financial Ledger
+              </span>
+            </div>
+            <h1 className="text-3xl font-bold text-slate-900 tracking-tight mt-1">Financials & Billing</h1>
+            <p className="text-sm text-slate-500">Track farm income, boarding dues, and operational expenses</p>
           </div>
+
+          <Link
+            href="/animals"
+            className="inline-flex items-center justify-center px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-700 font-medium rounded-xl border border-slate-200 shadow-sm transition text-sm"
+          >
+            ← Back to Livestock Master
+          </Link>
         </div>
 
+        {/* Feedback Banners */}
+        {statusMsg && (
+          <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-2xl text-sm flex items-center justify-between">
+            <span><strong>Success:</strong> {decodeURIComponent(statusMsg)}</span>
+            <Link href="/finances" className="text-emerald-600 font-bold hover:text-emerald-900">×</Link>
+          </div>
+        )}
+        {errorMsg && (
+          <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-2xl text-sm flex items-center justify-between">
+            <span><strong>Error:</strong> {decodeURIComponent(errorMsg)}</span>
+            <Link href="/finances" className="text-red-500 font-bold hover:text-red-800">×</Link>
+          </div>
+        )}
+
         {/* Summary Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-          <div className="bg-white p-6 rounded-lg shadow border-l-4 border-green-500">
-            <p className="text-sm text-gray-500 font-medium">Total Income</p>
-            <p className="text-2xl font-bold text-green-600">Rs. {totalIncome.toLocaleString()}</p>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-emerald-500">
+            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Income</p>
+            <p className="text-2xl font-bold text-emerald-600 mt-1">Rs. {totalIncome.toLocaleString()}</p>
           </div>
-          <div className="bg-white p-6 rounded-lg shadow border-l-4 border-red-500">
-            <p className="text-sm text-gray-500 font-medium">Total Expenses</p>
-            <p className="text-2xl font-bold text-red-600">Rs. {totalExpense.toLocaleString()}</p>
+          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-rose-500">
+            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Expenses</p>
+            <p className="text-2xl font-bold text-rose-600 mt-1">Rs. {totalExpense.toLocaleString()}</p>
           </div>
-          <div className="bg-white p-6 rounded-lg shadow border-l-4 border-blue-500">
-            <p className="text-sm text-gray-500 font-medium">Net Profit / Balance</p>
-            <p className={`text-2xl font-bold ${netBalance >= 0 ? 'text-blue-600' : 'text-red-600'}`}>
+          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-indigo-500">
+            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Net Profit / Balance</p>
+            <p className={`text-2xl font-bold mt-1 ${netBalance >= 0 ? 'text-indigo-600' : 'text-rose-600'}`}>
               Rs. {netBalance.toLocaleString()}
             </p>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           
           {/* Transactions Table */}
-          <div className="md:col-span-2 bg-white rounded-lg shadow p-6">
-            <h2 className="text-xl font-bold text-gray-800 mb-4">Transaction History</h2>
+          <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
+              <h2 className="font-bold text-slate-800 text-sm">Transaction History</h2>
+              <span className="text-xs text-slate-400">{transactions?.length || 0} entries</span>
+            </div>
+
             <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
+              <table className="min-w-full divide-y divide-slate-100">
+                <thead className="bg-slate-50">
                   <tr>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Category</th>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Amount</th>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Description</th>
+                    <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase">Date (DD/MM/YYYY)</th>
+                    <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase">Type</th>
+                    <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase">Category</th>
+                    <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase">Amount</th>
+                    <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase">Description</th>
+                    <th className="px-6 py-3.5 text-right text-xs font-semibold text-slate-500 uppercase">Action</th>
                   </tr>
                 </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
+                <tbody className="bg-white divide-y divide-slate-100">
                   {transactions && transactions.length > 0 ? (
-                    transactions.map((txn) => (
-                      <tr key={txn.id} className="hover:bg-gray-50">
-                        <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">{txn.txn_date}</td>
-                        <td className="px-4 py-3 whitespace-nowrap">
-                          <span className={`px-2 py-1 text-xs rounded-full font-semibold ${txn.type === 'Income' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
-                            {txn.type}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">{txn.category}</td>
-                        <td className={`px-4 py-3 whitespace-nowrap text-sm font-bold ${txn.type === 'Income' ? 'text-green-600' : 'text-red-600'}`}>
-                          {txn.type === 'Income' ? '+' : '-'} Rs. {txn.amount}
-                        </td>
-                        <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">{txn.description || '-'}</td>
-                      </tr>
-                    ))
+                    transactions.map((txn) => {
+                      const isIncome = txn.type === 'Income'
+                      return (
+                        <tr key={txn.id} className="hover:bg-slate-50 transition-colors">
+                          <td className="px-6 py-4 whitespace-nowrap text-xs font-mono text-slate-700">
+                            {formatDateDDMMYYYY(txn.txn_date)}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <span className={`inline-flex items-center px-2.5 py-0.5 text-xs font-semibold rounded-full ${
+                              isIncome ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-rose-50 text-rose-700 border border-rose-200'
+                            }`}>
+                              {txn.type}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-xs font-bold text-slate-900">{txn.category}</td>
+                          <td className={`px-6 py-4 whitespace-nowrap text-xs font-bold font-mono ${isIncome ? 'text-emerald-700' : 'text-rose-700'}`}>
+                            {isIncome ? '+' : '-'} Rs. {Number(txn.amount).toLocaleString()}
+                          </td>
+                          <td className="px-6 py-4 text-xs text-slate-500 max-w-xs truncate">{txn.description || '—'}</td>
+                          <td className="px-6 py-4 whitespace-nowrap text-right">
+                            <form action={deleteTransaction} className="inline-block">
+                              <input type="hidden" name="txnId" value={txn.id} />
+                              <button
+                                type="submit"
+                                className="px-2.5 py-1 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-xs font-medium transition"
+                              >
+                                Delete
+                              </button>
+                            </form>
+                          </td>
+                        </tr>
+                      )
+                    })
                   ) : (
                     <tr>
-                      <td colSpan={5} className="px-4 py-6 text-center text-sm text-gray-500">
-                        No transactions recorded yet.
+                      <td colSpan={6} className="px-6 py-12 text-center text-sm text-slate-400">
+                        No transactions recorded yet. Add your first income or expense entry.
                       </td>
                     </tr>
                   )}
@@ -134,62 +235,83 @@ export default async function FinancesPage() {
           </div>
 
           {/* Add Transaction Form */}
-          <div className="bg-white rounded-lg shadow p-6 h-fit">
-            <h2 className="text-xl font-bold text-gray-800 mb-4">Add Transaction</h2>
-            <form action={addTransaction} className="flex flex-col gap-4">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 h-fit space-y-5">
+            <div>
+              <h2 className="text-base font-bold text-slate-900">Add Transaction</h2>
+              <p className="text-xs text-slate-500 mt-0.5">Record farm revenue or operational expenses</p>
+            </div>
+
+            <form action={addTransaction} className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Type *</label>
                 <select
                   name="type"
                   required
-                  className="w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-green-500 text-sm"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-semibold text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
                 >
                   <option value="Income">Income (Aamdani)</option>
                   <option value="Expense">Expense (Kharcha)</option>
                 </select>
               </div>
+
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Category</label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Category *</label>
                 <input
                   name="category"
                   type="text"
+                  list="common-categories"
                   required
                   placeholder="e.g. Boarding Fee, Feed Purchase, Vet/Med"
-                  className="w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-green-500 text-sm"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
                 />
+                <datalist id="common-categories">
+                  <option value="Palai Boarding Fee" />
+                  <option value="Animal Sale / Qurbani" />
+                  <option value="Feed & Ration Purchase" />
+                  <option value="Veterinary & Medicine" />
+                  <option value="Transport & Mandi" />
+                  <option value="Shed Rent & Utilities" />
+                  <option value="Labor & Staffing" />
+                  <option value="Other Expense" />
+                </datalist>
               </div>
+
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Amount (PKR)</label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Amount (PKR) *</label>
                 <input
                   name="amount"
                   type="number"
-                  step="0.01"
+                  step="1"
                   required
                   placeholder="e.g. 5000"
-                  className="w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-green-500 text-sm"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-mono text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
                 />
               </div>
+
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Date *</label>
                 <input
                   name="txn_date"
                   type="date"
-                  defaultValue={new Date().toISOString().split('T')[0]}
-                  className="w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-green-500 text-sm"
+                  required
+                  defaultValue={todayStr}
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
                 />
               </div>
+
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Description (Optional)</label>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Description (Optional)</label>
                 <input
                   name="description"
                   type="text"
                   placeholder="e.g. Received monthly boarding for Tag G-01"
-                  className="w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-green-500 text-sm"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
                 />
               </div>
+
               <button
                 type="submit"
-                className="w-full py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition font-medium text-sm mt-2"
+                className="w-full py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-xl transition font-semibold text-sm shadow-sm"
               >
                 Save Transaction
               </button>
