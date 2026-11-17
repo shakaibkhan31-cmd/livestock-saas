@@ -24,12 +24,13 @@ export default async function AnimalDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>
-  searchParams: Promise<{ error?: string; editLogId?: string }>
+  searchParams: Promise<{ error?: string; editLogId?: string; printStmt?: string }>
 }) {
   const { id } = await params
   const resolvedSearchParams = await searchParams
   const errorMessage = resolvedSearchParams.error
   const editLogId = resolvedSearchParams.editLogId
+  const isPrintMode = resolvedSearchParams.printStmt === 'true'
 
   const supabase = await createClient()
 
@@ -290,6 +291,129 @@ export default async function AnimalDetailPage({
   const animalProfileUrl = `https://livestock-saas.vercel.app/animals/${animal.id}`
   const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(animalProfileUrl)}`
 
+  // IF PRINT STATEMENT MODE IS ACTIVE
+  if (isPrintMode) {
+    return (
+      <div className="min-h-screen bg-white text-slate-900 p-8 max-w-4xl mx-auto space-y-6 print:p-0">
+        <div className="flex items-center justify-between border-b pb-4 print:hidden">
+          <Link href={`/animals/${id}`} className="text-sm font-semibold text-indigo-600 hover:underline">
+            &larr; Back to Live Profile
+          </Link>
+          <button
+            onClick={() => typeof window !== 'undefined' && window.print()}
+            className="px-4 py-2 bg-slate-900 text-white rounded-xl text-sm font-bold shadow hover:bg-slate-800"
+          >
+            🖨️ Print / Save as PDF
+          </button>
+        </div>
+
+        {/* Letterhead Header */}
+        <div className="text-center border-b-2 border-slate-900 pb-6 space-y-1">
+          <h1 className="text-3xl font-extrabold uppercase tracking-wider">{farm.farm_name}</h1>
+          <p className="text-sm text-slate-500 uppercase tracking-widest font-semibold">Official Animal Statement & Audit Report</p>
+          <p className="text-xs font-mono text-slate-400">Generated on: {new Date().toLocaleDateString()}</p>
+        </div>
+
+        {/* Animal Meta Box */}
+        <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-200 text-sm">
+          <div>
+            <p className="text-slate-500">Tag ID: <strong className="text-slate-900 font-mono text-base">{animal.tag_id}</strong></p>
+            <p className="text-slate-500">Species / Breed: <strong className="text-slate-900">{animal.species} {animal.breed_name ? `• ${animal.breed_name}` : ''}</strong></p>
+            <p className="text-slate-500">Sex: <strong className="text-slate-900">{animal.sex}</strong></p>
+          </div>
+          <div>
+            <p className="text-slate-500">Ownership: <strong className="text-slate-900">{animal.ownership === 'Self' ? 'Farm Owned' : `Palai Client (${animal.client_name})`}</strong></p>
+            <p className="text-slate-500">Onboarding Date: <strong className="text-slate-900 font-mono">{formatDateDDMMYYYY(animal.acquisition_date)}</strong></p>
+            <p className="text-slate-500">Status: <strong className="text-emerald-700">{animal.status}</strong></p>
+          </div>
+        </div>
+
+        {/* Growth & Financial Summary */}
+        <div className="grid grid-cols-3 gap-4 text-center">
+          <div className="p-4 bg-slate-100 rounded-xl border border-slate-200">
+            <p className="text-xs text-slate-500 uppercase font-semibold">Latest Weight</p>
+            <p className="text-xl font-bold font-mono text-slate-900 mt-1">{latestWeight !== null ? `${latestWeight} kg` : 'N/A'}</p>
+          </div>
+          <div className="p-4 bg-slate-100 rounded-xl border border-slate-200">
+            <p className="text-xs text-slate-500 uppercase font-semibold">Net Weight Gain</p>
+            <p className="text-xl font-bold font-mono text-emerald-700 mt-1">{netGain !== null ? `${netGain} kg` : 'N/A'}</p>
+          </div>
+          <div className="p-4 bg-slate-100 rounded-xl border border-slate-200">
+            <p className="text-xs text-slate-500 uppercase font-semibold">Net P&L (Profit/Loss)</p>
+            <p className={`text-xl font-bold font-mono mt-1 ${netPnL >= 0 ? 'text-emerald-700' : 'text-rose-600'}`}>
+              Rs. {netPnL.toLocaleString()}
+            </p>
+          </div>
+        </div>
+
+        {/* Financial Transactions Table */}
+        <div className="space-y-2">
+          <h3 className="font-bold text-base text-slate-900">Financial Ledger</h3>
+          <table className="min-w-full divide-y divide-slate-200 border text-xs">
+            <thead className="bg-slate-100">
+              <tr>
+                <th className="px-3 py-2 text-left font-semibold text-slate-700">Date</th>
+                <th className="px-3 py-2 text-left font-semibold text-slate-700">Type</th>
+                <th className="px-3 py-2 text-left font-semibold text-slate-700">Category</th>
+                <th className="px-3 py-2 text-left font-semibold text-slate-700">Amount (PKR)</th>
+                <th className="px-3 py-2 text-left font-semibold text-slate-700">Notes</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200">
+              {animal.ownership === 'Self' && (
+                <tr>
+                  <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(animal.acquisition_date)}</td>
+                  <td className="px-3 py-2 font-semibold text-rose-600">Expense</td>
+                  <td className="px-3 py-2">Cost Basis / Purchase</td>
+                  <td className="px-3 py-2 font-mono font-bold">- Rs. {purchaseCost.toLocaleString()}</td>
+                  <td className="px-3 py-2">Initial Acquisition</td>
+                </tr>
+              )}
+              {financialLogs && financialLogs.map(f => (
+                <tr key={f.id}>
+                  <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(f.transaction_date)}</td>
+                  <td className={`px-3 py-2 font-semibold ${f.entry_type === 'Revenue' ? 'text-emerald-700' : 'text-rose-600'}`}>{f.entry_type}</td>
+                  <td className="px-3 py-2">{f.category}</td>
+                  <td className={`px-3 py-2 font-mono font-bold ${f.entry_type === 'Revenue' ? 'text-emerald-700' : 'text-rose-600'}`}>
+                    {f.entry_type === 'Revenue' ? '+' : '-'} Rs. {Number(f.amount).toLocaleString()}
+                  </td>
+                  <td className="px-3 py-2">{f.notes || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Weight Logs Table */}
+        <div className="space-y-2 pt-4">
+          <h3 className="font-bold text-base text-slate-900">Weight Progression History</h3>
+          <table className="min-w-full divide-y divide-slate-200 border text-xs">
+            <thead className="bg-slate-100">
+              <tr>
+                <th className="px-3 py-2 text-left font-semibold text-slate-700">Date</th>
+                <th className="px-3 py-2 text-left font-semibold text-slate-700">Weight (KG)</th>
+                <th className="px-3 py-2 text-left font-semibold text-slate-700">Notes</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200">
+              {weightLogs && weightLogs.map(w => (
+                <tr key={w.id}>
+                  <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(w.recorded_date)}</td>
+                  <td className="px-3 py-2 font-mono font-bold text-slate-900">{w.weight_kg} kg</td>
+                  <td className="px-3 py-2">{w.notes || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="pt-8 text-center text-xs text-slate-400 border-t mt-12">
+          <p>{farm.farm_name} • Certified Livestock Management ERP Statement</p>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen bg-slate-50 py-10 px-4 sm:px-6 lg:px-8">
       <div className="max-w-5xl mx-auto space-y-6">
@@ -318,6 +442,13 @@ export default async function AnimalDetailPage({
           </div>
 
           <div className="flex items-center gap-2">
+            <Link
+              href={`/animals/${animal.id}?printStmt=true`}
+              target="_blank"
+              className="px-4 py-2 bg-emerald-600 text-white hover:bg-emerald-700 rounded-xl text-sm font-semibold shadow-xs transition flex items-center gap-1.5"
+            >
+              📄 Export Statement
+            </Link>
             <Link
               href={`/animals/${animal.id}/edit`}
               className="px-4 py-2 bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 rounded-xl text-sm font-medium transition"
@@ -442,7 +573,7 @@ export default async function AnimalDetailPage({
               </a>
             </div>
 
-            {/* PHASE 6: Unified Chronological Activity Timeline */}
+            {/* Unified Chronological Activity Timeline */}
             <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
               <div className="flex items-center justify-between">
                 <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Activity Timeline</h3>
@@ -641,7 +772,7 @@ export default async function AnimalDetailPage({
               </div>
             </div>
 
-            {/* PHASE 6: Medical, Deworming & Vaccination History Log */}
+            {/* Medical, Deworming & Vaccination History Log */}
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
               <div className="px-6 py-4 border-b border-slate-100 bg-blue-950 text-white flex items-center justify-between">
                 <div>
@@ -801,7 +932,7 @@ export default async function AnimalDetailPage({
               </div>
             </div>
 
-            {/* PHASE 5: Automated Financial Ledger & Live P&L */}
+            {/* Automated Financial Ledger & Live P&L */}
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
               <div className="px-6 py-4 border-b border-slate-100 bg-slate-900 text-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                 <div>
