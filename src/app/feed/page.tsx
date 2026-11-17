@@ -205,13 +205,11 @@ export default async function FeedManagementPage({
     const log_date = (formData.get('log_date') as string) || new Date().toISOString().split('T')[0]
     const notes = formData.get('notes') as string
 
-    // Collect all item rows submitted (supports 1 to N items in one bill)
     const feedTypes = formData.getAll('feed_type') as string[]
     const quantities = formData.getAll('quantity_kg') as string[]
     const costs = formData.getAll('total_cost') as string[]
 
     const supabaseClient = await createClient()
-
     const recordsToInsert: Array<Record<string, any>> = []
 
     for (let i = 0; i < feedTypes.length; i++) {
@@ -221,7 +219,6 @@ export default async function FeedManagementPage({
 
       let finalCost = costs[i] ? parseFloat(costs[i]) || 0 : 0
 
-      // Auto-calculate consumption value from average purchase rate if user left cost blank on Consumption
       if (entry_type === 'Consumption' && finalCost === 0 && qty > 0) {
         const { data: priorPurchases } = await supabaseClient
           .from('feed_logs')
@@ -296,7 +293,6 @@ export default async function FeedManagementPage({
 
     const supabaseClient = await createClient()
 
-    // 1. Fetch unallocated purchase logs ONLY for the chosen targetSpecies
     const { data: pendingLogs } = await supabaseClient
       .from('feed_logs')
       .select('id, total_cost, feed_type')
@@ -311,7 +307,6 @@ export default async function FeedManagementPage({
 
     const totalPool = pendingLogs.reduce((sum, l) => sum + (Number(l.total_cost) || 0), 0)
 
-    // 2. Fetch active animals matching targetSpecies
     let animalQuery = supabaseClient
       .from('livestock_master')
       .select('id, tag_id, species')
@@ -330,7 +325,6 @@ export default async function FeedManagementPage({
       )
     }
 
-    // 3. Fetch latest weights if weight-based split selected
     let weightsByAnimal: Record<string, number> = {}
     if (splitMethod === 'weight') {
       const { data: wLogs } = await supabaseClient
@@ -349,7 +343,6 @@ export default async function FeedManagementPage({
     const totalWeight = animals.reduce((sum, a) => sum + (weightsByAnimal[a.id] || 0), 0)
     const useWeightSplit = splitMethod === 'weight' && totalWeight > 0
 
-    // 4. Prepare financial entries ONLY for matching animals
     const financialInserts = animals.map(animal => {
       let share = 0
       let noteDetail = ''
@@ -385,7 +378,6 @@ export default async function FeedManagementPage({
       }
     }
 
-    // 5. Mark ONLY this species' feed logs as allocated
     const logIds = pendingLogs.map(l => l.id)
     await supabaseClient
       .from('feed_logs')
@@ -520,7 +512,7 @@ export default async function FeedManagementPage({
           </div>
         </div>
 
-        {/* TIER 1: Live Bulk Stock Inventory Breakdown (Species-Tagged) */}
+        {/* TIER 1: Live Bulk Stock Inventory Breakdown */}
         {inventoryList.length > 0 && (
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
             <div className="flex items-center justify-between mb-4">
@@ -754,11 +746,11 @@ export default async function FeedManagementPage({
             </div>
           </div>
 
-          {/* Right Column: Multi-Item Add Feed Entry Form */}
+          {/* Right Column: Multi-Item Add Feed Entry Form with Live Total Calculator */}
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 h-fit space-y-5">
             <div>
               <h2 className="text-base font-bold text-slate-900">Record Feed Entry</h2>
-              <p className="text-xs text-slate-500 mt-0.5">Type any custom item name or add multiple items from one bill</p>
+              <p className="text-xs text-slate-500 mt-0.5">Add multiple items from one bill with live total calculation</p>
             </div>
 
             <datalist id="common-feeds">
@@ -836,12 +828,18 @@ export default async function FeedManagementPage({
                           name="total_cost"
                           type="number"
                           step="1"
-                          placeholder="Cost (PKR) e.g. 300"
-                          className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-green-600"
+                          placeholder="Cost (PKR) e.g. 340"
+                          className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-green-600 cost-input"
                         />
                       </div>
                     </div>
                   </div>
+                </div>
+
+                {/* Live Bill Total Summary Bar */}
+                <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 flex items-center justify-between">
+                  <span className="text-xs font-bold text-emerald-800 uppercase tracking-wider">Live Bill Grand Total:</span>
+                  <span id="live-bill-total" className="text-sm font-bold font-mono text-emerald-700">Rs. 0</span>
                 </div>
               </div>
 
@@ -862,7 +860,7 @@ export default async function FeedManagementPage({
                   <input
                     name="notes"
                     type="text"
-                    placeholder="e.g., Mandi bill"
+                    placeholder="e.g., Hannan store"
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
                   />
                 </div>
@@ -880,8 +878,27 @@ export default async function FeedManagementPage({
         </div>
       </div>
 
-      {/* Lightweight Script for Adding/Removing Multi-Item Rows */}
+      {/* Lightweight Script for Live Total Calculation & Multi-Item Rows */}
       <script dangerouslySetInnerHTML={{ __html: `
+        function updateBillTotal() {
+          const costInputs = document.querySelectorAll('.cost-input');
+          let total = 0;
+          costInputs.forEach(input => {
+            const val = parseFloat(input.value) || 0;
+            total += val;
+          });
+          const totalEl = document.getElementById('live-bill-total');
+          if (totalEl) {
+            totalEl.textContent = 'Rs. ' + total.toLocaleString();
+          }
+        }
+
+        document.addEventListener('input', function(e) {
+          if (e.target && e.target.classList.contains('cost-input')) {
+            updateBillTotal();
+          }
+        });
+
         document.addEventListener('click', function(e) {
           if (e.target && e.target.id === 'add-feed-row-btn') {
             const container = document.getElementById('feed-items-container');
@@ -914,15 +931,19 @@ export default async function FeedManagementPage({
                   type="number"
                   step="1"
                   placeholder="Cost (PKR)"
-                  class="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-green-600"
+                  class="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-green-600 cost-input"
                 />
               </div>
             \`;
             container.appendChild(row);
+            updateBillTotal();
           }
           if (e.target && e.target.classList.contains('remove-feed-row')) {
             const row = e.target.closest('.feed-item-row');
-            if (row) row.remove();
+            if (row) {
+              row.remove();
+              updateBillTotal();
+            }
           }
         });
       ` }} />
