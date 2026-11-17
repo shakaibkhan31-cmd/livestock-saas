@@ -42,7 +42,7 @@ export default async function FinancesPage({
 
   if (!farm) return redirect('/onboarding')
 
-  // 1. Fetch Global Farm Transactions (if table exists)
+  // 1. Fetch Global Farm Transactions
   const { data: globalTxns } = await supabase
     .from('transactions')
     .select('*')
@@ -76,7 +76,7 @@ export default async function FinancesPage({
     tagId?: string
   }
 
-  const unifiedList: UnifiedLedgerItem[] = []
+  const unifiedList: UnifiedLedgerItem [] = []
 
   ;(globalTxns || []).forEach(t => {
     unifiedList.push({
@@ -105,7 +105,6 @@ export default async function FinancesPage({
     })
   })
 
-  // Sort newest first
   unifiedList.sort((a, b) => b.date.localeCompare(a.date))
 
   // Apply Filter
@@ -125,6 +124,18 @@ export default async function FinancesPage({
     .reduce((acc, t) => acc + t.amount, 0)
 
   const netBalance = totalIncome - totalExpense
+
+  // Calculate Expense Category Breakdown for Analytics Chart
+  const expenseByCategory: Record<string, number> = {}
+  unifiedList
+    .filter(t => t.type === 'Expense')
+    .forEach(t => {
+      const cat = t.category || 'General'
+      expenseByCategory[cat] = (expenseByCategory[cat] || 0) + t.amount
+    })
+
+  const sortedExpenseCategories = Object.entries(expenseByCategory)
+    .sort((a, b) => b[1] - a[1])
 
   // Server Action: Add Global Farm Transaction
   const addTransaction = async (formData: FormData) => {
@@ -155,7 +166,7 @@ export default async function FinancesPage({
     return redirect(`/finances?msg=${encodeURIComponent('Transaction recorded successfully.')}`)
   }
 
-  // Server Action: Delete Transaction (supports both Global & Animal-linked entries)
+  // Server Action: Delete Transaction
   const deleteTransaction = async (formData: FormData) => {
     'use server'
     const txnId = formData.get('txnId') as string
@@ -189,11 +200,11 @@ export default async function FinancesPage({
             <div className="flex items-center gap-2">
               <span className="h-2.5 w-2.5 rounded-full bg-emerald-500"></span>
               <span className="text-xs font-semibold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
-                Unified Global Financial Ledger
+                Visual Financial Analytics & Ledger
               </span>
             </div>
             <h1 className="text-3xl font-bold text-slate-900 tracking-tight mt-1">Financials & Billing</h1>
-            <p className="text-sm text-slate-500">Consolidated farm-wide income, Palai boarding fees & operational expenses</p>
+            <p className="text-sm text-slate-500">Consolidated farm-wide income, Palai boarding fees & operational analytics</p>
           </div>
 
           <Link
@@ -234,6 +245,75 @@ export default async function FinancesPage({
               Rs. {netBalance.toLocaleString()}
             </p>
           </div>
+        </div>
+
+        {/* FEATURE 1: Interactive Financial Analytics & Expense Breakdown */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          
+          {/* Income vs Expense Visual Bar */}
+          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">Income vs Expense Ratio</h2>
+            
+            {totalIncome + totalExpense > 0 ? (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between text-xs font-semibold">
+                  <span className="text-emerald-600">Income: {Math.round((totalIncome / (totalIncome + totalExpense || 1)) * 100)}%</span>
+                  <span className="text-rose-600">Expense: {Math.round((totalExpense / (totalIncome + totalExpense || 1)) * 100)}%</span>
+                </div>
+                
+                {/* Visual Proportional Bar */}
+                <div className="w-full h-3 bg-slate-100 rounded-full overflow-hidden flex">
+                  <div 
+                    className="bg-emerald-500 h-full transition-all duration-500" 
+                    style={{ width: `${(totalIncome / (totalIncome + totalExpense || 1)) * 100}%` }}
+                  ></div>
+                  <div 
+                    className="bg-rose-500 h-full transition-all duration-500" 
+                    style={{ width: `${(totalExpense / (totalIncome + totalExpense || 1)) * 100}%` }}
+                  ></div>
+                </div>
+
+                <div className="pt-2 flex items-center justify-between text-[11px] text-slate-400">
+                  <span>Inflows: Rs. {totalIncome.toLocaleString()}</span>
+                  <span>Outflows: Rs. {totalExpense.toLocaleString()}</span>
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs text-slate-400 py-4 text-center">No financial data available for ratio analysis yet.</p>
+            )}
+          </div>
+
+          {/* Expense Category Breakdown Chart */}
+          <div className="lg:col-span-2 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">Expense Breakdown by Category</h2>
+            
+            {sortedExpenseCategories.length > 0 ? (
+              <div className="space-y-3">
+                {sortedExpenseCategories.map(([category, amount]) => {
+                  const percentage = totalExpense > 0 ? Math.round((amount / totalExpense) * 100) : 0
+                  return (
+                    <div key={category} className="space-y-1">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-bold text-slate-800">{category}</span>
+                        <span className="font-mono font-semibold text-slate-600">
+                          Rs. {amount.toLocaleString()} <span className="text-slate-400 font-normal">({percentage}%)</span>
+                        </span>
+                      </div>
+                      <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+                        <div 
+                          className="bg-indigo-600 h-full rounded-full transition-all duration-500"
+                          style={{ width: `${percentage}%` }}
+                        ></div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            ) : (
+              <p className="text-xs text-slate-400 py-4 text-center">No expense categories recorded yet.</p>
+            )}
+          </div>
+
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
