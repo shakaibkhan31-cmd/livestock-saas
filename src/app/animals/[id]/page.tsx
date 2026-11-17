@@ -294,7 +294,7 @@ export default async function AnimalDetailPage({
   // IF PRINT STATEMENT MODE IS ACTIVE
   if (isPrintMode) {
     return (
-      <div className="min-h-screen bg-white text-slate-900 p-8 max-w-4xl mx-auto space-y-6 print:p-0">
+      <div className="min-h-screen bg-white text-slate-900 p-8 max-w-4xl mx-auto space-y-6">
         <div className="flex items-center justify-between border-b pb-4 print:hidden">
           <Link href={`/animals/${id}`} className="text-sm font-semibold text-indigo-600 hover:underline">
             &larr; Back to Live Profile
