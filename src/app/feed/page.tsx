@@ -32,6 +32,26 @@ const SPECIES_OPTIONS = [
   'Shared (All Species)',
 ]
 
+const DEFAULT_FEED_SUGGESTIONS = [
+  'Kala Chana',
+  'Channa Chilka',
+  'Soya Bean Chilka',
+  'Gandum (Wheat)',
+  'Gandum Daliya',
+  'Chokar (Wheat Bran)',
+  'Bhoosa',
+  'Alfalfa Hay / Lucerne',
+  'Mong Phalli Missa',
+  'Mix Dana / Wanda',
+  'Khal',
+  'Jau (Barley)',
+  'Makai (Maize)',
+  'Mineral Mixture & DCP',
+  'Maymil Milk Powder',
+  'Chicken Starter / Layer Feed',
+  'Rabbit Pellets / Dry Lucerne',
+]
+
 export default async function FeedManagementPage({
   searchParams,
 }: {
@@ -68,6 +88,14 @@ export default async function FeedManagementPage({
     .select('id, tag_id, species, ownership, client_name')
     .eq('farm_id', farm.id)
     .eq('status', 'Active')
+
+  // Auto-learn custom feed names from previous entries + merge with defaults
+  const dynamicFeedSuggestions = Array.from(
+    new Set([
+      ...DEFAULT_FEED_SUGGESTIONS,
+      ...(allFeedLogs || []).map(l => (l.feed_type || '').trim()).filter(Boolean),
+    ])
+  ).sort()
 
   // Filter feed logs if a specific species tab is selected
   const feedLogs = (allFeedLogs || []).filter(log => {
@@ -127,7 +155,7 @@ export default async function FeedManagementPage({
     }
   })
 
-  // Unallocated Cost Pool grouped by Species (across ALL logs so user sees pending pools per species)
+  // Unallocated Cost Pool grouped by Species
   const unallocatedBySpecies: Record<string, { amount: number; billCount: number }> = {}
   ;(allFeedLogs || []).forEach(l => {
     if (!l.is_allocated && (l.entry_type === 'Purchase' || !l.entry_type) && Number(l.total_cost) > 0) {
@@ -169,53 +197,67 @@ export default async function FeedManagementPage({
     ])
   ).filter(Boolean)
 
-  // SERVER ACTION 1: Add Bulk Purchase or Daily Consumption Log
+  // SERVER ACTION 1: Add Single or Multi-Item Batch Purchase / Consumption
   const addFeedLog = async (formData: FormData) => {
     'use server'
     const entry_type = (formData.get('entry_type') as string) || 'Purchase'
     const target_species = (formData.get('target_species') as string) || 'Goat'
-    const feed_type = (formData.get('feed_type') as string).trim()
-    const quantity_kg = parseFloat(formData.get('quantity_kg') as string) || 0
-    const rawCost = formData.get('total_cost') as string
     const log_date = (formData.get('log_date') as string) || new Date().toISOString().split('T')[0]
     const notes = formData.get('notes') as string
 
+    // Collect all item rows submitted (supports 1 to N items in one bill)
+    const feedTypes = formData.getAll('feed_type') as string[]
+    const quantities = formData.getAll('quantity_kg') as string[]
+    const costs = formData.getAll('total_cost') as string[]
+
     const supabaseClient = await createClient()
 
-    let finalCost = rawCost ? parseFloat(rawCost) : 0
+    const recordsToInsert: Array<Record<string, any>> = []
 
-    // Auto-calculate consumption value from average purchase rate for THIS species & feed item
-    if (entry_type === 'Consumption' && finalCost === 0 && quantity_kg > 0) {
-      const { data: priorPurchases } = await supabaseClient
-        .from('feed_logs')
-        .select('quantity_kg, total_cost')
-        .eq('farm_id', farm.id)
-        .eq('target_species', target_species)
-        .eq('feed_type', feed_type)
-        .eq('entry_type', 'Purchase')
+    for (let i = 0; i < feedTypes.length; i++) {
+      const ft = (feedTypes[i] || '').trim()
+      const qty = parseFloat(quantities[i] || '0') || 0
+      if (!ft || qty <= 0) continue
 
-      if (priorPurchases && priorPurchases.length > 0) {
-        const totKg = priorPurchases.reduce((s, p) => s + (Number(p.quantity_kg) || 0), 0)
-        const totRs = priorPurchases.reduce((s, p) => s + (Number(p.total_cost) || 0), 0)
-        if (totKg > 0) {
-          finalCost = Math.round((totRs / totKg) * quantity_kg)
+      let finalCost = costs[i] ? parseFloat(costs[i]) || 0 : 0
+
+      // Auto-calculate consumption value from average purchase rate if user left cost blank on Consumption
+      if (entry_type === 'Consumption' && finalCost === 0 && qty > 0) {
+        const { data: priorPurchases } = await supabaseClient
+          .from('feed_logs')
+          .select('quantity_kg, total_cost')
+          .eq('farm_id', farm.id)
+          .eq('target_species', target_species)
+          .eq('feed_type', ft)
+          .eq('entry_type', 'Purchase')
+
+        if (priorPurchases && priorPurchases.length > 0) {
+          const totKg = priorPurchases.reduce((s, p) => s + (Number(p.quantity_kg) || 0), 0)
+          const totRs = priorPurchases.reduce((s, p) => s + (Number(p.total_cost) || 0), 0)
+          if (totKg > 0) {
+            finalCost = Math.round((totRs / totKg) * qty)
+          }
         }
       }
-    }
 
-    const { error } = await supabaseClient.from('feed_logs').insert([
-      {
+      recordsToInsert.push({
         farm_id: farm.id,
         target_species,
         entry_type,
-        feed_type,
-        quantity_kg,
+        feed_type: ft,
+        quantity_kg: qty,
         total_cost: finalCost,
         log_date,
         notes: notes || null,
         is_allocated: entry_type === 'Consumption' ? true : false,
-      },
-    ])
+      })
+    }
+
+    if (recordsToInsert.length === 0) {
+      return redirect('/feed?error=Please+enter+at+least+one+valid+feed+item+and+quantity.')
+    }
+
+    const { error } = await supabaseClient.from('feed_logs').insert(recordsToInsert)
 
     if (error) {
       return redirect(`/feed?error=${encodeURIComponent(error.message)}`)
@@ -223,7 +265,7 @@ export default async function FeedManagementPage({
 
     return redirect(
       `/feed?species=${encodeURIComponent(target_species)}&msg=${encodeURIComponent(
-        `${target_species} ${entry_type} saved (${feed_type} - ${quantity_kg} kg).`
+        `Saved ${recordsToInsert.length} ${target_species} ${entry_type.toLowerCase()} item(s)!`
       )}`
     )
   }
@@ -269,7 +311,7 @@ export default async function FeedManagementPage({
 
     const totalPool = pendingLogs.reduce((sum, l) => sum + (Number(l.total_cost) || 0), 0)
 
-    // 2. Fetch active animals matching targetSpecies (or all active if 'Shared (All Species)')
+    // 2. Fetch active animals matching targetSpecies
     let animalQuery = supabaseClient
       .from('livestock_master')
       .select('id, tag_id, species')
@@ -307,7 +349,7 @@ export default async function FeedManagementPage({
     const totalWeight = animals.reduce((sum, a) => sum + (weightsByAnimal[a.id] || 0), 0)
     const useWeightSplit = splitMethod === 'weight' && totalWeight > 0
 
-    // 4. Prepare financial entries ONLY for those matching animals
+    // 4. Prepare financial entries ONLY for matching animals
     const financialInserts = animals.map(animal => {
       let share = 0
       let noteDetail = ''
@@ -466,7 +508,7 @@ export default async function FeedManagementPage({
           <div className="bg-white p-5 rounded-2xl border border-amber-200 bg-amber-50/30 shadow-sm">
             <p className="text-xs font-semibold text-amber-800 uppercase tracking-wider">Unallocated Cost Pool</p>
             <p className="text-2xl font-bold text-amber-700 mt-1">Rs. {filteredUnallocatedPool.toLocaleString()}</p>
-            <p className="text-xs text-amber-700/80 mt-1">{filteredUnallocatedBillsCount} bill(s) ready to split</p>
+            <p className="text-xs text-amber-700/80 mt-1">{filteredUnallocatedBillsCount} item(s) ready to split</p>
           </div>
 
           <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
@@ -483,8 +525,8 @@ export default async function FeedManagementPage({
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
             <div className="flex items-center justify-between mb-4">
               <div>
-                <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider">Live Shed Ration Stock (By Species)</h2>
-                <p className="text-xs text-slate-500">Auto-calculated from Bulk Purchases minus Daily Consumption per species</p>
+                <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider">Live Shed Ration Stock (By Species & Item)</h2>
+                <p className="text-xs text-slate-500">Auto-calculated from Bulk Purchases minus Daily Consumption per item</p>
               </div>
             </div>
 
@@ -615,7 +657,7 @@ export default async function FeedManagementPage({
           </div>
         </div>
 
-        {/* Main Workspace Grid: History Table + Add Entry Form */}
+        {/* Main Workspace Grid: History Table + Multi-Item Add Entry Form */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           
           {/* Left 2 Columns: Feed Transaction Ledger */}
@@ -712,119 +754,178 @@ export default async function FeedManagementPage({
             </div>
           </div>
 
-          {/* Right Column: Add Feed Entry Form */}
+          {/* Right Column: Multi-Item Add Feed Entry Form */}
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 h-fit space-y-5">
             <div>
               <h2 className="text-base font-bold text-slate-900">Record Feed Entry</h2>
-              <p className="text-xs text-slate-500 mt-0.5">Assign purchase or consumption to a specific species</p>
+              <p className="text-xs text-slate-500 mt-0.5">Type any custom item name or add multiple items from one bill</p>
             </div>
 
+            <datalist id="common-feeds">
+              {dynamicFeedSuggestions.map(item => (
+                <option key={item} value={item} />
+              ))}
+            </datalist>
+
             <form action={addFeedLog} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Target Species *</label>
-                <select
-                  name="target_species"
-                  defaultValue={selectedSpeciesFilter !== 'All' ? selectedSpeciesFilter : 'Goat'}
-                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-semibold text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
-                >
-                  {SPECIES_OPTIONS.map(sp => (
-                    <option key={sp} value={sp}>{sp}</option>
-                  ))}
-                </select>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Target Species *</label>
+                  <select
+                    name="target_species"
+                    defaultValue={selectedSpeciesFilter !== 'All' ? selectedSpeciesFilter : 'Goat'}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
+                  >
+                    {SPECIES_OPTIONS.map(sp => (
+                      <option key={sp} value={sp}>{sp}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Entry Mode *</label>
+                  <select
+                    name="entry_type"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-medium text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
+                  >
+                    <option value="Purchase">Bulk Purchase (Stock-In)</option>
+                    <option value="Consumption">Daily Usage (Stock-Out)</option>
+                  </select>
+                </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Entry Mode *</label>
-                <select
-                  name="entry_type"
-                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-medium text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
-                >
-                  <option value="Purchase">Bulk Purchase (Stock-In + Cost Pool)</option>
-                  <option value="Consumption">Daily Shed Consumption (Stock-Out)</option>
-                </select>
-              </div>
+              {/* Dynamic Item Rows Container */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-semibold text-slate-700">Ration Items (Type or Pick) *</label>
+                  <button
+                    type="button"
+                    id="add-feed-row-btn"
+                    className="text-xs font-semibold text-green-700 hover:text-green-800 bg-green-50 hover:bg-green-100 px-2.5 py-1 rounded-lg border border-green-200 transition"
+                  >
+                    + Add Another Item
+                  </button>
+                </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Feed Ingredient / Ration *</label>
-                <input
-                  name="feed_type"
-                  type="text"
-                  list="common-feeds"
-                  required
-                  placeholder="Select or type (e.g., Kala Chana)"
-                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
-                />
-                <datalist id="common-feeds">
-                  <option value="Kala Chana" />
-                  <option value="Gandum (Wheat)" />
-                  <option value="Chokar (Wheat Bran)" />
-                  <option value="Bhoosa" />
-                  <option value="Alfalfa Hay / Lucerne" />
-                  <option value="Mix Dana / Wanda" />
-                  <option value="Khal" />
-                  <option value="Mineral Mixture & DCP" />
-                  <option value="Chicken Starter / Layer Feed" />
-                  <option value="Rabbit Pellets / Dry Lucerne" />
-                </datalist>
+                <div id="feed-items-container" className="space-y-3">
+                  {/* Row 1 */}
+                  <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2.5 feed-item-row">
+                    <div>
+                      <input
+                        name="feed_type"
+                        type="text"
+                        list="common-feeds"
+                        required
+                        placeholder="Type item name (e.g., Channa Chilka)"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-medium text-slate-900 focus:ring-2 focus:ring-green-600"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <input
+                          name="quantity_kg"
+                          type="number"
+                          step="0.1"
+                          required
+                          placeholder="Qty (KG) e.g. 2"
+                          className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-green-600"
+                        />
+                      </div>
+                      <div>
+                        <input
+                          name="total_cost"
+                          type="number"
+                          step="1"
+                          placeholder="Cost (PKR) e.g. 300"
+                          className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-green-600"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Quantity (KG) *</label>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Date *</label>
                   <input
-                    name="quantity_kg"
-                    type="number"
-                    step="0.1"
+                    name="log_date"
+                    type="date"
                     required
-                    placeholder="e.g. 50"
-                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-mono text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
+                    defaultValue={todayStr}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Total Cost (PKR)</label>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Notes / Vendor</label>
                   <input
-                    name="total_cost"
-                    type="number"
-                    step="1"
-                    placeholder="Auto if Stock-Out"
-                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-mono text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
+                    name="notes"
+                    type="text"
+                    placeholder="e.g., Mandi bill"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
                   />
                 </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Date *</label>
-                <input
-                  name="log_date"
-                  type="date"
-                  required
-                  defaultValue={todayStr}
-                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Notes / Batch Info</label>
-                <input
-                  name="notes"
-                  type="text"
-                  placeholder="e.g., Goat bulk bag / Chicken feed"
-                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
-                />
               </div>
 
               <button
                 type="submit"
                 className="w-full py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-xl transition font-semibold text-sm shadow-sm"
               >
-                Save Feed Record
+                Save Feed Record(s)
               </button>
             </form>
           </div>
 
         </div>
       </div>
+
+      {/* Lightweight Script for Adding/Removing Multi-Item Rows */}
+      <script dangerouslySetInnerHTML={{ __html: `
+        document.addEventListener('click', function(e) {
+          if (e.target && e.target.id === 'add-feed-row-btn') {
+            const container = document.getElementById('feed-items-container');
+            if (!container) return;
+            const row = document.createElement('div');
+            row.className = 'p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2.5 feed-item-row relative';
+            row.innerHTML = \`
+              <div class="flex items-center gap-2">
+                <input
+                  name="feed_type"
+                  type="text"
+                  list="common-feeds"
+                  required
+                  placeholder="Type item name (e.g., Gandum Daliya)"
+                  class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-medium text-slate-900 focus:ring-2 focus:ring-green-600"
+                />
+                <button type="button" class="remove-feed-row px-2 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50 rounded-lg">×</button>
+              </div>
+              <div class="grid grid-cols-2 gap-2">
+                <input
+                  name="quantity_kg"
+                  type="number"
+                  step="0.1"
+                  required
+                  placeholder="Qty (KG)"
+                  class="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-green-600"
+                />
+                <input
+                  name="total_cost"
+                  type="number"
+                  step="1"
+                  placeholder="Cost (PKR)"
+                  class="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-green-600"
+                />
+              </div>
+            \`;
+            container.appendChild(row);
+          }
+          if (e.target && e.target.classList.contains('remove-feed-row')) {
+            const row = e.target.closest('.feed-item-row');
+            if (row) row.remove();
+          }
+        });
+      ` }} />
     </div>
   )
 }
