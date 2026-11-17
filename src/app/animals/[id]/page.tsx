@@ -2,6 +2,23 @@ import { createClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
 import Link from 'next/link'
 
+// Helper: Consistent DD/MM/YYYY Date Formatter
+function formatDateDDMMYYYY(dateInput?: string | null): string {
+  if (!dateInput) return 'N/A'
+  const datePart = String(dateInput).split('T')[0]
+  const parts = datePart.split('-')
+  if (parts.length === 3) {
+    const [year, month, day] = parts
+    return `${day}/${month}/${year}`
+  }
+  const d = new Date(dateInput)
+  if (isNaN(d.getTime())) return 'N/A'
+  const day = String(d.getDate()).padStart(2, '0')
+  const month = String(d.getMonth() + 1).padStart(2, '0')
+  const year = d.getFullYear()
+  return `${day}/${month}/${year}`
+}
+
 export default async function AnimalDetailPage({
   params,
   searchParams,
@@ -50,6 +67,13 @@ export default async function AnimalDetailPage({
     .select('*')
     .eq('animal_id', id)
     .order('transaction_date', { ascending: false })
+
+  // Fetch medical & vaccination logs
+  const { data: medicalLogs } = await supabase
+    .from('animal_medical_logs')
+    .select('*')
+    .eq('animal_id', id)
+    .order('administered_date', { ascending: false })
 
   // 1. Server Action: Add Weight Log
   const addWeightLog = async (formData: FormData) => {
@@ -150,6 +174,48 @@ export default async function AnimalDetailPage({
     return redirect(`/animals/${id}`)
   }
 
+  // 6. Server Action: Add Medical / Vaccination Log
+  const addMedicalLog = async (formData: FormData) => {
+    'use server'
+    const treatment_type = formData.get('treatment_type') as string
+    const medicine_name = formData.get('medicine_name') as string
+    const dosage = formData.get('dosage') as string
+    const administered_date = formData.get('administered_date') as string
+    const next_due_date = formData.get('next_due_date') as string
+    const notes = formData.get('notes') as string
+
+    const supabaseClient = await createClient()
+    const { error } = await supabaseClient.from('animal_medical_logs').insert([{
+      animal_id: id,
+      farm_id: farm.id,
+      treatment_type,
+      medicine_name,
+      dosage: dosage || null,
+      administered_date: administered_date || new Date().toISOString().split('T')[0],
+      next_due_date: next_due_date || null,
+      notes: notes || null,
+    }])
+
+    if (error) return redirect(`/animals/${id}?error=${encodeURIComponent(error.message)}`)
+    return redirect(`/animals/${id}`)
+  }
+
+  // 7. Server Action: Delete Medical Log
+  const deleteMedicalLog = async (formData: FormData) => {
+    'use server'
+    const medId = formData.get('medId') as string
+    const supabaseClient = await createClient()
+
+    const { error } = await supabaseClient
+      .from('animal_medical_logs')
+      .delete()
+      .eq('id', medId)
+      .eq('animal_id', id)
+
+    if (error) return redirect(`/animals/${id}?error=${encodeURIComponent(error.message)}`)
+    return redirect(`/animals/${id}`)
+  }
+
   // Growth Summary Calculations
   const latestWeight = weightLogs && weightLogs.length > 0 ? Number(weightLogs[0].weight_kg) : null
   const initialWeight = weightLogs && weightLogs.length > 0 ? Number(weightLogs[weightLogs.length - 1].weight_kg) : null
@@ -166,6 +232,59 @@ export default async function AnimalDetailPage({
 
   const totalCostOutflow = (animal.ownership === 'Self' ? purchaseCost : 0) + loggedExpenses
   const netPnL = loggedRevenue - totalCostOutflow
+
+  // Upcoming / Overdue Medical Alerts (within next 7 days or past due)
+  const todayStr = new Date().toISOString().split('T')[0]
+  const sevenDaysFromNow = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+  const dueAlerts = (medicalLogs || []).filter(m => m.next_due_date && m.next_due_date <= sevenDaysFromNow)
+
+  // Unified Chronological Activity Timeline
+  type TimelineItem = {
+    date: string
+    title: string
+    subtitle: string
+    badgeColor: string
+  }
+
+  const timelineEvents: TimelineItem[] = []
+
+  if (animal.acquisition_date) {
+    timelineEvents.push({
+      date: String(animal.acquisition_date).split('T')[0],
+      title: 'Animal Onboarded',
+      subtitle: `${animal.ownership === 'Self' ? 'Farm Stock' : `Palai (${animal.client_name})`}`,
+      badgeColor: 'bg-slate-800',
+    })
+  }
+
+  ;(weightLogs || []).forEach(w => {
+    timelineEvents.push({
+      date: String(w.recorded_date).split('T')[0],
+      title: `Weight Logged: ${w.weight_kg} kg`,
+      subtitle: w.notes || 'Routine weight check',
+      badgeColor: 'bg-green-600',
+    })
+  })
+
+  ;(medicalLogs || []).forEach(m => {
+    timelineEvents.push({
+      date: String(m.administered_date).split('T')[0],
+      title: `${m.treatment_type}: ${m.medicine_name}`,
+      subtitle: m.dosage ? `Dosage: ${m.dosage}` : (m.notes || 'Health care logged'),
+      badgeColor: 'bg-blue-600',
+    })
+  })
+
+  ;(financialLogs || []).forEach(f => {
+    timelineEvents.push({
+      date: String(f.transaction_date).split('T')[0],
+      title: `${f.entry_type}: Rs. ${Number(f.amount).toLocaleString()}`,
+      subtitle: f.category,
+      badgeColor: f.entry_type === 'Revenue' ? 'bg-emerald-600' : 'bg-rose-600',
+    })
+  })
+
+  timelineEvents.sort((a, b) => b.date.localeCompare(a.date))
 
   // QR Code URL
   const animalProfileUrl = `https://livestock-saas.vercel.app/animals/${animal.id}`
@@ -214,13 +333,36 @@ export default async function AnimalDetailPage({
           </div>
         </div>
 
+        {/* Medical / Deworming Due Alert Banner */}
+        {dueAlerts.length > 0 && (
+          <div className="p-4 bg-amber-50 border border-amber-300 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <span className="text-lg">⚠️</span>
+              <div>
+                <p className="text-sm font-bold text-amber-900">Medical / Deworming Schedule Alert</p>
+                <div className="text-xs text-amber-800 mt-0.5 space-y-0.5">
+                  {dueAlerts.map(alert => {
+                    const isOverdue = alert.next_due_date < todayStr
+                    return (
+                      <p key={alert.id}>
+                        • <strong>{alert.treatment_type} ({alert.medicine_name})</strong> is {isOverdue ? 'OVERDUE since' : 'due on'}{' '}
+                        <span className="font-mono font-bold underline">{formatDateDDMMYYYY(alert.next_due_date)}</span>
+                      </p>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {errorMessage && (
           <div className="p-4 bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl">
             <strong>Error:</strong> {decodeURIComponent(errorMessage)}
           </div>
         )}
 
-        {/* Grid Layout: Left Profile + QR Tag | Right Weight & Financial Ledgers */}
+        {/* Grid Layout: Left Profile + QR + Timeline | Right Weight + Medical + Financial */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           
           {/* Left Column */}
@@ -248,11 +390,21 @@ export default async function AnimalDetailPage({
                 </div>
               )}
 
-              <div>
-                <p className="text-xs text-slate-500">Onboarding Date</p>
-                <p className="text-sm font-semibold text-slate-900 mt-0.5">
-                  {animal.acquisition_date ? new Date(animal.acquisition_date).toLocaleDateString() : 'N/A'}
-                </p>
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <div>
+                  <p className="text-xs text-slate-500">Onboarding Date</p>
+                  <p className="text-sm font-semibold text-slate-900 mt-0.5 font-mono">
+                    {formatDateDDMMYYYY(animal.acquisition_date)}
+                  </p>
+                </div>
+                {animal.dob && (
+                  <div>
+                    <p className="text-xs text-slate-500">Date of Birth</p>
+                    <p className="text-sm font-semibold text-slate-900 mt-0.5 font-mono">
+                      {formatDateDDMMYYYY(animal.dob)}
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -276,7 +428,7 @@ export default async function AnimalDetailPage({
               </div>
 
               <p className="text-xs text-slate-500">
-                Scan with mobile camera in shed to open live profile & weight logs instantly.
+                Scan with mobile camera in shed to open live profile & logs instantly.
               </p>
 
               <a
@@ -289,9 +441,32 @@ export default async function AnimalDetailPage({
                 Open / Print QR Tag
               </a>
             </div>
+
+            {/* PHASE 6: Unified Chronological Activity Timeline */}
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Activity Timeline</h3>
+                <span className="text-[11px] text-slate-400">{timelineEvents.length} events</span>
+              </div>
+
+              <div className="relative pl-4 border-l-2 border-slate-200 space-y-4 max-h-96 overflow-y-auto">
+                {timelineEvents.length > 0 ? (
+                  timelineEvents.slice(0, 15).map((ev, idx) => (
+                    <div key={idx} className="relative">
+                      <span className={`absolute -left-[21px] top-1.5 h-2.5 w-2.5 rounded-full ring-4 ring-white ${ev.badgeColor}`}></span>
+                      <p className="text-[11px] font-mono text-slate-400">{formatDateDDMMYYYY(ev.date)}</p>
+                      <p className="text-xs font-semibold text-slate-800">{ev.title}</p>
+                      <p className="text-[11px] text-slate-500">{ev.subtitle}</p>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-xs text-slate-400">No activity recorded yet.</p>
+                )}
+              </div>
+            </div>
           </div>
 
-          {/* Right Column: Weight Tracking & Automated Financial Ledger */}
+          {/* Right Column: Weight, Medical/Vaccination & Financial Ledgers */}
           <div className="lg:col-span-2 space-y-6">
             
             {/* Growth Summary Mini-Bar */}
@@ -335,7 +510,7 @@ export default async function AnimalDetailPage({
                     name="recorded_date"
                     type="date"
                     required
-                    defaultValue={new Date().toISOString().split('T')[0]}
+                    defaultValue={todayStr}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-sm focus:bg-white focus:ring-2 focus:ring-green-600 transition"
                   />
                 </div>
@@ -369,7 +544,7 @@ export default async function AnimalDetailPage({
                 <table className="min-w-full divide-y divide-slate-100">
                   <thead className="bg-slate-50">
                     <tr>
-                      <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Date</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Date (DD/MM/YYYY)</th>
                       <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Weight (KG)</th>
                       <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Notes</th>
                       <th className="px-6 py-3 text-right text-xs font-semibold text-slate-500 uppercase">Actions</th>
@@ -425,8 +600,8 @@ export default async function AnimalDetailPage({
                           </tr>
                         ) : (
                           <tr key={log.id} className="hover:bg-slate-50 transition-colors">
-                            <td className="px-6 py-3.5 text-sm text-slate-800">
-                              {new Date(log.recorded_date).toLocaleDateString()}
+                            <td className="px-6 py-3.5 text-sm font-mono text-slate-800">
+                              {formatDateDDMMYYYY(log.recorded_date)}
                             </td>
                             <td className="px-6 py-3.5 text-sm font-bold text-green-700 font-mono">
                               {log.weight_kg} kg
@@ -458,6 +633,166 @@ export default async function AnimalDetailPage({
                       <tr>
                         <td colSpan={4} className="px-6 py-8 text-center text-slate-400 text-sm">
                           No weight logs recorded yet. Add the first weight entry above.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* PHASE 6: Medical, Deworming & Vaccination History Log */}
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="px-6 py-4 border-b border-slate-100 bg-blue-950 text-white flex items-center justify-between">
+                <div>
+                  <h3 className="font-bold text-sm">Medical, Deworming & Vaccination Log</h3>
+                  <p className="text-[11px] text-blue-200">Track health protocols, medicine dosage & upcoming booster alerts</p>
+                </div>
+                <span className="text-xs bg-blue-900 px-2.5 py-1 rounded-lg text-blue-100 font-medium">
+                  {medicalLogs?.length || 0} records
+                </span>
+              </div>
+
+              {/* Add Medical Log Form */}
+              <div className="p-6 border-b border-slate-100 bg-slate-50/50">
+                <form action={addMedicalLog} className="space-y-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 mb-1">Protocol Type *</label>
+                      <select
+                        name="treatment_type"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-medium focus:ring-2 focus:ring-blue-600"
+                      >
+                        <option value="Deworming">Deworming</option>
+                        <option value="Vaccination">Vaccination</option>
+                        <option value="Medication">Medication / Treatment</option>
+                        <option value="Multivitamin">Multivitamin / Liver Tonic</option>
+                        <option value="Health Checkup">Health Checkup</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 mb-1">Medicine / Vaccine Name *</label>
+                      <input
+                        name="medicine_name"
+                        type="text"
+                        required
+                        placeholder="e.g., Abentin, Ivermectin, ETV"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-blue-600"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 mb-1">Dosage / Route</label>
+                      <input
+                        name="dosage"
+                        type="text"
+                        placeholder="e.g., 10ml Oral, 2cc Subcut"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-blue-600"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 mb-1">Date Given *</label>
+                      <input
+                        name="administered_date"
+                        type="date"
+                        required
+                        defaultValue={todayStr}
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-blue-600"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 mb-1">Next Due Date (Alert)</label>
+                      <input
+                        name="next_due_date"
+                        type="date"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-blue-600"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 mb-1">Notes</label>
+                      <div className="flex gap-1.5">
+                        <input
+                          name="notes"
+                          type="text"
+                          placeholder="Optional..."
+                          className="w-full px-2.5 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-blue-600"
+                        />
+                        <button
+                          type="submit"
+                          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shrink-0 transition"
+                        >
+                          Log
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </form>
+              </div>
+
+              {/* Medical History Table */}
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-slate-100">
+                  <thead className="bg-slate-50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Date Given</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Type & Medicine</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Dosage</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Next Due</th>
+                      <th className="px-6 py-3 text-right text-xs font-semibold text-slate-500 uppercase">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-slate-100">
+                    {medicalLogs && medicalLogs.length > 0 ? (
+                      medicalLogs.map((med) => {
+                        const isDueSoon = med.next_due_date && med.next_due_date <= sevenDaysFromNow
+                        return (
+                          <tr key={med.id} className="hover:bg-slate-50 transition-colors">
+                            <td className="px-6 py-3.5 text-xs font-mono text-slate-700">
+                              {formatDateDDMMYYYY(med.administered_date)}
+                            </td>
+                            <td className="px-6 py-3.5">
+                              <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-semibold rounded-md bg-blue-50 text-blue-700 border border-blue-200 mr-1.5">
+                                {med.treatment_type}
+                              </span>
+                              <span className="text-xs font-semibold text-slate-800">{med.medicine_name}</span>
+                              {med.notes && <p className="text-[11px] text-slate-400 mt-0.5">{med.notes}</p>}
+                            </td>
+                            <td className="px-6 py-3.5 text-xs text-slate-600">{med.dosage || '—'}</td>
+                            <td className="px-6 py-3.5 text-xs font-mono">
+                              {med.next_due_date ? (
+                                <span className={`px-2 py-0.5 rounded-md font-semibold ${
+                                  isDueSoon ? 'bg-amber-100 text-amber-800 border border-amber-300' : 'text-slate-600'
+                                }`}>
+                                  {formatDateDDMMYYYY(med.next_due_date)}
+                                </span>
+                              ) : (
+                                <span className="text-slate-400">—</span>
+                              )}
+                            </td>
+                            <td className="px-6 py-3.5 text-right">
+                              <form action={deleteMedicalLog} className="inline-block">
+                                <input type="hidden" name="medId" value={med.id} />
+                                <button
+                                  type="submit"
+                                  className="px-2.5 py-1 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-xs font-medium transition"
+                                >
+                                  Delete
+                                </button>
+                              </form>
+                            </td>
+                          </tr>
+                        )
+                      })
+                    ) : (
+                      <tr>
+                        <td colSpan={5} className="px-6 py-8 text-center text-slate-400 text-xs">
+                          No deworming, vaccination, or medical records logged yet.
                         </td>
                       </tr>
                     )}
@@ -533,7 +868,7 @@ export default async function AnimalDetailPage({
                       name="transaction_date"
                       type="date"
                       required
-                      defaultValue={new Date().toISOString().split('T')[0]}
+                      defaultValue={todayStr}
                       className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-green-600"
                     />
                   </div>
@@ -563,7 +898,7 @@ export default async function AnimalDetailPage({
                 <table className="min-w-full divide-y divide-slate-100">
                   <thead className="bg-slate-50">
                     <tr>
-                      <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Date</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Date (DD/MM/YYYY)</th>
                       <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Category</th>
                       <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Amount</th>
                       <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Notes</th>
@@ -574,8 +909,8 @@ export default async function AnimalDetailPage({
                     {financialLogs && financialLogs.length > 0 ? (
                       financialLogs.map((fin) => (
                         <tr key={fin.id} className="hover:bg-slate-50 transition-colors">
-                          <td className="px-6 py-3.5 text-xs text-slate-700">
-                            {new Date(fin.transaction_date).toLocaleDateString()}
+                          <td className="px-6 py-3.5 text-xs font-mono text-slate-700">
+                            {formatDateDDMMYYYY(fin.transaction_date)}
                           </td>
                           <td className="px-6 py-3.5">
                             <span className={`inline-flex items-center px-2.5 py-0.5 text-[11px] font-semibold rounded-full ${
