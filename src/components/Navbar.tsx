@@ -41,6 +41,12 @@ export default async function Navbar() {
                 >
                   Finances & Billing
                 </Link>
+                <Link
+                  href="/contacts"
+                  className="px-3 py-2 rounded-md text-sm font-medium text-gray-700 hover:text-green-600 hover:bg-gray-50 transition"
+                >
+                  Contacts
+                </Link>
               </div>
             )}
           </div>
