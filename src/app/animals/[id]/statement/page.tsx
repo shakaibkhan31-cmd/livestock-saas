@@ -99,6 +99,8 @@ export default function AnimalStatementPage() {
   const initialWeight = weightLogs.length > 0 ? Number(weightLogs[weightLogs.length - 1].weight_kg) : null
   const netGain = latestWeight !== null && initialWeight !== null ? (latestWeight - initialWeight).toFixed(1) : null
 
+  const isSelfOwned = animal?.ownership === 'Self'
+
   const purchaseCost = Number(animal?.cost_basis || 0)
   const loggedExpenses = financialLogs
     .filter(f => f.entry_type === 'Expense')
@@ -107,7 +109,7 @@ export default function AnimalStatementPage() {
     .filter(f => f.entry_type === 'Revenue')
     .reduce((sum, f) => sum + Number(f.amount || 0), 0)
 
-  const totalCostOutflow = (animal?.ownership === 'Self' ? purchaseCost : 0) + loggedExpenses
+  const totalCostOutflow = (isSelfOwned ? purchaseCost : 0) + loggedExpenses
   const netPnL = loggedRevenue - totalCostOutflow
 
   return (
@@ -137,13 +139,14 @@ export default function AnimalStatementPage() {
           <p className="text-slate-500">Sex: <strong className="text-slate-900">{animal?.sex}</strong></p>
         </div>
         <div>
-          <p className="text-slate-500">Ownership: <strong className="text-slate-900">{animal?.ownership === 'Self' ? 'Farm Owned' : `Palai Client (${animal?.client_name})`}</strong></p>
+          <p className="text-slate-500">Ownership: <strong className="text-slate-900">{isSelfOwned ? 'Farm Owned' : `Palai Client (${animal?.client_name})`}</strong></p>
           <p className="text-slate-500">Onboarding Date: <strong className="text-slate-900 font-mono">{formatDateDDMMYYYY(animal?.acquisition_date)}</strong></p>
           <p className="text-slate-500">Status: <strong className="text-emerald-700">{animal?.status}</strong></p>
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-4 text-center">
+      {/* Summary Cards: Conditional P&L display based on ownership */}
+      <div className={`grid gap-4 text-center ${isSelfOwned ? 'grid-cols-3' : 'grid-cols-2'}`}>
         <div className="p-4 bg-slate-100 rounded-xl border border-slate-200">
           <p className="text-xs text-slate-500 uppercase font-semibold">Latest Weight</p>
           <p className="text-xl font-bold font-mono text-slate-900 mt-1">{latestWeight !== null ? `${latestWeight} kg` : 'N/A'}</p>
@@ -152,16 +155,22 @@ export default function AnimalStatementPage() {
           <p className="text-xs text-slate-500 uppercase font-semibold">Net Weight Gain</p>
           <p className="text-xl font-bold font-mono text-emerald-700 mt-1">{netGain !== null ? `${netGain} kg` : 'N/A'}</p>
         </div>
-        <div className="p-4 bg-slate-100 rounded-xl border border-slate-200">
-          <p className="text-xs text-slate-500 uppercase font-semibold">Net P&L (Profit/Loss)</p>
-          <p className={`text-xl font-bold font-mono mt-1 ${netPnL >= 0 ? 'text-emerald-700' : 'text-rose-600'}`}>
-            Rs. {netPnL.toLocaleString()}
-          </p>
-        </div>
+        
+        {/* Only show Net P&L for Farm Owned (Self) animals */}
+        {isSelfOwned && (
+          <div className="p-4 bg-slate-100 rounded-xl border border-slate-200">
+            <p className="text-xs text-slate-500 uppercase font-semibold">Net P&L (Profit/Loss)</p>
+            <p className={`text-xl font-bold font-mono mt-1 ${netPnL >= 0 ? 'text-emerald-700' : 'text-rose-600'}`}>
+              Rs. {netPnL.toLocaleString()}
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="space-y-2">
-        <h3 className="font-bold text-base text-slate-900">Financial Ledger</h3>
+        <h3 className="font-bold text-base text-slate-900">
+          {isSelfOwned ? 'Financial Ledger' : 'Boarding Fee & Payments History'}
+        </h3>
         <table className="min-w-full divide-y divide-slate-200 border text-xs">
           <thead className="bg-slate-100">
             <tr>
@@ -173,7 +182,7 @@ export default function AnimalStatementPage() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-200">
-            {animal?.ownership === 'Self' && (
+            {isSelfOwned && purchaseCost > 0 && (
               <tr>
                 <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(animal?.acquisition_date)}</td>
                 <td className="px-3 py-2 font-semibold text-rose-600">Expense</td>
@@ -182,17 +191,19 @@ export default function AnimalStatementPage() {
                 <td className="px-3 py-2">Initial Acquisition</td>
               </tr>
             )}
-            {financialLogs.map(f => (
-              <tr key={f.id}>
-                <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(f.transaction_date)}</td>
-                <td className={`px-3 py-2 font-semibold ${f.entry_type === 'Revenue' ? 'text-emerald-700' : 'text-rose-600'}`}>{f.entry_type}</td>
-                <td className="px-3 py-2">{f.category}</td>
-                <td className={`px-3 py-2 font-mono font-bold ${f.entry_type === 'Revenue' ? 'text-emerald-700' : 'text-rose-600'}`}>
-                  {f.entry_type === 'Revenue' ? '+' : '-'} Rs. {Number(f.amount).toLocaleString()}
-                </td>
-                <td className="px-3 py-2">{f.notes || '—'}</td>
-              </tr>
-            ))}
+            {financialLogs
+              .filter(f => isSelfOwned || f.entry_type === 'Revenue') // For clients, hide internal expense logs if any
+              .map(f => (
+                <tr key={f.id}>
+                  <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(f.transaction_date)}</td>
+                  <td className={`px-3 py-2 font-semibold ${f.entry_type === 'Revenue' ? 'text-emerald-700' : 'text-rose-600'}`}>{f.entry_type}</td>
+                  <td className="px-3 py-2">{f.category}</td>
+                  <td className={`px-3 py-2 font-mono font-bold ${f.entry_type === 'Revenue' ? 'text-emerald-700' : 'text-rose-600'}`}>
+                    {f.entry_type === 'Revenue' ? '+' : '-'} Rs. {Number(f.amount).toLocaleString()}
+                  </td>
+                  <td className="px-3 py-2">{f.notes || '—'}</td>
+                </tr>
+              ))}
           </tbody>
         </table>
       </div>
