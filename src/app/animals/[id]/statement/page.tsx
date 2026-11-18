@@ -1,6 +1,9 @@
-import { createClient } from '@/utils/supabase/server'
-import { redirect } from 'next/navigation'
+'use client'
+
+import { useEffect, useState } from 'react'
+import { useParams } from 'next/navigation'
 import Link from 'next/link'
+import { createClient } from '@/utils/supabase/client'
 
 function formatDateDDMMYYYY(dateInput?: string | null): string {
   if (!dateInput) return 'N/A'
@@ -18,59 +21,93 @@ function formatDateDDMMYYYY(dateInput?: string | null): string {
   return `${day}/${month}/${year}`
 }
 
-export default async function AnimalStatementPage({
-  params,
-}: {
-  params: Promise<{ id: string }>
-}) {
-  const { id } = await params
-  const supabase = await createClient()
+export default function AnimalStatementPage() {
+  const params = useParams()
+  const id = params?.id as string
 
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return redirect('/login')
+  const [loading, setLoading] = useState(true)
+  const [farm, setFarm] = useState<{ farm_name: string } | null>(null)
+  const [animal, setAnimal] = useState<any>(null)
+  const [weightLogs, setWeightLogs] = useState<any[]>([])
+  const [financialLogs, setFinancialLogs] = useState<any[]>([])
 
-  const { data: farm } = await supabase
-    .from('farms')
-    .select('id, farm_name')
-    .eq('owner_id', user.id)
-    .single()
+  useEffect(() => {
+    async function fetchData() {
+      if (!id) return
+      const supabase = createClient()
 
-  if (!farm) return redirect('/onboarding')
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) {
+        window.location.href = '/login'
+        return
+      }
 
-  const { data: animal } = await supabase
-    .from('livestock_master')
-    .select('*')
-    .eq('id', id)
-    .eq('farm_id', farm.id)
-    .single()
+      const { data: farmData } = await supabase
+        .from('farms')
+        .select('id, farm_name')
+        .eq('owner_id', user.id)
+        .single()
 
-  if (!animal) return redirect('/animals')
+      if (!farmData) {
+        window.location.href = '/onboarding'
+        return
+      }
+      setFarm(farmData)
 
-  const { data: weightLogs } = await supabase
-    .from('animal_weight_logs')
-    .select('*')
-    .eq('animal_id', id)
-    .order('recorded_date', { ascending: false })
+      const { data: animalData } = await supabase
+        .from('livestock_master')
+        .select('*')
+        .eq('id', id)
+        .eq('farm_id', farmData.id)
+        .single()
 
-  const { data: financialLogs } = await supabase
-    .from('animal_financial_logs')
-    .select('*')
-    .eq('animal_id', id)
-    .order('transaction_date', { ascending: false })
+      if (!animalData) {
+        window.location.href = '/animals'
+        return
+      }
+      setAnimal(animalData)
 
-  const latestWeight = weightLogs && weightLogs.length > 0 ? Number(weightLogs[0].weight_kg) : null
-  const initialWeight = weightLogs && weightLogs.length > 0 ? Number(weightLogs[weightLogs.length - 1].weight_kg) : null
+      const { data: weights } = await supabase
+        .from('animal_weight_logs')
+        .select('*')
+        .eq('animal_id', id)
+        .order('recorded_date', { ascending: false })
+      setWeightLogs(weights || [])
+
+      const { data: financials } = await supabase
+        .from('animal_financial_logs')
+        .select('*')
+        .eq('animal_id', id)
+        .order('transaction_date', { ascending: false })
+      setFinancialLogs(financials || [])
+
+      setLoading(false)
+    }
+
+    fetchData()
+  }, [id])
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-white flex items-center justify-center text-slate-500 text-sm font-mono">
+        Loading Official Statement...
+      </div>
+    )
+  }
+
+  const latestWeight = weightLogs.length > 0 ? Number(weightLogs[0].weight_kg) : null
+  const initialWeight = weightLogs.length > 0 ? Number(weightLogs[weightLogs.length - 1].weight_kg) : null
   const netGain = latestWeight !== null && initialWeight !== null ? (latestWeight - initialWeight).toFixed(1) : null
 
-  const purchaseCost = Number(animal.cost_basis || 0)
-  const loggedExpenses = (financialLogs || [])
+  const purchaseCost = Number(animal?.cost_basis || 0)
+  const loggedExpenses = financialLogs
     .filter(f => f.entry_type === 'Expense')
     .reduce((sum, f) => sum + Number(f.amount || 0), 0)
-  const loggedRevenue = (financialLogs || [])
+  const loggedRevenue = financialLogs
     .filter(f => f.entry_type === 'Revenue')
     .reduce((sum, f) => sum + Number(f.amount || 0), 0)
 
-  const totalCostOutflow = (animal.ownership === 'Self' ? purchaseCost : 0) + loggedExpenses
+  const totalCostOutflow = (animal?.ownership === 'Self' ? purchaseCost : 0) + loggedExpenses
   const netPnL = loggedRevenue - totalCostOutflow
 
   return (
@@ -80,29 +117,29 @@ export default async function AnimalStatementPage({
           &larr; Back to Live Profile
         </Link>
         <button
-          onClick={() => typeof window !== 'undefined' && window.print()}
-          className="px-4 py-2 bg-slate-900 text-white rounded-xl text-sm font-bold shadow hover:bg-slate-800"
+          onClick={() => window.print()}
+          className="px-4 py-2 bg-slate-900 text-white rounded-xl text-sm font-bold shadow hover:bg-slate-800 transition"
         >
           🖨️ Print / Save as PDF
         </button>
       </div>
 
       <div className="text-center border-b-2 border-slate-900 pb-6 space-y-1">
-        <h1 className="text-3xl font-extrabold uppercase tracking-wider">{farm.farm_name}</h1>
+        <h1 className="text-3xl font-extrabold uppercase tracking-wider">{farm?.farm_name}</h1>
         <p className="text-sm text-slate-500 uppercase tracking-widest font-semibold">Official Animal Statement & Audit Report</p>
         <p className="text-xs font-mono text-slate-400">Generated on: {new Date().toLocaleDateString()}</p>
       </div>
 
       <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-200 text-sm">
         <div>
-          <p className="text-slate-500">Tag ID: <strong className="text-slate-900 font-mono text-base">{animal.tag_id}</strong></p>
-          <p className="text-slate-500">Species / Breed: <strong className="text-slate-900">{animal.species} {animal.breed_name ? `• ${animal.breed_name}` : ''}</strong></p>
-          <p className="text-slate-500">Sex: <strong className="text-slate-900">{animal.sex}</strong></p>
+          <p className="text-slate-500">Tag ID: <strong className="text-slate-900 font-mono text-base">{animal?.tag_id}</strong></p>
+          <p className="text-slate-500">Species / Breed: <strong className="text-slate-900">{animal?.species} {animal?.breed_name ? `• ${animal.breed_name}` : ''}</strong></p>
+          <p className="text-slate-500">Sex: <strong className="text-slate-900">{animal?.sex}</strong></p>
         </div>
         <div>
-          <p className="text-slate-500">Ownership: <strong className="text-slate-900">{animal.ownership === 'Self' ? 'Farm Owned' : `Palai Client (${animal.client_name})`}</strong></p>
-          <p className="text-slate-500">Onboarding Date: <strong className="text-slate-900 font-mono">{formatDateDDMMYYYY(animal.acquisition_date)}</strong></p>
-          <p className="text-slate-500">Status: <strong className="text-emerald-700">{animal.status}</strong></p>
+          <p className="text-slate-500">Ownership: <strong className="text-slate-900">{animal?.ownership === 'Self' ? 'Farm Owned' : `Palai Client (${animal?.client_name})`}</strong></p>
+          <p className="text-slate-500">Onboarding Date: <strong className="text-slate-900 font-mono">{formatDateDDMMYYYY(animal?.acquisition_date)}</strong></p>
+          <p className="text-slate-500">Status: <strong className="text-emerald-700">{animal?.status}</strong></p>
         </div>
       </div>
 
@@ -136,16 +173,16 @@ export default async function AnimalStatementPage({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-200">
-            {animal.ownership === 'Self' && (
+            {animal?.ownership === 'Self' && (
               <tr>
-                <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(animal.acquisition_date)}</td>
+                <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(animal?.acquisition_date)}</td>
                 <td className="px-3 py-2 font-semibold text-rose-600">Expense</td>
                 <td className="px-3 py-2">Cost Basis / Purchase</td>
                 <td className="px-3 py-2 font-mono font-bold">- Rs. {purchaseCost.toLocaleString()}</td>
                 <td className="px-3 py-2">Initial Acquisition</td>
               </tr>
             )}
-            {financialLogs && financialLogs.map(f => (
+            {financialLogs.map(f => (
               <tr key={f.id}>
                 <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(f.transaction_date)}</td>
                 <td className={`px-3 py-2 font-semibold ${f.entry_type === 'Revenue' ? 'text-emerald-700' : 'text-rose-600'}`}>{f.entry_type}</td>
@@ -171,7 +208,7 @@ export default async function AnimalStatementPage({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-200">
-            {weightLogs && weightLogs.map(w => (
+            {weightLogs.map(w => (
               <tr key={w.id}>
                 <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(w.recorded_date)}</td>
                 <td className="px-3 py-2 font-mono font-bold text-slate-900">{w.weight_kg} kg</td>
@@ -183,7 +220,7 @@ export default async function AnimalStatementPage({
       </div>
 
       <div className="pt-8 text-center text-xs text-slate-400 border-t mt-12">
-        <p>{farm.farm_name} • Certified Livestock Management ERP Statement</p>
+        <p>{farm?.farm_name} • Certified Livestock Management ERP Statement</p>
       </div>
     </div>
   )
