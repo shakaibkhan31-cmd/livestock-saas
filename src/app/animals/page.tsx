@@ -6,17 +6,24 @@ import AnimalsClientView from './AnimalsClientView'
 // Helper: Species-based Smart Default Icon SVG when photo_url is missing
 function getSpeciesDefaultIcon(species?: string): string {
   const sp = (species || 'Goat').toLowerCase()
+  
+  // Chicken / Bird Icon
   if (sp.includes('chicken') || sp.includes('bird') || sp.includes('quail')) {
-    return 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%2316a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2z"/><path d="M12 8v4l3 3"/></svg>'
+    return 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%2316a34a"><path d="M19 7c0-1.1-.9-2-2-2h-3l-1-2H9L8 5H5c-1.1 0-2 .9-2 2v2c0 1.1.9 2 2 2h1v1c0 2.8 2.2 5 5 5h1v2H9v2h6v-2h-2v-2h1c2.8 0 5-2.2 5-5v-1h1c1.1 0 2-.9 2-2V7z"/></svg>'
   }
+  
+  // Sheep / Goat Icon
   if (sp.includes('sheep') || sp.includes('goat')) {
-    return 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%2316a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 11v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6"/><path d="M5 7l7-4 7 4v4H5z"/></svg>'
+    return 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%2316a34a"><path d="M12 2C9.24 2 7 4.24 7 7c0 .74.17 1.44.47 2.07C6.15 9.77 5 11.24 5 13c0 1.66 1.34 3 3 3h.59C9.28 17.65 10.5 19 12 19s2.72-1.35 3.41-3H16c1.66 0 3-1.34 3-3 0-1.76-1.15-3.23-2.47-3.93.3-.63.47-1.33.47-2.07 0-2.76-2.24-5-5-5zm0 2c1.65 0 3 1.35 3 3s-1.35 3-3 3-3-1.35-3-3 1.35-3 3-3z"/></svg>'
   }
+  
+  // Cattle / Cow / Buffalo Icon
   if (sp.includes('cattle') || sp.includes('cow') || sp.includes('buffalo') || sp.includes('bull')) {
-    return 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%2316a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 12h4m4 0h4"/></svg>'
+    return 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%2316a34a"><path d="M20 7v3h-2.1c-.5-1.8-2-3-3.9-3s-3.4 1.2-3.9 3H7V7c0-1.1-.9-2-2-2s-2 .9-2 2v7c0 2.2 1.8 4 4 4h12c2.2 0 4-1.8 4-4V7c0-1.1-.9-2-2-2s-2 .9-2 2z"/></svg>'
   }
+  
   // Default Livestock Icon
-  return 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%2316a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/></svg>'
+  return 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%2316a34a"><circle cx="12" cy="12" r="10"/></svg>'
 }
 
 export default async function AnimalsPage({
