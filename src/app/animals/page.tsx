@@ -3,11 +3,6 @@ import { redirect } from 'next/navigation'
 import Link from 'next/link'
 import AnimalsClientView from './AnimalsClientView'
 
-// Helper: Original Clean Livestock Icon Fallback
-function getSpeciesDefaultIcon(species?: string): string {
-  return 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%2316a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 11v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6"/><path d="M5 7l7-4 7 4v4H5z"/></svg>'
-}
-
 export default async function AnimalsPage({
   searchParams,
 }: {
@@ -31,20 +26,12 @@ export default async function AnimalsPage({
   if (!farm) return redirect('/onboarding')
 
   // Fetch active animals
-  const { data: rawAnimals } = await supabase
+  const { data: animals } = await supabase
     .from('livestock_master')
     .select('*')
     .eq('farm_id', farm.id)
     .eq('status', 'Active')
     .order('created_at', { ascending: false })
-
-  // Map animals to ensure fallback photo_url uses clean default icon
-  const animals = (rawAnimals || []).map(animal => ({
-    ...animal,
-    photo_url: animal.photo_url && animal.photo_url.trim() !== '' 
-      ? animal.photo_url 
-      : getSpeciesDefaultIcon(animal.species)
-  }))
 
   // 1. Single Delete Server Action
   async function deleteAnimal(formData: FormData) {
@@ -205,7 +192,7 @@ export default async function AnimalsPage({
             <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Client Palai (Boarding)</p>
             <p className="text-2xl font-bold text-purple-600 mt-1">{palaiStock} <span className="text-sm font-normal text-slate-400">animals</span></p>
           </div>
-          <div className="bg-white p-5 ruined-2xl border border-slate-200 shadow-sm">
+          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
             <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Cost Valuation</p>
             <p className="text-2xl font-bold text-slate-900 mt-1">Rs. {totalValuation.toLocaleString()}</p>
           </div>
