@@ -207,12 +207,20 @@ export default async function FinancesPage({
             <p className="text-sm text-slate-500">Consolidated farm-wide income, Palai boarding fees & operational analytics</p>
           </div>
 
-          <Link
-            href="/animals"
-            className="inline-flex items-center justify-center px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-700 font-medium rounded-xl border border-slate-200 shadow-sm transition text-sm"
-          >
-            ← Back to Livestock Master
-          </Link>
+          <div className="flex items-center gap-2">
+            <Link
+              href="/contacts"
+              className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-xl shadow-sm transition text-sm"
+            >
+              👥 Contacts Directory
+            </Link>
+            <Link
+              href="/animals"
+              className="inline-flex items-center justify-center px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-700 font-medium rounded-xl border border-slate-200 shadow-sm transition text-sm"
+            >
+              ← Back to Livestock Master
+            </Link>
+          </div>
         </div>
 
         {/* Feedback Banners */}
