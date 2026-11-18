@@ -3,6 +3,22 @@ import { redirect } from 'next/navigation'
 import Link from 'next/link'
 import AnimalsClientView from './AnimalsClientView'
 
+// Helper: Species-based Smart Default Icon SVG when photo_url is missing
+function getSpeciesDefaultIcon(species?: string): string {
+  const sp = (species || 'Goat').toLowerCase()
+  if (sp.includes('chicken') || sp.includes('bird') || sp.includes('quail')) {
+    return 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%2316a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2z"/><path d="M12 8v4l3 3"/></svg>'
+  }
+  if (sp.includes('sheep') || sp.includes('goat')) {
+    return 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%2316a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 11v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6"/><path d="M5 7l7-4 7 4v4H5z"/></svg>'
+  }
+  if (sp.includes('cattle') || sp.includes('cow') || sp.includes('buffalo') || sp.includes('bull')) {
+    return 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%2316a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 12h4m4 0h4"/></svg>'
+  }
+  // Default Livestock Icon
+  return 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%2316a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/></svg>'
+}
+
 export default async function AnimalsPage({
   searchParams,
 }: {
@@ -26,12 +42,20 @@ export default async function AnimalsPage({
   if (!farm) return redirect('/onboarding')
 
   // Fetch active animals
-  const { data: animals } = await supabase
+  const { data: rawAnimals } = await supabase
     .from('livestock_master')
     .select('*')
     .eq('farm_id', farm.id)
     .eq('status', 'Active')
     .order('created_at', { ascending: false })
+
+  // Map animals to ensure fallback photo_url uses species-specific smart icon
+  const animals = (rawAnimals || []).map(animal => ({
+    ...animal,
+    photo_url: animal.photo_url && animal.photo_url.trim() !== '' 
+      ? animal.photo_url 
+      : getSpeciesDefaultIcon(animal.species)
+  }))
 
   // 1. Single Delete Server Action
   async function deleteAnimal(formData: FormData) {
