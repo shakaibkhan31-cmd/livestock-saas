@@ -3,22 +3,8 @@ import { redirect } from 'next/navigation'
 import Link from 'next/link'
 import AnimalsClientView from './AnimalsClientView'
 
-// Helper: Clean Species-Specific Livestock Vector Icons
+// Helper: Original Clean Livestock Icon Fallback
 function getSpeciesDefaultIcon(species?: string): string {
-  const sp = (species || 'Goat').toLowerCase()
-  
-  if (sp.includes('chicken') || sp.includes('bird') || sp.includes('quail') || sp.includes('poultry')) {
-    return 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%2316a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 7h.01M3.4 18H12a8 8 0 0 0 8-8V7a4 4 0 0 0-4-4H9a5 5 0 0 0-5 5v7a3 3 0 0 0-3 3v1h4.4Z"/></svg>'
-  }
-  
-  if (sp.includes('sheep') || sp.includes('goat') || sp.includes('lamb')) {
-    return 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%2316a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 11v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6"/><path d="M5 7l7-4 7 4v4H5z"/></svg>'
-  }
-  
-  if (sp.includes('cattle') || sp.includes('cow') || sp.includes('buffalo') || sp.includes('bull')) {
-    return 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%2316a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 12h4m4 0h4"/><path d="M2 10h2m16 0h2"/></svg>'
-  }
-  
   return 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%2316a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 11v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6"/><path d="M5 7l7-4 7 4v4H5z"/></svg>'
 }
 
@@ -52,7 +38,7 @@ export default async function AnimalsPage({
     .eq('status', 'Active')
     .order('created_at', { ascending: false })
 
-  // Map animals to ensure fallback photo_url uses species-specific smart icon
+  // Map animals to ensure fallback photo_url uses clean default icon
   const animals = (rawAnimals || []).map(animal => ({
     ...animal,
     photo_url: animal.photo_url && animal.photo_url.trim() !== '' 
@@ -219,7 +205,7 @@ export default async function AnimalsPage({
             <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Client Palai (Boarding)</p>
             <p className="text-2xl font-bold text-purple-600 mt-1">{palaiStock} <span className="text-sm font-normal text-slate-400">animals</span></p>
           </div>
-          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
+          <div className="bg-white p-5 ruined-2xl border border-slate-200 shadow-sm">
             <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Cost Valuation</p>
             <p className="text-2xl font-bold text-slate-900 mt-1">Rs. {totalValuation.toLocaleString()}</p>
           </div>
