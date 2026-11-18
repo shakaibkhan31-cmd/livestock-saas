@@ -288,7 +288,69 @@ export default async function FeedManagementPage({
     return redirect(`/feed?msg=${encodeURIComponent('Feed log entry deleted.')}`)
   }
 
-  // SERVER ACTION 3: Species-Specific Automated Cost Split (Admin Only)
+  // SERVER ACTION 3: Feed Stock Adjustment / Closing Write-off (Admin Only)
+  const adjustFeedStock = async (formData: FormData) => {
+    'use server'
+    const target_species = (formData.get('target_species') as string) || 'Goat'
+    const feed_type = (formData.get('feed_type') as string) || ''
+    const targetRemainingKg = parseFloat(formData.get('target_remaining_kg') as string) || 0
+    const log_date = (formData.get('log_date') as string) || new Date().toISOString().split('T')[0]
+    const notes = (formData.get('notes') as string) || 'Closing Stock Adjustment / Write-off'
+
+    if (!feed_type) {
+      return redirect('/feed?error=Please+select+a+feed+item+to+adjust.')
+    }
+
+    const supabaseClient = await createClient()
+
+    // Calculate current remaining for this specific item
+    const { data: itemLogs } = await supabaseClient
+      .from('feed_logs')
+      .select('quantity_kg, entry_type')
+      .eq('farm_id', farm.id)
+      .eq('target_species', target_species)
+      .eq('feed_type', feed_type)
+
+    let totalPurchased = 0
+    let totalConsumed = 0
+    ;(itemLogs || []).forEach(l => {
+      const q = Number(l.quantity_kg) || 0
+      if (l.entry_type === 'Purchase' || !l.entry_type) totalPurchased += q
+      else totalConsumed += q
+    })
+
+    const currentRemaining = totalPurchased - totalConsumed
+    const diff = currentRemaining - targetRemainingKg
+
+    if (diff <= 0) {
+      return redirect(`/feed?error=${encodeURIComponent(`Target stock (${targetRemainingKg}kg) is greater than or equal to current stock (${currentRemaining}kg). Use standard consumption log instead.`)}`)
+    }
+
+    // Insert a Consumption log equal to the difference to balance it to targetRemainingKg
+    const { error } = await supabaseClient.from('feed_logs').insert({
+      farm_id: farm.id,
+      target_species,
+      entry_type: 'Consumption',
+      feed_type,
+      quantity_kg: diff,
+      total_cost: 0,
+      log_date,
+      notes,
+      is_allocated: true,
+    })
+
+    if (error) {
+      return redirect(`/feed?error=${encodeURIComponent(error.message)}`)
+    }
+
+    return redirect(
+      `/feed?species=${encodeURIComponent(target_species)}&msg=${encodeURIComponent(
+        `Successfully adjusted ${feed_type} stock to ${targetRemainingKg} kg!`
+      )}`
+    )
+  }
+
+  // SERVER ACTION 4: Species-Specific Automated Cost Split (Admin Only)
   const allocateFeedCostToAnimals = async (formData: FormData) => {
     'use server'
     const targetSpecies = (formData.get('allocate_species') as string) || 'Goat'
@@ -655,6 +717,76 @@ export default async function FeedManagementPage({
                 </div>
               </form>
             </div>
+          </div>
+        )}
+
+        {/* ADMIN: Feed Stock Adjustment / Closing Write-off Card */}
+        {isAdmin && (
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
+            <div>
+              <h2 className="text-base font-bold text-slate-900">Feed Stock Adjustment / Closing Write-off</h2>
+              <p className="text-xs text-slate-500 mt-0.5">Use this to clear out July unrecorded stock or adjust physical shed inventory shrinkage</p>
+            </div>
+
+            <form action={adjustFeedStock} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Target Species</label>
+                <select
+                  name="target_species"
+                  defaultValue="Goat"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold text-slate-900"
+                >
+                  {SPECIES_OPTIONS.map(sp => (
+                    <option key={sp} value={sp}>{sp}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Feed Item Name</label>
+                <input
+                  name="feed_type"
+                  type="text"
+                  list="common-feeds"
+                  required
+                  placeholder="e.g., Channa Chilka"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Target Physical Stock (KG)</label>
+                <input
+                  name="target_remaining_kg"
+                  type="number"
+                  step="0.1"
+                  required
+                  defaultValue="0"
+                  placeholder="e.g. 0 to clear completely"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono text-slate-900"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Adjustment Date</label>
+                <input
+                  name="log_date"
+                  type="date"
+                  required
+                  defaultValue="2026-07-31"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
+                />
+              </div>
+
+              <div>
+                <button
+                  type="submit"
+                  className="w-full py-2 px-4 bg-slate-900 hover:bg-slate-800 text-white rounded-xl transition font-semibold text-xs shadow-sm"
+                >
+                  Apply Stock Adjustment
+                </button>
+              </div>
+            </form>
           </div>
         )}
 
