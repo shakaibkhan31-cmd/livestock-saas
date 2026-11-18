@@ -3,6 +3,27 @@ import { redirect } from 'next/navigation'
 import Link from 'next/link'
 import AnimalsClientView from './AnimalsClientView'
 
+// Helper: Species-wise clean emoji fallback function
+function getSpeciesEmoji(species?: string): string {
+  const sp = (species || 'Goat').toLowerCase()
+  if (sp.includes('chicken') || sp.includes('bird') || sp.includes('quail') || sp.includes('poultry')) {
+    return '🐔'
+  }
+  if (sp.includes('sheep') || sp.includes('lamb')) {
+    return '🐑'
+  }
+  if (sp.includes('cattle') || sp.includes('cow') || sp.includes('buffalo') || sp.includes('bull')) {
+    return '🐄'
+  }
+  if (sp.includes('rabbit')) {
+    return '🐇'
+  }
+  if (sp.includes('horse') || sp.includes('pony')) {
+    return '🐎'
+  }
+  return '🐐' // Default Goat
+}
+
 export default async function AnimalsPage({
   searchParams,
 }: {
@@ -26,12 +47,19 @@ export default async function AnimalsPage({
   if (!farm) return redirect('/onboarding')
 
   // Fetch active animals
-  const { data: animals } = await supabase
+  const { data: rawAnimals } = await supabase
     .from('livestock_master')
     .select('*')
     .eq('farm_id', farm.id)
     .eq('status', 'Active')
     .order('created_at', { ascending: false })
+
+  // Map animals to attach species emoji fallback
+  const animals = (rawAnimals || []).map(animal => ({
+    ...animal,
+    photo_url: animal.photo_url && animal.photo_url.trim() !== '' ? animal.photo_url : null,
+    speciesEmoji: getSpeciesEmoji(animal.species)
+  }))
 
   // 1. Single Delete Server Action
   async function deleteAnimal(formData: FormData) {

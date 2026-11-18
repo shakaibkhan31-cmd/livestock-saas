@@ -14,6 +14,7 @@ interface Animal {
   status: string
   cost_basis: number
   photo_url?: string
+  speciesEmoji?: string
 }
 
 interface AnimalsClientViewProps {
@@ -139,7 +140,7 @@ export default function AnimalsClientView({
   return (
     <div className="space-y-4">
       
-      {/* Multi-Select Bulk Action Bar (Appears when 1+ animals selected) */}
+      {/* Multi-Select Bulk Action Bar */}
       {selectedIds.length > 0 && (
         <div className="bg-slate-900 text-white px-5 py-3.5 rounded-2xl shadow-lg flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-3">
@@ -211,7 +212,6 @@ export default function AnimalsClientView({
           </div>
 
           <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto justify-between lg:justify-end">
-            {/* Ownership Filter Pills */}
             <div className="flex items-center gap-1.5">
               <button
                 onClick={() => setFilterOwnership('All')}
@@ -241,7 +241,6 @@ export default function AnimalsClientView({
 
             <div className="h-5 w-px bg-slate-200 hidden sm:block mx-1"></div>
 
-            {/* Bulk Import & Export Buttons */}
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -306,7 +305,15 @@ export default function AnimalsClientView({
                             {animal.photo_url ? (
                               <img src={animal.photo_url} alt={animal.tag_id} className="h-full w-full object-cover" />
                             ) : (
-                              <span className="text-base">🐐</span>
+                              <span className="text-xl">
+                                {animal.speciesEmoji || (
+                                  animal.species?.toLowerCase().includes('chicken') ? '🐔' :
+                                  animal.species?.toLowerCase().includes('sheep') ? '🐑' :
+                                  animal.species?.toLowerCase().includes('cow') || animal.species?.toLowerCase().includes('cattle') || animal.species?.toLowerCase().includes('buffalo') ? '🐄' :
+                                  animal.species?.toLowerCase().includes('rabbit') ? '🐇' :
+                                  animal.species?.toLowerCase().includes('horse') ? '🐎' : '🐐'
+                                )}
+                              </span>
                             )}
                           </div>
                           <Link
