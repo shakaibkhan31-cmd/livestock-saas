@@ -1,8 +1,8 @@
 import { createClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
 import Link from 'next/link'
+import { getUserFarmAndRole } from '@/utils/rbac'
 
-// Helper: Consistent DD/MM/YYYY Date Formatter
 function formatDateDDMMYYYY(dateInput?: string | null): string {
   if (!dateInput) return 'N/A'
   const datePart = String(dateInput).split('T')[0]
@@ -29,27 +29,32 @@ export default async function FinancesPage({
   const errorMsg = params.error
   const filterType = params.filter || 'All'
 
+  // RBAC Check: Only Admin can access Finances & P&L
+  const { user, farm, role } = await getUserFarmAndRole()
+  if (!user) return redirect('/login')
+  if (!farm) return redirect('/onboarding')
+  if (role !== 'admin') {
+    return redirect('/animals?error=' + encodeURIComponent('Access Denied: Financial ledger is restricted to Admin only.'))
+  }
+
   const supabase = await createClient()
 
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return redirect('/login')
+  // 1. Fetch Active Palai Animals for Auto-Billing
+  const { data: palaiAnimals } = await supabase
+    .from('livestock_master')
+    .select('id, tag_id, client_name, monthly_palai_fee, status')
+    .eq('farm_id', farm.id)
+    .neq('ownership', 'Self')
+    .eq('status', 'Active')
 
-  const { data: farm } = await supabase
-    .from('farms')
-    .select('id, farm_name')
-    .eq('owner_id', user.id)
-    .single()
-
-  if (!farm) return redirect('/onboarding')
-
-  // 1. Fetch Global Farm Transactions
+  // 2. Fetch Global Farm Transactions
   const { data: globalTxns } = await supabase
     .from('transactions')
     .select('*')
     .eq('farm_id', farm.id)
     .order('txn_date', { ascending: false })
 
-  // 2. Fetch Per-Animal Financial Logs joined with Tag ID
+  // 3. Fetch Per-Animal Financial Logs
   const { data: animalFinLogs } = await supabase
     .from('animal_financial_logs')
     .select(`
@@ -63,7 +68,7 @@ export default async function FinancesPage({
     .eq('farm_id', farm.id)
     .order('transaction_date', { ascending: false })
 
-  // 3. Merge both sources into a unified chronological ledger
+  // Merge Ledger
   type UnifiedLedgerItem = {
     id: string
     source: 'global' | 'animal'
@@ -76,7 +81,7 @@ export default async function FinancesPage({
     tagId?: string
   }
 
-  const unifiedList: UnifiedLedgerItem [] = []
+  const unifiedList: UnifiedLedgerItem[] = []
 
   ;(globalTxns || []).forEach(t => {
     unifiedList.push({
@@ -107,25 +112,16 @@ export default async function FinancesPage({
 
   unifiedList.sort((a, b) => b.date.localeCompare(a.date))
 
-  // Apply Filter
   const filteredLedger = unifiedList.filter(item => {
     if (filterType === 'Income') return item.type === 'Income'
     if (filterType === 'Expense') return item.type === 'Expense'
     return true
   })
 
-  // Calculate Unified Totals
-  const totalIncome = unifiedList
-    .filter(t => t.type === 'Income')
-    .reduce((acc, t) => acc + t.amount, 0)
-
-  const totalExpense = unifiedList
-    .filter(t => t.type === 'Expense')
-    .reduce((acc, t) => acc + t.amount, 0)
-
+  const totalIncome = unifiedList.filter(t => t.type === 'Income').reduce((acc, t) => acc + t.amount, 0)
+  const totalExpense = unifiedList.filter(t => t.type === 'Expense').reduce((acc, t) => acc + t.amount, 0)
   const netBalance = totalIncome - totalExpense
 
-  // Calculate Expense Category Breakdown for Analytics Chart
   const expenseByCategory: Record<string, number> = {}
   unifiedList
     .filter(t => t.type === 'Expense')
@@ -134,8 +130,88 @@ export default async function FinancesPage({
       expenseByCategory[cat] = (expenseByCategory[cat] || 0) + t.amount
     })
 
-  const sortedExpenseCategories = Object.entries(expenseByCategory)
-    .sort((a, b) => b[1] - a[1])
+  const sortedExpenseCategories = Object.entries(expenseByCategory).sort((a, b) => b[1] - a[1])
+
+  // Server Action: Run Monthly Palai Auto-Billing
+  const runMonthlyPalaiBilling = async (formData: FormData) => {
+    'use server'
+    const billingMonth = formData.get('billing_month') as string // e.g. "2026-11"
+    const defaultFee = parseFloat(formData.get('default_fee') as string) || 5000
+
+    const supabaseClient = await createClient()
+
+    const { data: activePalai } = await supabaseClient
+      .from('livestock_master')
+      .select('id, tag_id, client_name, monthly_palai_fee')
+      .eq('farm_id', farm.id)
+      .neq('ownership', 'Self')
+      .eq('status', 'Active')
+
+    if (!activePalai || activePalai.length === 0) {
+      return redirect(`/finances?error=${encodeURIComponent('No active Palai animals found for billing.')}`)
+    }
+
+    const billingNoteTag = `Auto-Bill (${billingMonth})`
+    const billingDate = `${billingMonth}-01`
+    let billedCount = 0
+
+    for (const animal of activePalai) {
+      // Duplicate check for this animal and month
+      const { data: existingLog } = await supabaseClient
+        .from('animal_financial_logs')
+        .select('id')
+        .eq('animal_id', animal.id)
+        .eq('notes', billingNoteTag)
+        .maybeSingle()
+
+      if (existingLog) continue
+
+      const feeAmount = Number(animal.monthly_palai_fee) > 0 ? Number(animal.monthly_palai_fee) : defaultFee
+
+      // 1. Insert into animal_financial_logs
+      await supabaseClient.from('animal_financial_logs').insert([
+        {
+          farm_id: farm.id,
+          animal_id: animal.id,
+          entry_type: 'Revenue',
+          category: 'Palai Monthly Fee',
+          amount: feeAmount,
+          transaction_date: billingDate,
+          notes: billingNoteTag,
+        },
+      ])
+
+      // 2. Add due amount to Client's Receivable balance in Contacts Directory
+      if (animal.client_name) {
+        const { data: contactMatch } = await supabaseClient
+          .from('contacts')
+          .select('id, opening_balance')
+          .eq('farm_id', farm.id)
+          .ilike('name', animal.client_name.trim())
+          .maybeSingle()
+
+        if (contactMatch) {
+          const updatedReceivable = (Number(contactMatch.opening_balance) || 0) + feeAmount
+          await supabaseClient
+            .from('contacts')
+            .update({ opening_balance: updatedReceivable })
+            .eq('id', contactMatch.id)
+        }
+      }
+
+      billedCount++
+    }
+
+    if (billedCount === 0) {
+      return redirect(`/finances?msg=${encodeURIComponent(`All Palai animals were already billed for ${billingMonth}.`)}`)
+    }
+
+    return redirect(
+      `/finances?msg=${encodeURIComponent(
+        `Generated monthly Palai bills for ${billedCount} animal(s) for ${billingMonth} & updated client balances.`
+      )}`
+    )
+  }
 
   // Server Action: Add Global Farm Transaction
   const addTransaction = async (formData: FormData) => {
@@ -159,10 +235,7 @@ export default async function FinancesPage({
       },
     ])
 
-    if (error) {
-      return redirect(`/finances?error=${encodeURIComponent(error.message)}`)
-    }
-
+    if (error) return redirect(`/finances?error=${encodeURIComponent(error.message)}`)
     return redirect(`/finances?msg=${encodeURIComponent('Transaction recorded successfully.')}`)
   }
 
@@ -181,14 +254,12 @@ export default async function FinancesPage({
       .eq('id', txnId)
       .eq('farm_id', farm.id)
 
-    if (error) {
-      return redirect(`/finances?error=${encodeURIComponent(error.message)}`)
-    }
-
+    if (error) return redirect(`/finances?error=${encodeURIComponent(error.message)}`)
     return redirect(`/finances?msg=${encodeURIComponent('Entry deleted successfully.')}`)
   }
 
   const todayStr = new Date().toISOString().split('T')[0]
+  const currentMonthStr = todayStr.slice(0, 7)
 
   return (
     <div className="min-h-screen bg-slate-50 py-10 px-4 sm:px-6 lg:px-8">
@@ -200,11 +271,11 @@ export default async function FinancesPage({
             <div className="flex items-center gap-2">
               <span className="h-2.5 w-2.5 rounded-full bg-emerald-500"></span>
               <span className="text-xs font-semibold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
-                Visual Financial Analytics & Ledger
+                Admin Ledger & Auto-Billing Engine
               </span>
             </div>
             <h1 className="text-3xl font-bold text-slate-900 tracking-tight mt-1">Financials & Billing</h1>
-            <p className="text-sm text-slate-500">Consolidated farm-wide income, Palai boarding fees & operational analytics</p>
+            <p className="text-sm text-slate-500">Consolidated farm-wide income, automated Palai billing & analytics</p>
           </div>
 
           <div className="flex items-center gap-2">
@@ -237,6 +308,53 @@ export default async function FinancesPage({
           </div>
         )}
 
+        {/* Monthly Palai Auto-Billing Engine Banner */}
+        <div className="bg-gradient-to-r from-indigo-900 to-slate-900 text-white p-6 rounded-2xl shadow-md flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-indigo-500/30 border border-indigo-400/40 rounded-md">
+                Automated Billing
+              </span>
+              <span className="text-xs text-indigo-200">
+                Active Palai Animals: <strong>{palaiAnimals?.length || 0}</strong>
+              </span>
+            </div>
+            <h2 className="text-lg font-bold">Monthly Palai Auto-Billing Generator</h2>
+            <p className="text-xs text-slate-300 max-w-xl">
+              Generate monthly boarding fees for all active client animals in one click. Automatically logs revenue and updates client receivable balances in Contacts for WhatsApp reminders.
+            </p>
+          </div>
+
+          <form action={runMonthlyPalaiBilling} className="flex flex-wrap items-end gap-3 bg-white/10 p-4 rounded-xl border border-white/15">
+            <div>
+              <label className="block text-[11px] font-semibold text-indigo-200 mb-1">Billing Month</label>
+              <input
+                name="billing_month"
+                type="month"
+                required
+                defaultValue={currentMonthStr}
+                className="px-3 py-2 bg-white text-slate-900 rounded-lg text-xs font-mono font-bold"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-semibold text-indigo-200 mb-1">Default Fee (PKR)</label>
+              <input
+                name="default_fee"
+                type="number"
+                required
+                defaultValue="5000"
+                className="w-28 px-3 py-2 bg-white text-slate-900 rounded-lg text-xs font-mono font-bold"
+              />
+            </div>
+            <button
+              type="submit"
+              className="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white font-bold rounded-lg text-xs shadow transition"
+            >
+              ⚡ Run Monthly Billing
+            </button>
+          </form>
+        </div>
+
         {/* Summary Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
           <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-emerald-500">
@@ -255,32 +373,26 @@ export default async function FinancesPage({
           </div>
         </div>
 
-        {/* FEATURE 1: Interactive Financial Analytics & Expense Breakdown */}
+        {/* Analytics Section */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          
-          {/* Income vs Expense Visual Bar */}
           <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
             <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">Income vs Expense Ratio</h2>
-            
             {totalIncome + totalExpense > 0 ? (
               <div className="space-y-3">
                 <div className="flex items-center justify-between text-xs font-semibold">
                   <span className="text-emerald-600">Income: {Math.round((totalIncome / (totalIncome + totalExpense || 1)) * 100)}%</span>
                   <span className="text-rose-600">Expense: {Math.round((totalExpense / (totalIncome + totalExpense || 1)) * 100)}%</span>
                 </div>
-                
-                {/* Visual Proportional Bar */}
                 <div className="w-full h-3 bg-slate-100 rounded-full overflow-hidden flex">
-                  <div 
-                    className="bg-emerald-500 h-full transition-all duration-500" 
+                  <div
+                    className="bg-emerald-500 h-full transition-all duration-500"
                     style={{ width: `${(totalIncome / (totalIncome + totalExpense || 1)) * 100}%` }}
                   ></div>
-                  <div 
-                    className="bg-rose-500 h-full transition-all duration-500" 
+                  <div
+                    className="bg-rose-500 h-full transition-all duration-500"
                     style={{ width: `${(totalExpense / (totalIncome + totalExpense || 1)) * 100}%` }}
                   ></div>
                 </div>
-
                 <div className="pt-2 flex items-center justify-between text-[11px] text-slate-400">
                   <span>Inflows: Rs. {totalIncome.toLocaleString()}</span>
                   <span>Outflows: Rs. {totalExpense.toLocaleString()}</span>
@@ -291,10 +403,8 @@ export default async function FinancesPage({
             )}
           </div>
 
-          {/* Expense Category Breakdown Chart */}
           <div className="lg:col-span-2 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
             <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">Expense Breakdown by Category</h2>
-            
             {sortedExpenseCategories.length > 0 ? (
               <div className="space-y-3">
                 {sortedExpenseCategories.map(([category, amount]) => {
@@ -308,7 +418,7 @@ export default async function FinancesPage({
                         </span>
                       </div>
                       <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
-                        <div 
+                        <div
                           className="bg-indigo-600 h-full rounded-full transition-all duration-500"
                           style={{ width: `${percentage}%` }}
                         ></div>
@@ -321,19 +431,16 @@ export default async function FinancesPage({
               <p className="text-xs text-slate-400 py-4 text-center">No expense categories recorded yet.</p>
             )}
           </div>
-
         </div>
 
+        {/* Ledger & Add Entry */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          
-          {/* Unified Transactions Table */}
           <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <h2 className="font-bold text-slate-800 text-sm">Unified Transaction History</h2>
                 <p className="text-[11px] text-slate-400">Includes direct farm entries & animal-specific ledgers</p>
               </div>
-
               <div className="flex items-center gap-1.5">
                 <Link
                   href="/finances"
@@ -366,7 +473,7 @@ export default async function FinancesPage({
               <table className="min-w-full divide-y divide-slate-100">
                 <thead className="bg-slate-50">
                   <tr>
-                    <th className="px-5 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase">Date (DD/MM/YYYY)</th>
+                    <th className="px-5 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase">Date</th>
                     <th className="px-5 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase">Tag / Source</th>
                     <th className="px-5 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase">Category</th>
                     <th className="px-5 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase">Amount</th>
@@ -420,7 +527,7 @@ export default async function FinancesPage({
                   ) : (
                     <tr>
                       <td colSpan={6} className="px-6 py-12 text-center text-sm text-slate-400">
-                        No transactions recorded yet. Add your first income or expense entry.
+                        No transactions recorded yet.
                       </td>
                     </tr>
                   )}
@@ -429,7 +536,6 @@ export default async function FinancesPage({
             </div>
           </div>
 
-          {/* Add Global Farm Transaction Form */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 h-fit space-y-5">
             <div>
               <h2 className="text-base font-bold text-slate-900">Add General Farm Entry</h2>
@@ -442,7 +548,7 @@ export default async function FinancesPage({
                 <select
                   name="type"
                   required
-                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-semibold text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-semibold text-slate-900"
                 >
                   <option value="Income">Income (Aamdani)</option>
                   <option value="Expense">Expense (Kharcha)</option>
@@ -457,7 +563,7 @@ export default async function FinancesPage({
                   list="common-categories"
                   required
                   placeholder="e.g. Shed Rent, Labor, Utilities"
-                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm text-slate-900"
                 />
                 <datalist id="common-categories">
                   <option value="Palai Boarding Fee" />
@@ -479,7 +585,7 @@ export default async function FinancesPage({
                   step="1"
                   required
                   placeholder="e.g. 5000"
-                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-mono text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-mono text-slate-900"
                 />
               </div>
 
@@ -490,7 +596,7 @@ export default async function FinancesPage({
                   type="date"
                   required
                   defaultValue={todayStr}
-                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm text-slate-900"
                 />
               </div>
 
@@ -500,7 +606,7 @@ export default async function FinancesPage({
                   name="description"
                   type="text"
                   placeholder="e.g. Monthly shed electricity bill"
-                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm text-slate-900"
                 />
               </div>
 
@@ -512,7 +618,6 @@ export default async function FinancesPage({
               </button>
             </form>
           </div>
-
         </div>
       </div>
     </div>

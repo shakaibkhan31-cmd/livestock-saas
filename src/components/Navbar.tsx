@@ -1,10 +1,11 @@
 import Link from 'next/link'
-import { createClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
+import { createClient } from '@/utils/supabase/server'
+import { getUserFarmAndRole } from '@/utils/rbac'
 
 export default async function Navbar() {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
+  const { user, role } = await getUserFarmAndRole()
+  const isAdmin = role === 'admin'
 
   const handleSignOut = async () => {
     'use server'
@@ -35,23 +36,38 @@ export default async function Navbar() {
                 >
                   Feed Logs
                 </Link>
-                <Link
-                  href="/finances"
-                  className="px-3 py-2 rounded-md text-sm font-medium text-gray-700 hover:text-green-600 hover:bg-gray-50 transition"
-                >
-                  Finances & Billing
-                </Link>
-                <Link
-                  href="/contacts"
-                  className="px-3 py-2 rounded-md text-sm font-medium text-gray-700 hover:text-green-600 hover:bg-gray-50 transition"
-                >
-                  Contacts
-                </Link>
+                {isAdmin && (
+                  <>
+                    <Link
+                      href="/finances"
+                      className="px-3 py-2 rounded-md text-sm font-medium text-gray-700 hover:text-green-600 hover:bg-gray-50 transition"
+                    >
+                      Finances & Billing
+                    </Link>
+                    <Link
+                      href="/contacts"
+                      className="px-3 py-2 rounded-md text-sm font-medium text-gray-700 hover:text-green-600 hover:bg-gray-50 transition"
+                    >
+                      Contacts
+                    </Link>
+                  </>
+                )}
               </div>
             )}
           </div>
 
-          <div className="flex items-center">
+          <div className="flex items-center gap-3">
+            {user && role && (
+              <span
+                className={`px-2.5 py-1 text-[11px] font-bold uppercase rounded-full border ${
+                  isAdmin
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                    : 'bg-amber-50 text-amber-700 border-amber-200'
+                }`}
+              >
+                {role}
+              </span>
+            )}
             {user ? (
               <form action={handleSignOut}>
                 <button

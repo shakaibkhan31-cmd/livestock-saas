@@ -1,6 +1,7 @@
 import { createClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
 import Link from 'next/link'
+import { getUserFarmAndRole } from '@/utils/rbac'
 
 // Helper: Consistent DD/MM/YYYY Date Formatter
 function formatDateDDMMYYYY(dateInput?: string | null): string {
@@ -62,18 +63,13 @@ export default async function FeedManagementPage({
   const errorMsg = params.error
   const selectedSpeciesFilter = params.species || 'All'
 
-  const supabase = await createClient()
-
-  const { data: { user } } = await supabase.auth.getUser()
+  // RBAC Check
+  const { user, farm, role } = await getUserFarmAndRole()
   if (!user) return redirect('/login')
-
-  const { data: farm } = await supabase
-    .from('farms')
-    .select('id, farm_name')
-    .eq('owner_id', user.id)
-    .single()
-
   if (!farm) return redirect('/onboarding')
+  const isAdmin = role === 'admin'
+
+  const supabase = await createClient()
 
   // 1. Fetch all feed logs for this farm
   const { data: allFeedLogs } = await supabase
@@ -176,20 +172,17 @@ export default async function FeedManagementPage({
     l => !l.is_allocated && (l.entry_type === 'Purchase' || !l.entry_type) && Number(l.total_cost) > 0
   ).length
 
-  // KPI Metrics for active filter
   const totalPurchasedSpend = feedLogs
     .filter(l => l.entry_type === 'Purchase' || !l.entry_type)
     .reduce((sum, l) => sum + (Number(l.total_cost) || 0), 0)
 
   const totalRemainingStockKg = inventoryList.reduce((sum, i) => sum + Math.max(i.remainingKg, 0), 0)
 
-  // Active headcount matching selected filter
   const matchingActiveAnimals = (activeAnimals || []).filter(a => {
     if (selectedSpeciesFilter === 'All' || selectedSpeciesFilter === 'Shared (All Species)') return true
     return a.species === selectedSpeciesFilter
   })
 
-  // Unique species present in either livestock_master or feed_logs
   const activeSpeciesTabs = Array.from(
     new Set([
       ...(activeAnimals || []).map(a => a.species),
@@ -197,7 +190,7 @@ export default async function FeedManagementPage({
     ])
   ).filter(Boolean)
 
-  // SERVER ACTION 1: Add Single or Multi-Item Batch Purchase / Consumption
+  // SERVER ACTION 1: Add Feed Log (With Auto-Stock Validation for Consumption)
   const addFeedLog = async (formData: FormData) => {
     'use server'
     const entry_type = (formData.get('entry_type') as string) || 'Purchase'
@@ -219,20 +212,32 @@ export default async function FeedManagementPage({
 
       let finalCost = costs[i] ? parseFloat(costs[i]) || 0 : 0
 
-      if (entry_type === 'Consumption' && finalCost === 0 && qty > 0) {
-        const { data: priorPurchases } = await supabaseClient
-          .from('feed_logs')
-          .select('quantity_kg, total_cost')
-          .eq('farm_id', farm.id)
-          .eq('target_species', target_species)
-          .eq('feed_type', ft)
-          .eq('entry_type', 'Purchase')
+      // If Consumption, check if available stock is sufficient
+      if (entry_type === 'Consumption') {
+        const itemStock = inventoryList.find(
+          item => item.species === target_species && item.feedType.toLowerCase() === ft.toLowerCase()
+        )
+        const available = itemStock ? itemStock.remainingKg : 999999
 
-        if (priorPurchases && priorPurchases.length > 0) {
-          const totKg = priorPurchases.reduce((s, p) => s + (Number(p.quantity_kg) || 0), 0)
-          const totRs = priorPurchases.reduce((s, p) => s + (Number(p.total_cost) || 0), 0)
-          if (totKg > 0) {
-            finalCost = Math.round((totRs / totKg) * qty)
+        if (qty > available) {
+          return redirect(`/feed?error=${encodeURIComponent(`Insufficient stock for ${ft} (${available.toFixed(1)} kg available).`)}`)
+        }
+
+        if (finalCost === 0 && qty > 0) {
+          const { data: priorPurchases } = await supabaseClient
+            .from('feed_logs')
+            .select('quantity_kg, total_cost')
+            .eq('farm_id', farm.id)
+            .eq('target_species', target_species)
+            .eq('feed_type', ft)
+            .eq('entry_type', 'Purchase')
+
+          if (priorPurchases && priorPurchases.length > 0) {
+            const totKg = priorPurchases.reduce((s, p) => s + (Number(p.quantity_kg) || 0), 0)
+            const totRs = priorPurchases.reduce((s, p) => s + (Number(p.total_cost) || 0), 0)
+            if (totKg > 0) {
+              finalCost = Math.round((totRs / totKg) * qty)
+            }
           }
         }
       }
@@ -267,7 +272,7 @@ export default async function FeedManagementPage({
     )
   }
 
-  // SERVER ACTION 2: Delete Feed Log
+  // SERVER ACTION 2: Delete Feed Log (Admin Only)
   const deleteFeedLog = async (formData: FormData) => {
     'use server'
     const logId = formData.get('logId') as string
@@ -283,7 +288,7 @@ export default async function FeedManagementPage({
     return redirect(`/feed?msg=${encodeURIComponent('Feed log entry deleted.')}`)
   }
 
-  // SERVER ACTION 3: Species-Specific Automated Cost Split
+  // SERVER ACTION 3: Species-Specific Automated Cost Split (Admin Only)
   const allocateFeedCostToAnimals = async (formData: FormData) => {
     'use server'
     const targetSpecies = (formData.get('allocate_species') as string) || 'Goat'
@@ -386,9 +391,7 @@ export default async function FeedManagementPage({
 
     return redirect(
       `/feed?species=${encodeURIComponent(targetSpecies)}&msg=${encodeURIComponent(
-        `Rs. ${totalPool.toLocaleString()} (${targetSpecies} Feed Pool) allocated across ${financialInserts.length} active ${targetSpecies}(s) using ${
-          useWeightSplit ? 'Live-Weight Pro-Rata' : 'Equal Headcount'
-        } split!`
+        `Rs. ${totalPool.toLocaleString()} (${targetSpecies} Feed Pool) allocated across ${financialInserts.length} active ${targetSpecies}(s)!`
       )}`
     )
   }
@@ -408,7 +411,7 @@ export default async function FeedManagementPage({
             <div className="flex items-center gap-2">
               <span className="h-2.5 w-2.5 rounded-full bg-emerald-500"></span>
               <span className="text-xs font-semibold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
-                Multi-Species 2-Tier Feed ERP
+                Multi-Species Feed ERP • Role: {role?.toUpperCase()}
               </span>
             </div>
             <h1 className="text-3xl font-bold text-slate-900 tracking-tight mt-1">
@@ -497,11 +500,13 @@ export default async function FeedManagementPage({
             <p className="text-xs text-slate-400 mt-1">Across {inventoryList.length} feed item(s)</p>
           </div>
 
-          <div className="bg-white p-5 rounded-2xl border border-amber-200 bg-amber-50/30 shadow-sm">
-            <p className="text-xs font-semibold text-amber-800 uppercase tracking-wider">Unallocated Cost Pool</p>
-            <p className="text-2xl font-bold text-amber-700 mt-1">Rs. {filteredUnallocatedPool.toLocaleString()}</p>
-            <p className="text-xs text-amber-700/80 mt-1">{filteredUnallocatedBillsCount} item(s) ready to split</p>
-          </div>
+          {isAdmin && (
+            <div className="bg-white p-5 rounded-2xl border border-amber-200 bg-amber-50/30 shadow-sm">
+              <p className="text-xs font-semibold text-amber-800 uppercase tracking-wider">Unallocated Cost Pool</p>
+              <p className="text-2xl font-bold text-amber-700 mt-1">Rs. {filteredUnallocatedPool.toLocaleString()}</p>
+              <p className="text-xs text-amber-700/80 mt-1">{filteredUnallocatedBillsCount} item(s) ready to split</p>
+            </div>
+          )}
 
           <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
             <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Est. Share / Head</p>
@@ -548,9 +553,11 @@ export default async function FeedManagementPage({
                     </p>
                     <div className="mt-2 pt-2 border-t border-slate-200/70 flex items-center justify-between text-[11px] text-slate-500">
                       <span>In: {item.purchasedKg}kg | Out: {item.consumedKg}kg</span>
-                      <span className="font-mono font-semibold text-slate-700">
-                        Rs. {Math.round(item.avgRatePerKg)}/kg
-                      </span>
+                      {isAdmin && (
+                        <span className="font-mono font-semibold text-slate-700">
+                          Rs. {Math.round(item.avgRatePerKg)}/kg
+                        </span>
+                      )}
                     </div>
                   </div>
                 )
@@ -559,95 +566,97 @@ export default async function FeedManagementPage({
           </div>
         )}
 
-        {/* TIER 2: Species-Isolated Automated Cost Allocation Engine */}
-        <div className="bg-slate-900 text-white rounded-2xl shadow-md p-6 border border-slate-800">
-          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
-            <div className="space-y-1.5 max-w-lg">
-              <div className="flex items-center gap-2">
-                <span className="px-2 py-0.5 text-[10px] font-bold uppercase rounded bg-amber-400 text-slate-950">
-                  Tier 2 Species-Smart Split
-                </span>
-                <h2 className="text-base font-bold">Auto-Split Species Feed Costs to Matching Animals</h2>
-              </div>
-              <p className="text-xs text-slate-300">
-                Select a species pool below. Costs will <strong>only</strong> be divided among active animals of that exact species.
-              </p>
-              {speciesWithPendingPools.length > 0 && (
-                <div className="flex flex-wrap gap-2 pt-1">
-                  {speciesWithPendingPools.map(sp => (
-                    <span key={sp} className="text-[11px] font-mono bg-slate-800 text-amber-300 px-2.5 py-0.5 rounded-lg border border-slate-700">
-                      {sp}: Rs. {unallocatedBySpecies[sp].amount.toLocaleString()} pending
-                    </span>
-                  ))}
+        {/* TIER 2: Admin Only Cost Allocation Engine */}
+        {isAdmin && (
+          <div className="bg-slate-900 text-white rounded-2xl shadow-md p-6 border border-slate-800">
+            <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
+              <div className="space-y-1.5 max-w-lg">
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 text-[10px] font-bold uppercase rounded bg-amber-400 text-slate-950">
+                    Tier 2 Species-Smart Split
+                  </span>
+                  <h2 className="text-base font-bold">Auto-Split Species Feed Costs to Matching Animals</h2>
                 </div>
-              )}
+                <p className="text-xs text-slate-300">
+                  Select a species pool below. Costs will <strong>only</strong> be divided among active animals of that exact species.
+                </p>
+                {speciesWithPendingPools.length > 0 && (
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {speciesWithPendingPools.map(sp => (
+                      <span key={sp} className="text-[11px] font-mono bg-slate-800 text-amber-300 px-2.5 py-0.5 rounded-lg border border-slate-700">
+                        {sp}: Rs. {unallocatedBySpecies[sp].amount.toLocaleString()} pending
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <form action={allocateFeedCostToAnimals} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 w-full xl:w-auto">
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase text-slate-400 mb-1">1. Target Species</label>
+                  <select
+                    name="allocate_species"
+                    defaultValue={selectedSpeciesFilter !== 'All' ? selectedSpeciesFilter : (speciesWithPendingPools[0] || 'Goat')}
+                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white font-semibold focus:ring-2 focus:ring-amber-400"
+                  >
+                    {SPECIES_OPTIONS.map(sp => {
+                      const pool = unallocatedBySpecies[sp]?.amount || 0
+                      const count = (activeAnimals || []).filter(a => sp === 'Shared (All Species)' ? true : a.species === sp).length
+                      return (
+                        <option key={sp} value={sp}>
+                          {sp} (Rs. {pool.toLocaleString()} • {count} heads)
+                        </option>
+                      )
+                    })}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase text-slate-400 mb-1">2. Split Method</label>
+                  <select
+                    name="split_method"
+                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white focus:ring-2 focus:ring-amber-400"
+                  >
+                    <option value="equal">Equal Split (Per Head)</option>
+                    <option value="weight">Live-Weight Pro-Rata Split</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase text-slate-400 mb-1">3. Ledger Date</label>
+                  <input
+                    name="allocation_date"
+                    type="date"
+                    required
+                    defaultValue={todayStr}
+                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white focus:ring-2 focus:ring-amber-400"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase text-slate-400 mb-1">4. Batch Label</label>
+                  <input
+                    name="period_label"
+                    type="text"
+                    defaultValue="Monthly Bulk Ration"
+                    placeholder="e.g. Nov 2026 Ration"
+                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white focus:ring-2 focus:ring-amber-400"
+                  />
+                </div>
+
+                <div className="flex items-end">
+                  <button
+                    type="submit"
+                    disabled={speciesWithPendingPools.length === 0}
+                    className="w-full py-2 px-4 bg-amber-400 hover:bg-amber-300 disabled:opacity-40 text-slate-950 font-bold rounded-xl text-xs transition shadow-sm"
+                  >
+                    Run Species Split
+                  </button>
+                </div>
+              </form>
             </div>
-
-            <form action={allocateFeedCostToAnimals} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 w-full xl:w-auto">
-              <div>
-                <label className="block text-[10px] font-semibold uppercase text-slate-400 mb-1">1. Target Species</label>
-                <select
-                  name="allocate_species"
-                  defaultValue={selectedSpeciesFilter !== 'All' ? selectedSpeciesFilter : (speciesWithPendingPools[0] || 'Goat')}
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white font-semibold focus:ring-2 focus:ring-amber-400"
-                >
-                  {SPECIES_OPTIONS.map(sp => {
-                    const pool = unallocatedBySpecies[sp]?.amount || 0
-                    const count = (activeAnimals || []).filter(a => sp === 'Shared (All Species)' ? true : a.species === sp).length
-                    return (
-                      <option key={sp} value={sp}>
-                        {sp} (Rs. {pool.toLocaleString()} • {count} heads)
-                      </option>
-                    )
-                  })}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-[10px] font-semibold uppercase text-slate-400 mb-1">2. Split Method</label>
-                <select
-                  name="split_method"
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white focus:ring-2 focus:ring-amber-400"
-                >
-                  <option value="equal">Equal Split (Per Head)</option>
-                  <option value="weight">Live-Weight Pro-Rata Split</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-[10px] font-semibold uppercase text-slate-400 mb-1">3. Ledger Date</label>
-                <input
-                  name="allocation_date"
-                  type="date"
-                  required
-                  defaultValue={todayStr}
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white focus:ring-2 focus:ring-amber-400"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[10px] font-semibold uppercase text-slate-400 mb-1">4. Batch Label</label>
-                <input
-                  name="period_label"
-                  type="text"
-                  defaultValue="Monthly Bulk Ration"
-                  placeholder="e.g. Nov 2026 Ration"
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white focus:ring-2 focus:ring-amber-400"
-                />
-              </div>
-
-              <div className="flex items-end">
-                <button
-                  type="submit"
-                  disabled={speciesWithPendingPools.length === 0}
-                  className="w-full py-2 px-4 bg-amber-400 hover:bg-amber-300 disabled:opacity-40 text-slate-950 font-bold rounded-xl text-xs transition shadow-sm"
-                >
-                  Run Species Split
-                </button>
-              </div>
-            </form>
           </div>
-        </div>
+        )}
 
         {/* Main Workspace Grid: History Table + Multi-Item Add Entry Form */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -667,12 +676,12 @@ export default async function FeedManagementPage({
               <table className="min-w-full divide-y divide-slate-100">
                 <thead className="bg-slate-50">
                   <tr>
-                    <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Date (DD/MM/YYYY)</th>
+                    <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Date</th>
                     <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Species & Type</th>
                     <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Feed Item</th>
                     <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Qty (KG)</th>
                     <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Cost / Status</th>
-                    <th className="px-5 py-3 text-right text-xs font-semibold text-slate-500 uppercase">Action</th>
+                    {isAdmin && <th className="px-5 py-3 text-right text-xs font-semibold text-slate-500 uppercase">Action</th>}
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-slate-100">
@@ -712,7 +721,7 @@ export default async function FeedManagementPage({
                             <div className="text-xs font-bold font-mono text-slate-900">
                               Rs. {Number(log.total_cost || 0).toLocaleString()}
                             </div>
-                            {isPurchase && (
+                            {isPurchase && isAdmin && (
                               <span className={`text-[10px] font-semibold ${
                                 log.is_allocated ? 'text-emerald-600' : 'text-amber-600'
                               }`}>
@@ -720,23 +729,25 @@ export default async function FeedManagementPage({
                               </span>
                             )}
                           </td>
-                          <td className="px-5 py-3.5 whitespace-nowrap text-right">
-                            <form action={deleteFeedLog} className="inline-block">
-                              <input type="hidden" name="logId" value={log.id} />
-                              <button
-                                type="submit"
-                                className="px-2.5 py-1 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-xs font-medium transition"
-                              >
-                                Delete
-                              </button>
-                            </form>
-                          </td>
+                          {isAdmin && (
+                            <td className="px-5 py-3.5 whitespace-nowrap text-right">
+                              <form action={deleteFeedLog} className="inline-block">
+                                <input type="hidden" name="logId" value={log.id} />
+                                <button
+                                  type="submit"
+                                  className="px-2.5 py-1 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-xs font-medium transition"
+                                >
+                                  Delete
+                                </button>
+                              </form>
+                            </td>
+                          )}
                         </tr>
                       )
                     })
                   ) : (
                     <tr>
-                      <td colSpan={6} className="px-6 py-10 text-center text-sm text-slate-400">
+                      <td colSpan={isAdmin ? 6 : 5} className="px-6 py-10 text-center text-sm text-slate-400">
                         No feed purchases or consumption logs recorded for this selection yet.
                       </td>
                     </tr>
@@ -746,11 +757,11 @@ export default async function FeedManagementPage({
             </div>
           </div>
 
-          {/* Right Column: Multi-Item Add Feed Entry Form with Live Total Calculator */}
+          {/* Right Column: Multi-Item Add Feed Entry Form */}
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 h-fit space-y-5">
             <div>
               <h2 className="text-base font-bold text-slate-900">Record Feed Entry</h2>
-              <p className="text-xs text-slate-500 mt-0.5">Add multiple items from one bill with live total calculation</p>
+              <p className="text-xs text-slate-500 mt-0.5">Add multiple items with auto stock deduction on usage</p>
             </div>
 
             <datalist id="common-feeds">
@@ -781,7 +792,7 @@ export default async function FeedManagementPage({
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-medium text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
                   >
                     <option value="Purchase">Bulk Purchase (Stock-In)</option>
-                    <option value="Consumption">Daily Usage (Stock-Out)</option>
+                    <option value="Consumption">Daily Usage (Auto Stock-Out)</option>
                   </select>
                 </div>
               </div>
@@ -789,7 +800,7 @@ export default async function FeedManagementPage({
               {/* Dynamic Item Rows Container */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
-                  <label className="block text-xs font-semibold text-slate-700">Ration Items (Type or Pick) *</label>
+                  <label className="block text-xs font-semibold text-slate-700">Ration Items *</label>
                   <button
                     type="button"
                     id="add-feed-row-btn"
@@ -800,7 +811,6 @@ export default async function FeedManagementPage({
                 </div>
 
                 <div id="feed-items-container" className="space-y-3">
-                  {/* Row 1 */}
                   <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2.5 feed-item-row">
                     <div>
                       <input
@@ -836,9 +846,8 @@ export default async function FeedManagementPage({
                   </div>
                 </div>
 
-                {/* Live Bill Total Summary Bar */}
                 <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 flex items-center justify-between">
-                  <span className="text-xs font-bold text-emerald-800 uppercase tracking-wider">Live Bill Grand Total:</span>
+                  <span className="text-xs font-bold text-emerald-800 uppercase tracking-wider">Live Total:</span>
                   <span id="live-bill-total" className="text-sm font-bold font-mono text-emerald-700">Rs. 0</span>
                 </div>
               </div>
@@ -878,7 +887,6 @@ export default async function FeedManagementPage({
         </div>
       </div>
 
-      {/* Lightweight Script for Live Total Calculation & Multi-Item Rows */}
       <script dangerouslySetInnerHTML={{ __html: `
         function updateBillTotal() {
           const costInputs = document.querySelectorAll('.cost-input');
@@ -912,7 +920,7 @@ export default async function FeedManagementPage({
                   type="text"
                   list="common-feeds"
                   required
-                  placeholder="Type item name (e.g., Gandum Daliya)"
+                  placeholder="Type item name"
                   class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-medium text-slate-900 focus:ring-2 focus:ring-green-600"
                 />
                 <button type="button" class="remove-feed-row px-2 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50 rounded-lg">×</button>
