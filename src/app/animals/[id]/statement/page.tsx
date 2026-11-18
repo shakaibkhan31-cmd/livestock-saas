@@ -30,6 +30,7 @@ export default function AnimalStatementPage() {
   const [animal, setAnimal] = useState<any>(null)
   const [weightLogs, setWeightLogs] = useState<any[]>([])
   const [financialLogs, setFinancialLogs] = useState<any[]>([])
+  const [medicalLogs, setMedicalLogs] = useState<any[]>([])
 
   useEffect(() => {
     async function fetchData() {
@@ -80,6 +81,13 @@ export default function AnimalStatementPage() {
         .eq('animal_id', id)
         .order('transaction_date', { ascending: false })
       setFinancialLogs(financials || [])
+
+      const { data: medicals } = await supabase
+        .from('animal_medical_logs')
+        .select('*')
+        .eq('animal_id', id)
+        .order('administered_date', { ascending: false })
+      setMedicalLogs(medicals || [])
 
       setLoading(false)
     }
@@ -156,7 +164,6 @@ export default function AnimalStatementPage() {
           <p className="text-xl font-bold font-mono text-emerald-700 mt-1">{netGain !== null ? `${netGain} kg` : 'N/A'}</p>
         </div>
         
-        {/* Only show Net P&L for Farm Owned (Self) animals */}
         {isSelfOwned && (
           <div className="p-4 bg-slate-100 rounded-xl border border-slate-200">
             <p className="text-xs text-slate-500 uppercase font-semibold">Net P&L (Profit/Loss)</p>
@@ -167,6 +174,7 @@ export default function AnimalStatementPage() {
         )}
       </div>
 
+      {/* Financial Ledger */}
       <div className="space-y-2">
         <h3 className="font-bold text-base text-slate-900">
           {isSelfOwned ? 'Financial Ledger' : 'Boarding Fee & Payments History'}
@@ -192,7 +200,7 @@ export default function AnimalStatementPage() {
               </tr>
             )}
             {financialLogs
-              .filter(f => isSelfOwned || f.entry_type === 'Revenue') // For clients, hide internal expense logs if any
+              .filter(f => isSelfOwned || f.entry_type === 'Revenue')
               .map(f => (
                 <tr key={f.id}>
                   <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(f.transaction_date)}</td>
@@ -208,6 +216,44 @@ export default function AnimalStatementPage() {
         </table>
       </div>
 
+      {/* Medical, Deworming & Vaccination History */}
+      <div className="space-y-2 pt-4">
+        <h3 className="font-bold text-base text-slate-900">Medical, Deworming & Vaccination History</h3>
+        <table className="min-w-full divide-y divide-slate-200 border text-xs">
+          <thead className="bg-slate-100">
+            <tr>
+              <th className="px-3 py-2 text-left font-semibold text-slate-700">Date Given</th>
+              <th className="px-3 py-2 text-left font-semibold text-slate-700">Protocol Type</th>
+              <th className="px-3 py-2 text-left font-semibold text-slate-700">Medicine / Vaccine</th>
+              <th className="px-3 py-2 text-left font-semibold text-slate-700">Dosage</th>
+              <th className="px-3 py-2 text-left font-semibold text-slate-700">Next Due</th>
+              <th className="px-3 py-2 text-left font-semibold text-slate-700">Notes</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-200">
+            {medicalLogs.length > 0 ? (
+              medicalLogs.map(med => (
+                <tr key={med.id}>
+                  <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(med.administered_date)}</td>
+                  <td className="px-3 py-2 font-semibold text-blue-700">{med.treatment_type}</td>
+                  <td className="px-3 py-2 font-semibold text-slate-900">{med.medicine_name}</td>
+                  <td className="px-3 py-2">{med.dosage || '—'}</td>
+                  <td className="px-3 py-2 font-mono">{med.next_due_date ? formatDateDDMMYYYY(med.next_due_date) : '—'}</td>
+                  <td className="px-3 py-2">{med.notes || '—'}</td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colSpan={6} className="px-3 py-4 text-center text-slate-400">
+                  No medical, deworming, or vaccination records logged yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Weight Progression History */}
       <div className="space-y-2 pt-4">
         <h3 className="font-bold text-base text-slate-900">Weight Progression History</h3>
         <table className="min-w-full divide-y divide-slate-200 border text-xs">
@@ -219,13 +265,21 @@ export default function AnimalStatementPage() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-200">
-            {weightLogs.map(w => (
-              <tr key={w.id}>
-                <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(w.recorded_date)}</td>
-                <td className="px-3 py-2 font-mono font-bold text-slate-900">{w.weight_kg} kg</td>
-                <td className="px-3 py-2">{w.notes || '—'}</td>
+            {weightLogs.length > 0 ? (
+              weightLogs.map(w => (
+                <tr key={w.id}>
+                  <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(w.recorded_date)}</td>
+                  <td className="px-3 py-2 font-mono font-bold text-slate-900">{w.weight_kg} kg</td>
+                  <td className="px-3 py-2">{w.notes || '—'}</td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colSpan={3} className="px-3 py-4 text-center text-slate-400">
+                  No weight logs recorded yet.
+                </td>
               </tr>
-            ))}
+            )}
           </tbody>
         </table>
       </div>
