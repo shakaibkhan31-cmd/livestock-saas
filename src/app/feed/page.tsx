@@ -81,7 +81,7 @@ export default async function FeedManagementPage({
   // 2. Fetch active animals (grouped by species)
   const { data: activeAnimals } = await supabase
     .from('livestock_master')
-    .select('id, tag_id, species, ownership, client_name')
+    .select('id, tag_id, species, ownership, client_name, acquisition_date')
     .eq('farm_id', farm.id)
     .eq('status', 'Active')
 
@@ -350,7 +350,7 @@ export default async function FeedManagementPage({
     )
   }
 
-  // SERVER ACTION 4: Species-Specific Automated Cost Split (Admin Only)
+  // SERVER ACTION 4: Species-Specific Automated Cost Split (Admin Only, Date-Aware)
   const allocateFeedCostToAnimals = async (formData: FormData) => {
     'use server'
     const targetSpecies = (formData.get('allocate_species') as string) || 'Goat'
@@ -362,7 +362,7 @@ export default async function FeedManagementPage({
 
     const { data: pendingLogs } = await supabaseClient
       .from('feed_logs')
-      .select('id, total_cost, feed_type')
+      .select('id, total_cost, feed_type, log_date')
       .eq('farm_id', farm.id)
       .eq('target_species', targetSpecies)
       .eq('is_allocated', false)
@@ -376,7 +376,7 @@ export default async function FeedManagementPage({
 
     let animalQuery = supabaseClient
       .from('livestock_master')
-      .select('id, tag_id, species')
+      .select('id, tag_id, species, acquisition_date')
       .eq('farm_id', farm.id)
       .eq('status', 'Active')
 
@@ -384,11 +384,19 @@ export default async function FeedManagementPage({
       animalQuery = animalQuery.eq('species', targetSpecies)
     }
 
-    const { data: animals } = await animalQuery
+    const { data: rawAnimals } = await animalQuery
+
+    // Only include animals that existed on or before the ledger/allocation date
+    const cutoffDateStr = String(allocationDate).split('T')[0]
+    const animals = (rawAnimals || []).filter(a => {
+      if (!a.acquisition_date) return true
+      const acqDateStr = String(a.acquisition_date).split('T')[0]
+      return acqDateStr <= cutoffDateStr
+    })
 
     if (!animals || animals.length === 0) {
       return redirect(
-        `/feed?error=${encodeURIComponent(`No active ${targetSpecies} animals found in Livestock Master to split costs.`)}`
+        `/feed?error=${encodeURIComponent(`No active ${targetSpecies} animals existed on or before ${formatDateDDMMYYYY(cutoffDateStr)} to split costs.`)}`
       )
     }
 
@@ -398,6 +406,7 @@ export default async function FeedManagementPage({
         .from('animal_weight_logs')
         .select('animal_id, weight_kg, recorded_date')
         .eq('farm_id', farm.id)
+        .lte('recorded_date', cutoffDateStr)
         .order('recorded_date', { ascending: false })
 
       ;(wLogs || []).forEach(w => {
@@ -418,10 +427,10 @@ export default async function FeedManagementPage({
         const w = weightsByAnimal[animal.id] || 0
         const ratio = w / totalWeight
         share = Math.round(totalPool * ratio)
-        noteDetail = `${periodLabel} [${targetSpecies}] (${(ratio * 100).toFixed(1)}% weight share @ ${w}kg)`
+        noteDetail = `${periodLabel} [${targetSpecies}] (${(ratio * 100).toFixed(1)}% weight share @ ${w}kg as of ${formatDateDDMMYYYY(cutoffDateStr)})`
       } else {
         share = Math.round(totalPool / animals.length)
-        noteDetail = `${periodLabel} [${targetSpecies}] (Equal split across ${animals.length} ${targetSpecies})`
+        noteDetail = `${periodLabel} [${targetSpecies}] (Equal split across ${animals.length} ${targetSpecies} on/before ${formatDateDDMMYYYY(cutoffDateStr)})`
       }
 
       return {
@@ -453,7 +462,7 @@ export default async function FeedManagementPage({
 
     return redirect(
       `/feed?species=${encodeURIComponent(targetSpecies)}&msg=${encodeURIComponent(
-        `Rs. ${totalPool.toLocaleString()} (${targetSpecies} Feed Pool) allocated across ${financialInserts.length} active ${targetSpecies}(s)!`
+        `Rs. ${totalPool.toLocaleString()} (${targetSpecies} Feed Pool) allocated across ${financialInserts.length} ${targetSpecies}(s) present on ${formatDateDDMMYYYY(cutoffDateStr)}!`
       )}`
     )
   }
@@ -640,7 +649,7 @@ export default async function FeedManagementPage({
                   <h2 className="text-base font-bold">Auto-Split Species Feed Costs to Matching Animals</h2>
                 </div>
                 <p className="text-xs text-slate-300">
-                  Select a species pool below. Costs will <strong>only</strong> be divided among active animals of that exact species.
+                  Select a species pool below. Costs will <strong>only</strong> be divided among active animals of that exact species present on or before the ledger date.
                 </p>
                 {speciesWithPendingPools.length > 0 && (
                   <div className="flex flex-wrap gap-2 pt-1">
