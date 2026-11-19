@@ -297,56 +297,68 @@ export default async function FeedManagementPage({
     return redirect(`/feed?msg=${encodeURIComponent('Feed log entry deleted.')}`)
   }
 
-  // SERVER ACTION 3: Feed Stock Adjustment / Closing Write-off (Admin Only)
+  // SERVER ACTION 3: Multi-Item Feed Stock Adjustment / Closing Write-off (Admin Only)
   const adjustFeedStock = async (formData: FormData) => {
     'use server'
     const target_species = (formData.get('target_species') as string) || 'Goat'
-    const feed_type = (formData.get('feed_type') as string) || ''
-    const targetRemainingKg = parseFloat(formData.get('target_remaining_kg') as string) || 0
     const log_date = (formData.get('log_date') as string) || new Date().toISOString().split('T')[0]
     const notes = (formData.get('notes') as string) || 'Closing Stock Adjustment / Write-off'
 
-    if (!feed_type) {
-      return redirect('/feed?error=Please+select+a+feed+item+to+adjust.')
-    }
+    const feedTypes = formData.getAll('feed_type') as string[]
+    const targetQuantities = formData.getAll('target_remaining_kg') as string[]
 
     const supabaseClient = await createClient()
+    const adjustmentsToInsert: Array<Record<string, any>> = []
 
-    // Calculate current remaining for this specific item
-    const { data: itemLogs } = await supabaseClient
-      .from('feed_logs')
-      .select('quantity_kg, entry_type')
-      .eq('farm_id', farm.id)
-      .eq('target_species', target_species)
-      .eq('feed_type', feed_type)
+    for (let i = 0; i < feedTypes.length; i++) {
+      const ft = (feedTypes[i] || '').trim()
+      if (!ft) continue
 
-    let totalPurchased = 0
-    let totalConsumed = 0
-    ;(itemLogs || []).forEach(l => {
-      const q = Number(l.quantity_kg) || 0
-      if (l.entry_type === 'Purchase' || !l.entry_type) totalPurchased += q
-      else totalConsumed += q
-    })
+      const targetRemainingKg = parseFloat(targetQuantities[i] ?? '0')
+      if (isNaN(targetRemainingKg) || targetRemainingKg < 0) continue
 
-    const currentRemaining = totalPurchased - totalConsumed
-    const diff = currentRemaining - targetRemainingKg
+      const { data: itemLogs } = await supabaseClient
+        .from('feed_logs')
+        .select('quantity_kg, entry_type')
+        .eq('farm_id', farm.id)
+        .eq('target_species', target_species)
+        .eq('feed_type', ft)
 
-    if (diff <= 0) {
-      return redirect(`/feed?error=${encodeURIComponent(`Target stock (${targetRemainingKg}kg) is greater than or equal to current stock (${currentRemaining}kg). Use standard consumption log instead.`)}`)
+      let totalPurchased = 0
+      let totalConsumed = 0
+      ;(itemLogs || []).forEach(l => {
+        const q = Number(l.quantity_kg) || 0
+        if (l.entry_type === 'Purchase' || !l.entry_type) totalPurchased += q
+        else totalConsumed += q
+      })
+
+      const currentRemaining = totalPurchased - totalConsumed
+      const diff = Number((currentRemaining - targetRemainingKg).toFixed(3))
+
+      if (diff > 0) {
+        adjustmentsToInsert.push({
+          farm_id: farm.id,
+          target_species,
+          entry_type: 'Consumption',
+          feed_type: ft,
+          quantity_kg: diff,
+          total_cost: 0,
+          log_date,
+          notes: `${notes} (${currentRemaining.toFixed(1)}kg -> ${targetRemainingKg.toFixed(1)}kg)`,
+          is_allocated: true,
+        })
+      }
     }
 
-    // Insert a Consumption log equal to the difference to balance it to targetRemainingKg
-    const { error } = await supabaseClient.from('feed_logs').insert({
-      farm_id: farm.id,
-      target_species,
-      entry_type: 'Consumption',
-      feed_type,
-      quantity_kg: diff,
-      total_cost: 0,
-      log_date,
-      notes,
-      is_allocated: true,
-    })
+    if (adjustmentsToInsert.length === 0) {
+      return redirect(
+        `/feed?error=${encodeURIComponent(
+          'No items required downward stock adjustment (check item names or target stock vs current stock).'
+        )}`
+      )
+    }
+
+    const { error } = await supabaseClient.from('feed_logs').insert(adjustmentsToInsert)
 
     if (error) {
       return redirect(`/feed?error=${encodeURIComponent(error.message)}`)
@@ -354,7 +366,7 @@ export default async function FeedManagementPage({
 
     return redirect(
       `/feed?species=${encodeURIComponent(target_species)}&msg=${encodeURIComponent(
-        `Successfully adjusted ${feed_type} stock to ${targetRemainingKg} kg!`
+        `Applied stock adjustment for ${adjustmentsToInsert.length} item(s)!`
       )}`
     )
   }
@@ -656,70 +668,99 @@ export default async function FeedManagementPage({
           />
         )}
 
-        {/* ADMIN: Feed Stock Adjustment / Closing Write-off Card */}
+        {/* ADMIN: Multi-Item Feed Stock Adjustment / Closing Write-off Card */}
         {isAdmin && (
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
-            <div>
-              <h2 className="text-base font-bold text-slate-900">Feed Stock Adjustment / Closing Write-off</h2>
-              <p className="text-xs text-slate-500 mt-0.5">Use this to clear out July unrecorded stock or adjust physical shed inventory shrinkage</p>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <h2 className="text-base font-bold text-slate-900">Feed Stock Adjustment / Closing Write-off</h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Adjust multiple items at once for weekly closing, shrinkage, or period write-offs
+                </p>
+              </div>
+              <button
+                type="button"
+                id="add-adj-row-btn"
+                className="text-xs font-semibold text-slate-900 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg border border-slate-300 transition w-fit"
+              >
+                + Add Adjustment Item
+              </button>
             </div>
 
-            <form action={adjustFeedStock} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Target Species</label>
-                <select
-                  name="target_species"
-                  defaultValue="Goat"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold text-slate-900"
-                >
-                  {SPECIES_OPTIONS.map(sp => (
-                    <option key={sp} value={sp}>{sp}</option>
-                  ))}
-                </select>
+            <form action={adjustFeedStock} className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Target Species</label>
+                  <select
+                    name="target_species"
+                    defaultValue={selectedSpeciesFilter !== 'All' ? selectedSpeciesFilter : 'Goat'}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold text-slate-900"
+                  >
+                    {SPECIES_OPTIONS.map(sp => (
+                      <option key={sp} value={sp}>{sp}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Adjustment Date</label>
+                  <input
+                    name="log_date"
+                    type="date"
+                    required
+                    defaultValue={todayStr}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Reason / Notes</label>
+                  <input
+                    name="notes"
+                    type="text"
+                    defaultValue="Weekly Closing / Shrinkage Adjustment"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
+                  />
+                </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Feed Item Name</label>
-                <input
-                  name="feed_type"
-                  type="text"
-                  list="common-feeds"
-                  required
-                  placeholder="e.g., Channa Chilka"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
-                />
+              <div id="adj-items-container" className="space-y-2.5">
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-center p-3 bg-slate-50 rounded-xl border border-slate-200 adj-item-row">
+                  <div className="sm:col-span-7">
+                    <label className="block text-[10px] font-semibold uppercase text-slate-500 mb-1">Feed Item Name</label>
+                    <input
+                      name="feed_type"
+                      type="text"
+                      list="common-feeds"
+                      required
+                      placeholder="e.g., Channa Chilka"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900"
+                    />
+                  </div>
+                  <div className="sm:col-span-4">
+                    <label className="block text-[10px] font-semibold uppercase text-slate-500 mb-1">Target Physical Stock (KG)</label>
+                    <input
+                      name="target_remaining_kg"
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      required
+                      defaultValue="0"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900"
+                    />
+                  </div>
+                  <div className="sm:col-span-1 flex items-end justify-end pt-4 sm:pt-5">
+                    <span className="text-[10px] font-mono text-slate-400">#1</span>
+                  </div>
+                </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Target Physical Stock (KG)</label>
-                <input
-                  name="target_remaining_kg"
-                  type="number"
-                  step="0.1"
-                  required
-                  defaultValue="0"
-                  placeholder="e.g. 0 to clear completely"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono text-slate-900"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Adjustment Date</label>
-                <input
-                  name="log_date"
-                  type="date"
-                  required
-                  defaultValue="2026-07-31"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
-                />
-              </div>
-
-              <div>
+              <div className="flex justify-end">
                 <button
                   type="submit"
-                  className="w-full py-2 px-4 bg-slate-900 hover:bg-slate-800 text-white rounded-xl transition font-semibold text-xs shadow-sm"
+                  className="py-2.5 px-5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl transition font-semibold text-xs shadow-sm"
                 >
-                  Apply Stock Adjustment
+                  Apply All Stock Adjustments
                 </button>
               </div>
             </form>
@@ -1020,6 +1061,45 @@ export default async function FeedManagementPage({
               row.remove();
               updateBillTotal();
             }
+          }
+          if (e.target && e.target.id === 'add-adj-row-btn') {
+            const container = document.getElementById('adj-items-container');
+            if (!container) return;
+            const idx = container.querySelectorAll('.adj-item-row').length + 1;
+            const row = document.createElement('div');
+            row.className = 'grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-center p-3 bg-slate-50 rounded-xl border border-slate-200 adj-item-row';
+            row.innerHTML = \`
+              <div class="sm:col-span-7">
+                <input
+                  name="feed_type"
+                  type="text"
+                  list="common-feeds"
+                  required
+                  placeholder="Feed item name"
+                  class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900"
+                />
+              </div>
+              <div class="sm:col-span-4">
+                <input
+                  name="target_remaining_kg"
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  required
+                  value="0"
+                  class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900"
+                />
+              </div>
+              <div class="sm:col-span-1 flex items-center justify-end gap-1">
+                <span class="text-[10px] font-mono text-slate-400">#\${idx}</span>
+                <button type="button" class="remove-adj-row px-2 py-1 text-xs font-bold text-rose-600 hover:bg-rose-50 rounded-lg">×</button>
+              </div>
+            \`;
+            container.appendChild(row);
+          }
+          if (e.target && e.target.classList.contains('remove-adj-row')) {
+            const row = e.target.closest('.adj-item-row');
+            if (row) row.remove();
           }
         });
       ` }} />
