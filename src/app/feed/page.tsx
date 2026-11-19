@@ -486,7 +486,7 @@ export default async function FeedManagementPage({
             <div className="flex flex-wrap items-center gap-2">
               <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-emerald-800 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
-                {farm?.name || 'Livestock ERP'} • {role?.toUpperCase()}
+                {farm?.farm_name || 'Livestock ERP'} • {role?.toUpperCase()}
               </span>
               <span className="text-[11px] text-slate-400 font-medium">Feed Inventory & Cost Allocation</span>
             </div>
