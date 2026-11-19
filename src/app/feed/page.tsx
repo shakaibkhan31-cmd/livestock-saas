@@ -199,10 +199,9 @@ export default async function FeedManagementPage({
     ])
   ).filter(Boolean)
 
-  // SERVER ACTION 1: Add Feed Log (With Auto-Stock Validation for Consumption)
+  // SERVER ACTION 1: Record Bulk Purchase (Stock-In)
   const addFeedLog = async (formData: FormData) => {
     'use server'
-    const entry_type = (formData.get('entry_type') as string) || 'Purchase'
     const target_species = (formData.get('target_species') as string) || 'Goat'
     const log_date = (formData.get('log_date') as string) || new Date().toISOString().split('T')[0]
     const notes = formData.get('notes') as string
@@ -219,48 +218,18 @@ export default async function FeedManagementPage({
       const qty = parseFloat(quantities[i] || '0') || 0
       if (!ft || qty <= 0) continue
 
-      let finalCost = costs[i] ? parseFloat(costs[i]) || 0 : 0
-
-      // If Consumption, check if available stock is sufficient
-      if (entry_type === 'Consumption') {
-        const itemStock = inventoryList.find(
-          item => item.species === target_species && item.feedType.toLowerCase() === ft.toLowerCase()
-        )
-        const available = itemStock ? itemStock.remainingKg : 999999
-
-        if (qty > available) {
-          return redirect(`/feed?error=${encodeURIComponent(`Insufficient stock for ${ft} (${available.toFixed(1)} kg available).`)}`)
-        }
-
-        if (finalCost === 0 && qty > 0) {
-          const { data: priorPurchases } = await supabaseClient
-            .from('feed_logs')
-            .select('quantity_kg, total_cost')
-            .eq('farm_id', farm.id)
-            .eq('target_species', target_species)
-            .eq('feed_type', ft)
-            .eq('entry_type', 'Purchase')
-
-          if (priorPurchases && priorPurchases.length > 0) {
-            const totKg = priorPurchases.reduce((s, p) => s + (Number(p.quantity_kg) || 0), 0)
-            const totRs = priorPurchases.reduce((s, p) => s + (Number(p.total_cost) || 0), 0)
-            if (totKg > 0) {
-              finalCost = Math.round((totRs / totKg) * qty)
-            }
-          }
-        }
-      }
+      const finalCost = costs[i] ? parseFloat(costs[i]) || 0 : 0
 
       recordsToInsert.push({
         farm_id: farm.id,
         target_species,
-        entry_type,
+        entry_type: 'Purchase',
         feed_type: ft,
         quantity_kg: qty,
         total_cost: finalCost,
         log_date,
         notes: notes || null,
-        is_allocated: entry_type === 'Consumption' ? true : false,
+        is_allocated: false,
       })
     }
 
@@ -276,7 +245,7 @@ export default async function FeedManagementPage({
 
     return redirect(
       `/feed?species=${encodeURIComponent(target_species)}&msg=${encodeURIComponent(
-        `Saved ${recordsToInsert.length} ${target_species} ${entry_type.toLowerCase()} item(s)!`
+        `Saved ${recordsToInsert.length} ${target_species} bulk purchase item(s)!`
       )}`
     )
   }
@@ -613,7 +582,7 @@ export default async function FeedManagementPage({
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider">Live Shed Ration Stock (By Species & Item)</h2>
-                <p className="text-xs text-slate-500">Auto-calculated from Bulk Purchases minus Daily Consumption per item</p>
+                <p className="text-xs text-slate-500">Auto-calculated from Bulk Purchases minus Stock Adjustments / Write-offs per item</p>
               </div>
             </div>
 
@@ -675,7 +644,7 @@ export default async function FeedManagementPage({
               <div>
                 <h2 className="text-base font-bold text-slate-900">Feed Stock Adjustment / Closing Write-off</h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Adjust multiple items at once for weekly closing, shrinkage, or period write-offs
+                  Record closing physical stock for multiple items at once to auto-calculate stock out
                 </p>
               </div>
               <button
@@ -718,7 +687,7 @@ export default async function FeedManagementPage({
                   <input
                     name="notes"
                     type="text"
-                    defaultValue="Weekly Closing / Shrinkage Adjustment"
+                    defaultValue="Weekly Closing / Stock Out Adjustment"
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
                   />
                 </div>
@@ -767,7 +736,7 @@ export default async function FeedManagementPage({
           </div>
         )}
 
-        {/* Main Workspace Grid: History Table + Multi-Item Add Entry Form */}
+        {/* Main Workspace Grid: History Table + Bulk Purchase Form */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           
           {/* Left 2 Columns: Feed Transaction Ledger */}
@@ -775,7 +744,7 @@ export default async function FeedManagementPage({
             <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
               <h2 className="font-bold text-slate-800 text-sm">
                 {selectedSpeciesFilter === 'All'
-                  ? 'All Species Purchase & Consumption Ledger'
+                  ? 'All Species Purchase & Stock-Out Ledger'
                   : `${selectedSpeciesFilter} Feed Ledger`}
               </h2>
               <span className="text-xs text-slate-400">{feedLogs.length} entries</span>
@@ -857,7 +826,7 @@ export default async function FeedManagementPage({
                   ) : (
                     <tr>
                       <td colSpan={isAdmin ? 6 : 5} className="px-6 py-10 text-center text-sm text-slate-400">
-                        No feed purchases or consumption logs recorded for this selection yet.
+                        No feed purchases or stock adjustments recorded for this selection yet.
                       </td>
                     </tr>
                   )}
@@ -866,11 +835,11 @@ export default async function FeedManagementPage({
             </div>
           </div>
 
-          {/* Right Column: Multi-Item Add Feed Entry Form */}
+          {/* Right Column: Bulk Purchase (Stock-In) Form */}
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 h-fit space-y-5">
             <div>
-              <h2 className="text-base font-bold text-slate-900">Record Feed Entry</h2>
-              <p className="text-xs text-slate-500 mt-0.5">Add multiple items with auto stock deduction on usage</p>
+              <h2 className="text-base font-bold text-slate-900">Record Bulk Purchase</h2>
+              <p className="text-xs text-slate-500 mt-0.5">Add purchased ration items to increase shed stock</p>
             </div>
 
             <datalist id="common-feeds">
@@ -880,36 +849,23 @@ export default async function FeedManagementPage({
             </datalist>
 
             <form action={addFeedLog} className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Target Species *</label>
-                  <select
-                    name="target_species"
-                    defaultValue={selectedSpeciesFilter !== 'All' ? selectedSpeciesFilter : 'Goat'}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
-                  >
-                    {SPECIES_OPTIONS.map(sp => (
-                      <option key={sp} value={sp}>{sp}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Entry Mode *</label>
-                  <select
-                    name="entry_type"
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-medium text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
-                  >
-                    <option value="Purchase">Bulk Purchase (Stock-In)</option>
-                    <option value="Consumption">Daily Usage (Auto Stock-Out)</option>
-                  </select>
-                </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Target Species *</label>
+                <select
+                  name="target_species"
+                  defaultValue={selectedSpeciesFilter !== 'All' ? selectedSpeciesFilter : 'Goat'}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
+                >
+                  {SPECIES_OPTIONS.map(sp => (
+                    <option key={sp} value={sp}>{sp}</option>
+                  ))}
+                </select>
               </div>
 
               {/* Dynamic Item Rows Container */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
-                  <label className="block text-xs font-semibold text-slate-700">Ration Items *</label>
+                  <label className="block text-xs font-semibold text-slate-700">Purchased Ration Items *</label>
                   <button
                     type="button"
                     id="add-feed-row-btn"
@@ -988,7 +944,7 @@ export default async function FeedManagementPage({
                 type="submit"
                 className="w-full py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-xl transition font-semibold text-sm shadow-sm"
               >
-                Save Feed Record(s)
+                Save Bulk Purchase(s)
               </button>
             </form>
           </div>
