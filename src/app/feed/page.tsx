@@ -471,46 +471,66 @@ export default async function FeedManagementPage({
   const estimatedShare = matchingCount > 0 ? Math.round(filteredUnallocatedPool / matchingCount) : 0
 
   return (
-    <div className="min-h-screen bg-slate-50 py-10 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-7xl mx-auto space-y-6">
-        
-        {/* Top Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="h-2.5 w-2.5 rounded-full bg-emerald-500"></span>
-              <span className="text-xs font-semibold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
-                Multi-Species Feed ERP • Role: {role?.toUpperCase()}
+    <div className="min-h-screen bg-slate-50/80 py-7 px-4 sm:px-6 lg:px-8">
+      <datalist id="common-feeds">
+        {dynamicFeedSuggestions.map(item => (
+          <option key={item} value={item} />
+        ))}
+      </datalist>
+
+      <div className="max-w-7xl mx-auto space-y-5">
+
+        {/* Top Bar: Brand Header + Quick Jump Actions */}
+        <div className="bg-white rounded-2xl border border-slate-200/90 shadow-xs p-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-emerald-800 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+                {farm?.name || 'Livestock ERP'} • {role?.toUpperCase()}
               </span>
+              <span className="text-[11px] text-slate-400 font-medium">Feed Inventory & Cost Allocation</span>
             </div>
-            <h1 className="text-3xl font-bold text-slate-900 tracking-tight mt-1">
-              Feed Inventory & Cost Allocation
+            <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">
+              Feed Command Center
             </h1>
-            <p className="text-sm text-slate-500">
-              Separate bulk ration inventory & automated cost splitting per livestock species
-            </p>
           </div>
 
-          <Link
-            href="/animals"
-            className="inline-flex items-center justify-center px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-700 font-medium rounded-xl border border-slate-200 shadow-sm transition text-sm"
-          >
-            ← Back to Livestock Master
-          </Link>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <a
+              href="#purchase-panel"
+              className="inline-flex items-center justify-center px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-xl shadow-xs transition text-xs"
+            >
+              + New Purchase
+            </a>
+            {isAdmin && (
+              <a
+                href="#adjustment-panel"
+                className="inline-flex items-center justify-center px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-semibold rounded-xl shadow-xs transition text-xs"
+              >
+                Stock Write-off
+              </a>
+            )}
+            <Link
+              href="/animals"
+              className="inline-flex items-center justify-center px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl border border-slate-200 transition text-xs"
+            >
+              ← Livestock Master
+            </Link>
+          </div>
         </div>
 
-        {/* Species Filter Tabs */}
-        <div className="bg-white p-2 rounded-2xl border border-slate-200 shadow-xs flex flex-wrap items-center gap-2">
-          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider px-3">Filter Ledger:</span>
+        {/* Species Filter Bar */}
+        <div className="bg-white px-3 py-2.5 rounded-2xl border border-slate-200/90 shadow-xs flex flex-wrap items-center gap-1.5">
+          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider px-2.5">Species:</span>
           <Link
             href="/feed"
-            className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold transition ${
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
               selectedSpeciesFilter === 'All'
                 ? 'bg-slate-900 text-white shadow-xs'
                 : 'text-slate-600 hover:bg-slate-100'
             }`}
           >
-            All Species ({allFeedLogs?.length || 0})
+            All ({allFeedLogs?.length || 0})
           </Link>
           {activeSpeciesTabs.map(sp => {
             const count = (allFeedLogs || []).filter(l => (l.target_species || 'Goat') === sp).length
@@ -519,15 +539,15 @@ export default async function FeedManagementPage({
               <Link
                 key={sp}
                 href={`/feed?species=${encodeURIComponent(sp)}`}
-                className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 ${
+                className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 ${
                   selectedSpeciesFilter === sp
-                    ? 'bg-green-600 text-white shadow-xs'
+                    ? 'bg-emerald-600 text-white shadow-xs'
                     : 'bg-slate-50 text-slate-700 hover:bg-slate-100 border border-slate-200/70'
                 }`}
               >
                 <span>{sp}</span>
                 <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
-                  selectedSpeciesFilter === sp ? 'bg-green-700 text-green-100' : 'bg-slate-200 text-slate-600'
+                  selectedSpeciesFilter === sp ? 'bg-emerald-700 text-emerald-100' : 'bg-slate-200 text-slate-600'
                 }`}>
                   {count}
                 </span>
@@ -541,101 +561,54 @@ export default async function FeedManagementPage({
 
         {/* Status / Error Alerts */}
         {statusMsg && (
-          <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-2xl text-sm flex items-center justify-between">
+          <div className="p-3.5 bg-emerald-50 border border-emerald-200 text-emerald-900 rounded-2xl text-xs sm:text-sm flex items-center justify-between shadow-xs">
             <span><strong>Success:</strong> {decodeURIComponent(statusMsg)}</span>
-            <Link href="/feed" className="text-emerald-600 font-bold hover:text-emerald-900">×</Link>
+            <Link href="/feed" className="text-emerald-700 font-bold hover:text-emerald-950 px-2">×</Link>
           </div>
         )}
         {errorMsg && (
-          <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-2xl text-sm flex items-center justify-between">
+          <div className="p-3.5 bg-rose-50 border border-rose-200 text-rose-800 rounded-2xl text-xs sm:text-sm flex items-center justify-between shadow-xs">
             <span><strong>Error:</strong> {decodeURIComponent(errorMsg)}</span>
-            <Link href="/feed" className="text-red-500 font-bold hover:text-red-800">×</Link>
+            <Link href="/feed" className="text-rose-600 font-bold hover:text-rose-900 px-2">×</Link>
           </div>
         )}
 
-        {/* KPI Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">
-              {selectedSpeciesFilter === 'All' ? 'Total Bulk Spend' : `${selectedSpeciesFilter} Bulk Spend`}
+        {/* Executive KPI Row */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+          <div className="bg-white p-4 rounded-2xl border border-slate-200/90 shadow-xs">
+            <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+              {selectedSpeciesFilter === 'All' ? 'Bulk Spend' : `${selectedSpeciesFilter} Spend`}
             </p>
-            <p className="text-2xl font-bold text-slate-900 mt-1">Rs. {totalPurchasedSpend.toLocaleString()}</p>
-            <p className="text-xs text-slate-400 mt-1">Recorded purchase bills</p>
+            <p className="text-2xl font-bold text-slate-900 mt-1 font-mono">Rs. {totalPurchasedSpend.toLocaleString()}</p>
+            <p className="text-[11px] text-slate-400 mt-0.5">Total recorded purchase bills</p>
           </div>
 
-          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Shed Stock Remaining</p>
-            <p className="text-2xl font-bold text-emerald-600 mt-1">{totalRemainingStockKg.toFixed(1)} <span className="text-sm font-normal text-slate-400">kg</span></p>
-            <p className="text-xs text-slate-400 mt-1">Across {inventoryList.length} feed item(s)</p>
+          <div className="bg-white p-4 rounded-2xl border border-slate-200/90 shadow-xs">
+            <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Shed Stock</p>
+            <p className="text-2xl font-bold text-emerald-600 mt-1 font-mono">
+              {totalRemainingStockKg.toFixed(1)} <span className="text-xs font-sans font-semibold text-slate-400">kg</span>
+            </p>
+            <p className="text-[11px] text-slate-400 mt-0.5">Across {inventoryList.length} tracked ration item(s)</p>
           </div>
 
           {isAdmin && (
-            <div className="bg-white p-5 rounded-2xl border border-amber-200 bg-amber-50/30 shadow-sm">
-              <p className="text-xs font-semibold text-amber-800 uppercase tracking-wider">Unallocated Cost Pool</p>
-              <p className="text-2xl font-bold text-amber-700 mt-1">Rs. {filteredUnallocatedPool.toLocaleString()}</p>
-              <p className="text-xs text-amber-700/80 mt-1">{filteredUnallocatedBillsCount} item(s) ready to split</p>
+            <div className="bg-amber-50/60 p-4 rounded-2xl border border-amber-200/90 shadow-xs">
+              <p className="text-[11px] font-bold text-amber-800 uppercase tracking-wider">Pending Split Pool</p>
+              <p className="text-2xl font-bold text-amber-700 mt-1 font-mono">Rs. {filteredUnallocatedPool.toLocaleString()}</p>
+              <p className="text-[11px] text-amber-700/80 mt-0.5">{filteredUnallocatedBillsCount} purchase item(s) unallocated</p>
             </div>
           )}
 
-          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Est. Share / Head</p>
-            <p className="text-2xl font-bold text-indigo-600 mt-1">Rs. {estimatedShare.toLocaleString()}</p>
-            <p className="text-xs text-slate-400 mt-1">
-              Across {matchingCount} eligible {selectedSpeciesFilter === 'All' ? 'animal(s)' : `${selectedSpeciesFilter}(s)`} (as of {formatDateDDMMYYYY(effectiveSplitDate)})
+          <div className="bg-white p-4 rounded-2xl border border-slate-200/90 shadow-xs">
+            <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Est. Share / Head</p>
+            <p className="text-2xl font-bold text-indigo-600 mt-1 font-mono">Rs. {estimatedShare.toLocaleString()}</p>
+            <p className="text-[11px] text-slate-400 mt-0.5">
+              {matchingCount} eligible {selectedSpeciesFilter === 'All' ? 'head(s)' : `${selectedSpeciesFilter}(s)`} • {formatDateDDMMYYYY(effectiveSplitDate)}
             </p>
           </div>
         </div>
 
-        {/* TIER 1: Live Bulk Stock Inventory Breakdown */}
-        {inventoryList.length > 0 && (
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider">Live Shed Ration Stock (By Species & Item)</h2>
-                <p className="text-xs text-slate-500">Auto-calculated from Bulk Purchases minus Stock Adjustments / Write-offs per item</p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              {inventoryList.map((item) => {
-                const isLow = item.remainingKg <= 5
-                return (
-                  <div
-                    key={item.key}
-                    className={`p-4 rounded-xl border ${
-                      isLow ? 'bg-rose-50/40 border-rose-200' : 'bg-slate-50 border-slate-200'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-slate-900 text-white">
-                        {item.species}
-                      </span>
-                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                        isLow ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'
-                      }`}>
-                        {isLow ? 'Low Stock' : 'In Stock'}
-                      </span>
-                    </div>
-                    <p className="font-bold text-sm text-slate-900 mt-2">{item.feedType}</p>
-                    <p className="text-xl font-bold font-mono text-slate-900 mt-1">
-                      {item.remainingKg.toFixed(1)} kg
-                    </p>
-                    <div className="mt-2 pt-2 border-t border-slate-200/70 flex items-center justify-between text-[11px] text-slate-500">
-                      <span>In: {item.purchasedKg}kg | Out: {item.consumedKg}kg</span>
-                      {isAdmin && (
-                        <span className="font-mono font-semibold text-slate-700">
-                          Rs. {Math.round(item.avgRatePerKg)}/kg
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* TIER 2: Admin Only Cost Allocation Engine */}
+        {/* Tier 2: Automated Cost Split Engine */}
         {isAdmin && (
           <SplitEngineClient
             speciesOptions={SPECIES_OPTIONS}
@@ -647,129 +620,84 @@ export default async function FeedManagementPage({
           />
         )}
 
-        {/* ADMIN: Multi-Item Feed Stock Adjustment / Closing Write-off Card */}
-        {isAdmin && (
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+        {/* Compact Live Shed Stock Strip */}
+        {inventoryList.length > 0 && (
+          <div className="bg-white rounded-2xl border border-slate-200/90 shadow-xs p-4 sm:p-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 mb-3.5">
               <div>
-                <h2 className="text-base font-bold text-slate-900">Feed Stock Adjustment / Closing Write-off</h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Record closing physical stock for multiple items at once to auto-calculate stock out & cost
-                </p>
+                <h2 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Live Shed Ration Stock</h2>
+                <p className="text-[11px] text-slate-500">Real-time balance per species & ration item (Purchase minus Write-off / Usage)</p>
               </div>
-              <button
-                type="button"
-                id="add-adj-row-btn"
-                className="text-xs font-semibold text-slate-900 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg border border-slate-300 transition w-fit"
-              >
-                + Add Adjustment Item
-              </button>
+              <span className="text-[11px] font-mono text-slate-400">{inventoryList.length} items</span>
             </div>
 
-            <form action={adjustFeedStock} className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Target Species</label>
-                  <select
-                    name="target_species"
-                    defaultValue={selectedSpeciesFilter !== 'All' ? selectedSpeciesFilter : 'Goat'}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold text-slate-900"
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
+              {inventoryList.map((item) => {
+                const isLow = item.remainingKg <= 5
+                return (
+                  <div
+                    key={item.key}
+                    className={`p-3 rounded-xl border transition ${
+                      isLow ? 'bg-rose-50/50 border-rose-200' : 'bg-slate-50/80 border-slate-200/80'
+                    }`}
                   >
-                    {SPECIES_OPTIONS.map(sp => (
-                      <option key={sp} value={sp}>{sp}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Adjustment Date</label>
-                  <input
-                    name="log_date"
-                    type="date"
-                    required
-                    defaultValue={todayStr}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Reason / Notes</label>
-                  <input
-                    name="notes"
-                    type="text"
-                    defaultValue="Weekly Closing / Stock Out Adjustment"
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
-                  />
-                </div>
-              </div>
-
-              <div id="adj-items-container" className="space-y-2.5">
-                <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-center p-3 bg-slate-50 rounded-xl border border-slate-200 adj-item-row">
-                  <div className="sm:col-span-7">
-                    <label className="block text-[10px] font-semibold uppercase text-slate-500 mb-1">Feed Item Name</label>
-                    <input
-                      name="feed_type"
-                      type="text"
-                      list="common-feeds"
-                      required
-                      placeholder="e.g., Channa Chilka"
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900"
-                    />
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-slate-900 text-white">
+                        {item.species}
+                      </span>
+                      <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${
+                        isLow ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'
+                      }`}>
+                        {isLow ? 'Low' : 'OK'}
+                      </span>
+                    </div>
+                    <p className="font-bold text-xs text-slate-900 mt-1.5 truncate" title={item.feedType}>
+                      {item.feedType}
+                    </p>
+                    <p className="text-base font-bold font-mono text-slate-900 mt-0.5">
+                      {item.remainingKg.toFixed(1)} <span className="text-[10px] font-sans font-normal text-slate-500">kg</span>
+                    </p>
+                    <div className="mt-1.5 pt-1.5 border-t border-slate-200/70 flex items-center justify-between text-[10px] text-slate-500 font-mono">
+                      <span>+{item.purchasedKg} / -{item.consumedKg}</span>
+                      {isAdmin && item.avgRatePerKg > 0 && (
+                        <span className="font-semibold text-slate-700">Rs.{Math.round(item.avgRatePerKg)}/kg</span>
+                      )}
+                    </div>
                   </div>
-                  <div className="sm:col-span-4">
-                    <label className="block text-[10px] font-semibold uppercase text-slate-500 mb-1">Target Physical Stock (KG)</label>
-                    <input
-                      name="target_remaining_kg"
-                      type="number"
-                      step="0.1"
-                      min="0"
-                      required
-                      defaultValue="0"
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900"
-                    />
-                  </div>
-                  <div className="sm:col-span-1 flex items-end justify-end pt-4 sm:pt-5">
-                    <span className="text-[10px] font-mono text-slate-400">#1</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex justify-end">
-                <button
-                  type="submit"
-                  className="py-2.5 px-5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl transition font-semibold text-xs shadow-sm"
-                >
-                  Apply All Stock Adjustments
-                </button>
-              </div>
-            </form>
+                )
+              })}
+            </div>
           </div>
         )}
 
-        {/* Main Workspace Grid: History Table + Bulk Purchase Form */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          
-          {/* Left 2 Columns: Feed Transaction Ledger */}
-          <div className="lg:col-span-2 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
-              <h2 className="font-bold text-slate-800 text-sm">
-                {selectedSpeciesFilter === 'All'
-                  ? 'All Species Purchase & Stock-Out Ledger'
-                  : `${selectedSpeciesFilter} Feed Ledger`}
-              </h2>
-              <span className="text-xs text-slate-400">{feedLogs.length} entries</span>
+        {/* Main Workspace: Left Ledger + Right Sticky Action Forms */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+
+          {/* Left 7 Cols: Clean Transaction Ledger */}
+          <div className="lg:col-span-7 bg-white rounded-2xl shadow-xs border border-slate-200/90 overflow-hidden">
+            <div className="px-5 py-3.5 border-b border-slate-100 bg-slate-50/70 flex items-center justify-between">
+              <div>
+                <h2 className="font-bold text-slate-900 text-sm">
+                  {selectedSpeciesFilter === 'All'
+                    ? 'Purchase & Stock-Out Ledger'
+                    : `${selectedSpeciesFilter} Feed Ledger`}
+                </h2>
+                <p className="text-[11px] text-slate-500">Chronological feed inflows and closing stock adjustments</p>
+              </div>
+              <span className="text-xs font-semibold bg-slate-200/70 text-slate-700 px-2.5 py-1 rounded-full">
+                {feedLogs.length} entries
+              </span>
             </div>
 
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-slate-100">
-                <thead className="bg-slate-50">
+                <thead className="bg-slate-50/80">
                   <tr>
-                    <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Date</th>
-                    <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Species & Type</th>
-                    <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Feed Item</th>
-                    <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Qty (KG)</th>
-                    <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Cost / Status</th>
-                    {isAdmin && <th className="px-5 py-3 text-right text-xs font-semibold text-slate-500 uppercase">Action</th>}
+                    <th className="px-4 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">Date</th>
+                    <th className="px-4 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">Item & Type</th>
+                    <th className="px-4 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">Qty</th>
+                    <th className="px-4 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">Cost / Split</th>
+                    {isAdmin && <th className="px-4 py-2.5 text-right text-[10px] font-bold text-slate-500 uppercase tracking-wider">Action</th>}
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-slate-100">
@@ -778,34 +706,30 @@ export default async function FeedManagementPage({
                       const isPurchase = log.entry_type === 'Purchase' || !log.entry_type
                       const speciesLabel = log.target_species || 'Goat'
                       return (
-                        <tr key={log.id} className="hover:bg-slate-50 transition-colors">
-                          <td className="px-5 py-3.5 whitespace-nowrap text-xs font-mono text-slate-700">
+                        <tr key={log.id} className="hover:bg-slate-50/90 transition-colors">
+                          <td className="px-4 py-3 whitespace-nowrap text-xs font-mono text-slate-700">
                             {formatDateDDMMYYYY(log.log_date)}
                           </td>
-                          <td className="px-5 py-3.5 whitespace-nowrap space-y-1">
-                            <div>
-                              <span className="inline-flex items-center px-2 py-0.5 text-[10px] font-bold uppercase rounded bg-slate-900 text-white">
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-xs font-bold text-slate-900">{log.feed_type}</span>
+                              <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase rounded bg-slate-900 text-white">
                                 {speciesLabel}
                               </span>
-                            </div>
-                            <div>
-                              <span className={`inline-flex items-center px-2 py-0.5 text-[10px] font-semibold rounded-full ${
+                              <span className={`px-1.5 py-0.5 text-[9px] font-semibold rounded-full ${
                                 isPurchase
                                   ? 'bg-blue-50 text-blue-700 border border-blue-200'
                                   : 'bg-purple-50 text-purple-700 border border-purple-200'
                               }`}>
-                                {isPurchase ? 'Stock In (Buy)' : 'Stock Out (Used)'}
+                                {isPurchase ? 'Stock In' : 'Stock Out'}
                               </span>
                             </div>
+                            {log.notes && <div className="text-[11px] text-slate-400 mt-0.5">{log.notes}</div>}
                           </td>
-                          <td className="px-5 py-3.5">
-                            <div className="text-xs font-bold text-slate-900">{log.feed_type}</div>
-                            {log.notes && <div className="text-[11px] text-slate-400">{log.notes}</div>}
-                          </td>
-                          <td className="px-5 py-3.5 whitespace-nowrap text-xs font-mono font-semibold text-slate-800">
+                          <td className="px-4 py-3 whitespace-nowrap text-xs font-mono font-semibold text-slate-800">
                             {Number(log.quantity_kg).toFixed(1)} kg
                           </td>
-                          <td className="px-5 py-3.5 whitespace-nowrap">
+                          <td className="px-4 py-3 whitespace-nowrap">
                             <div className="text-xs font-bold font-mono text-slate-900">
                               Rs. {Number(log.total_cost || 0).toLocaleString()}
                             </div>
@@ -813,17 +737,17 @@ export default async function FeedManagementPage({
                               <span className={`text-[10px] font-semibold ${
                                 log.is_allocated ? 'text-emerald-600' : 'text-amber-600'
                               }`}>
-                                {log.is_allocated ? `✓ Split to ${speciesLabel}` : '• Pending Split'}
+                                {log.is_allocated ? '✓ Allocated' : '• Pending'}
                               </span>
                             )}
                           </td>
                           {isAdmin && (
-                            <td className="px-5 py-3.5 whitespace-nowrap text-right">
+                            <td className="px-4 py-3 whitespace-nowrap text-right">
                               <form action={deleteFeedLog} className="inline-block">
                                 <input type="hidden" name="logId" value={log.id} />
                                 <button
                                   type="submit"
-                                  className="px-2.5 py-1 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-xs font-medium transition"
+                                  className="px-2 py-1 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-[11px] font-semibold transition"
                                 >
                                   Delete
                                 </button>
@@ -835,8 +759,8 @@ export default async function FeedManagementPage({
                     })
                   ) : (
                     <tr>
-                      <td colSpan={isAdmin ? 6 : 5} className="px-6 py-10 text-center text-sm text-slate-400">
-                        No feed purchases or stock adjustments recorded for this selection yet.
+                      <td colSpan={isAdmin ? 5 : 4} className="px-6 py-10 text-center text-sm text-slate-400">
+                        No feed records found for this filter.
                       </td>
                     </tr>
                   )}
@@ -845,120 +769,201 @@ export default async function FeedManagementPage({
             </div>
           </div>
 
-          {/* Right Column: Bulk Purchase (Stock-In) Form */}
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 h-fit space-y-5">
-            <div>
-              <h2 className="text-base font-bold text-slate-900">Record Bulk Purchase</h2>
-              <p className="text-xs text-slate-500 mt-0.5">Add purchased ration items to increase shed stock</p>
-            </div>
+          {/* Right 5 Cols: Sticky Quick-Entry & Write-off Forms */}
+          <div className="lg:col-span-5 space-y-5 lg:sticky lg:top-6">
 
-            <datalist id="common-feeds">
-              {dynamicFeedSuggestions.map(item => (
-                <option key={item} value={item} />
-              ))}
-            </datalist>
-
-            <form action={addFeedLog} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Target Species *</label>
-                <select
-                  name="target_species"
-                  defaultValue={selectedSpeciesFilter !== 'All' ? selectedSpeciesFilter : 'Goat'}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
+            {/* Card A: Record Bulk Purchase (Stock-In) */}
+            <div id="purchase-panel" className="bg-white rounded-2xl shadow-xs border border-slate-200/90 p-5 space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div>
+                  <h2 className="text-sm font-bold text-slate-900">Record Bulk Purchase</h2>
+                  <p className="text-[11px] text-slate-500">Add ration stock-in & bill amount</p>
+                </div>
+                <button
+                  type="button"
+                  id="add-feed-row-btn"
+                  className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1 rounded-lg border border-emerald-200 transition"
                 >
-                  {SPECIES_OPTIONS.map(sp => (
-                    <option key={sp} value={sp}>{sp}</option>
-                  ))}
-                </select>
+                  + Add Item
+                </button>
               </div>
 
-              {/* Dynamic Item Rows Container */}
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <label className="block text-xs font-semibold text-slate-700">Purchased Ration Items *</label>
-                  <button
-                    type="button"
-                    id="add-feed-row-btn"
-                    className="text-xs font-semibold text-green-700 hover:text-green-800 bg-green-50 hover:bg-green-100 px-2.5 py-1 rounded-lg border border-green-200 transition"
-                  >
-                    + Add Another Item
-                  </button>
+              <form action={addFeedLog} className="space-y-3.5">
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">Target Species *</label>
+                    <select
+                      name="target_species"
+                      defaultValue={selectedSpeciesFilter !== 'All' ? selectedSpeciesFilter : 'Goat'}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold text-slate-900 focus:bg-white focus:ring-2 focus:ring-emerald-600"
+                    >
+                      {SPECIES_OPTIONS.map(sp => (
+                        <option key={sp} value={sp}>{sp}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">Purchase Date *</label>
+                    <input
+                      name="log_date"
+                      type="date"
+                      required
+                      defaultValue={todayStr}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900 focus:bg-white focus:ring-2 focus:ring-emerald-600"
+                    />
+                  </div>
                 </div>
 
-                <div id="feed-items-container" className="space-y-3">
-                  <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2.5 feed-item-row">
-                    <div>
-                      <input
-                        name="feed_type"
-                        type="text"
-                        list="common-feeds"
-                        required
-                        placeholder="Type item name (e.g., Channa Chilka)"
-                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-medium text-slate-900 focus:ring-2 focus:ring-green-600"
-                      />
-                    </div>
+                <div id="feed-items-container" className="space-y-2.5">
+                  <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2 feed-item-row">
+                    <input
+                      name="feed_type"
+                      type="text"
+                      list="common-feeds"
+                      required
+                      placeholder="Ration item (e.g., Channa Chilka)"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-medium text-slate-900 focus:ring-2 focus:ring-emerald-600"
+                    />
                     <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <input
-                          name="quantity_kg"
-                          type="number"
-                          step="0.1"
-                          required
-                          placeholder="Qty (KG) e.g. 2"
-                          className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-green-600"
-                        />
-                      </div>
-                      <div>
-                        <input
-                          name="total_cost"
-                          type="number"
-                          step="1"
-                          placeholder="Cost (PKR) e.g. 340"
-                          className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-green-600 cost-input"
-                        />
-                      </div>
+                      <input
+                        name="quantity_kg"
+                        type="number"
+                        step="0.1"
+                        required
+                        placeholder="Qty (KG)"
+                        className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-emerald-600"
+                      />
+                      <input
+                        name="total_cost"
+                        type="number"
+                        step="1"
+                        placeholder="Cost (PKR)"
+                        className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-emerald-600 cost-input"
+                      />
                     </div>
                   </div>
                 </div>
 
-                <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 flex items-center justify-between">
-                  <span className="text-xs font-bold text-emerald-800 uppercase tracking-wider">Live Total:</span>
+                <div className="px-3.5 py-2.5 bg-emerald-50 rounded-xl border border-emerald-200 flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-emerald-900 uppercase tracking-wider">Bill Total:</span>
                   <span id="live-bill-total" className="text-sm font-bold font-mono text-emerald-700">Rs. 0</span>
                 </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Date *</label>
-                  <input
-                    name="log_date"
-                    type="date"
-                    required
-                    defaultValue={todayStr}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
-                  />
-                </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Notes / Vendor</label>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">Vendor / Notes</label>
                   <input
                     name="notes"
                     type="text"
-                    placeholder="e.g., Hannan store"
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900 focus:bg-white focus:ring-2 focus:ring-green-600"
+                    placeholder="e.g., Afzaal Memon Traders"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900 focus:bg-white focus:ring-2 focus:ring-emerald-600"
                   />
                 </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl transition font-semibold text-xs sm:text-sm shadow-xs"
+                >
+                  Save Bulk Purchase(s)
+                </button>
+              </form>
+            </div>
+
+            {/* Card B: Multi-Item Stock Adjustment / Closing Write-off */}
+            {isAdmin && (
+              <div id="adjustment-panel" className="bg-white rounded-2xl shadow-xs border border-slate-200/90 p-5 space-y-4">
+                <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                  <div>
+                    <h2 className="text-sm font-bold text-slate-900">Closing Stock Write-off</h2>
+                    <p className="text-[11px] text-slate-500">Enter actual remaining kg to auto-log stock out & cost</p>
+                  </div>
+                  <button
+                    type="button"
+                    id="add-adj-row-btn"
+                    className="text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-lg border border-slate-300 transition"
+                  >
+                    + Add Item
+                  </button>
+                </div>
+
+                <form action={adjustFeedStock} className="space-y-3.5">
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">Target Species</label>
+                      <select
+                        name="target_species"
+                        defaultValue={selectedSpeciesFilter !== 'All' ? selectedSpeciesFilter : 'Goat'}
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold text-slate-900"
+                      >
+                        {SPECIES_OPTIONS.map(sp => (
+                          <option key={sp} value={sp}>{sp}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">Closing Date</label>
+                      <input
+                        name="log_date"
+                        type="date"
+                        required
+                        defaultValue={todayStr}
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">Reason / Label</label>
+                    <input
+                      name="notes"
+                      type="text"
+                      defaultValue="Weekly Closing Adjustment"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
+                    />
+                  </div>
+
+                  <div id="adj-items-container" className="space-y-2">
+                    <div className="grid grid-cols-12 gap-2 items-center p-2.5 bg-slate-50 rounded-xl border border-slate-200 adj-item-row">
+                      <div className="col-span-7">
+                        <input
+                          name="feed_type"
+                          type="text"
+                          list="common-feeds"
+                          required
+                          placeholder="Item name"
+                          className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-slate-900"
+                        />
+                      </div>
+                      <div className="col-span-4">
+                        <input
+                          name="target_remaining_kg"
+                          type="number"
+                          step="0.1"
+                          min="0"
+                          required
+                          defaultValue="0"
+                          title="Remaining Physical KG"
+                          className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900"
+                        />
+                      </div>
+                      <div className="col-span-1 text-right">
+                        <span className="text-[10px] font-mono text-slate-400">#1</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl transition font-semibold text-xs shadow-xs"
+                  >
+                    Apply Stock Adjustments
+                  </button>
+                </form>
               </div>
+            )}
 
-              <button
-                type="submit"
-                className="w-full py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-xl transition font-semibold text-sm shadow-sm"
-              >
-                Save Bulk Purchase(s)
-              </button>
-            </form>
           </div>
-
         </div>
       </div>
 
@@ -987,7 +992,7 @@ export default async function FeedManagementPage({
             const container = document.getElementById('feed-items-container');
             if (!container) return;
             const row = document.createElement('div');
-            row.className = 'p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2.5 feed-item-row relative';
+            row.className = 'p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2 feed-item-row';
             row.innerHTML = \`
               <div class="flex items-center gap-2">
                 <input
@@ -995,10 +1000,10 @@ export default async function FeedManagementPage({
                   type="text"
                   list="common-feeds"
                   required
-                  placeholder="Type item name"
-                  class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-medium text-slate-900 focus:ring-2 focus:ring-green-600"
+                  placeholder="Ration item name"
+                  class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-medium text-slate-900 focus:ring-2 focus:ring-emerald-600"
                 />
-                <button type="button" class="remove-feed-row px-2 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50 rounded-lg">×</button>
+                <button type="button" class="remove-feed-row px-2 py-1 text-xs font-bold text-rose-600 hover:bg-rose-50 rounded-lg">×</button>
               </div>
               <div class="grid grid-cols-2 gap-2">
                 <input
@@ -1007,14 +1012,14 @@ export default async function FeedManagementPage({
                   step="0.1"
                   required
                   placeholder="Qty (KG)"
-                  class="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-green-600"
+                  class="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-emerald-600"
                 />
                 <input
                   name="total_cost"
                   type="number"
                   step="1"
                   placeholder="Cost (PKR)"
-                  class="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-green-600 cost-input"
+                  class="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-emerald-600 cost-input"
                 />
               </div>
             \`;
@@ -1033,19 +1038,19 @@ export default async function FeedManagementPage({
             if (!container) return;
             const idx = container.querySelectorAll('.adj-item-row').length + 1;
             const row = document.createElement('div');
-            row.className = 'grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-center p-3 bg-slate-50 rounded-xl border border-slate-200 adj-item-row';
+            row.className = 'grid grid-cols-12 gap-2 items-center p-2.5 bg-slate-50 rounded-xl border border-slate-200 adj-item-row';
             row.innerHTML = \`
-              <div class="sm:col-span-7">
+              <div class="col-span-7">
                 <input
                   name="feed_type"
                   type="text"
                   list="common-feeds"
                   required
-                  placeholder="Feed item name"
-                  class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900"
+                  placeholder="Item name"
+                  class="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-slate-900"
                 />
               </div>
-              <div class="sm:col-span-4">
+              <div class="col-span-4">
                 <input
                   name="target_remaining_kg"
                   type="number"
@@ -1053,12 +1058,12 @@ export default async function FeedManagementPage({
                   min="0"
                   required
                   value="0"
-                  class="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900"
+                  class="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900"
                 />
               </div>
-              <div class="sm:col-span-1 flex items-center justify-end gap-1">
+              <div class="col-span-1 flex items-center justify-end gap-0.5">
                 <span class="text-[10px] font-mono text-slate-400">#\${idx}</span>
-                <button type="button" class="remove-adj-row px-2 py-1 text-xs font-bold text-rose-600 hover:bg-rose-50 rounded-lg">×</button>
+                <button type="button" class="remove-adj-row px-1.5 py-0.5 text-xs font-bold text-rose-600 hover:bg-rose-50 rounded-lg">×</button>
               </div>
             \`;
             container.appendChild(row);
