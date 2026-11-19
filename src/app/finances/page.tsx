@@ -19,15 +19,42 @@ function formatDateDDMMYYYY(dateInput?: string | null): string {
   return `${day}/${month}/${year}`
 }
 
+function buildFinancesUrl({
+  filter,
+  q,
+  page,
+}: {
+  filter?: string
+  q?: string
+  page?: number
+}) {
+  const sp = new URLSearchParams()
+  if (filter && filter !== 'All') sp.set('filter', filter)
+  if (q && q.trim()) sp.set('q', q.trim())
+  if (page && page > 1) sp.set('page', String(page))
+  const qs = sp.toString()
+  return qs ? `/finances?${qs}` : '/finances'
+}
+
 export default async function FinancesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ msg?: string; error?: string; filter?: string }>
+  searchParams: Promise<{
+    msg?: string
+    error?: string
+    filter?: string
+    q?: string
+    page?: string
+  }>
 }) {
   const params = await searchParams
   const statusMsg = params.msg
   const errorMsg = params.error
-  const filterType = params.filter || 'All'
+  const filterType = params.filter === 'Income' || params.filter === 'Expense' ? params.filter : 'All'
+  const searchQuery = (params.q || '').trim()
+  const normalizedQuery = searchQuery.toLowerCase()
+  const currentPage = Math.max(1, parseInt(params.page || '1', 10) || 1)
+  const pageSize = 15
 
   // RBAC Check: Only Admin can access Finances & P&L
   const { user, farm, role } = await getUserFarmAndRole()
@@ -39,34 +66,42 @@ export default async function FinancesPage({
 
   const supabase = await createClient()
 
-  // 1. Fetch Active Palai Animals for Auto-Billing
-  const { data: palaiAnimals } = await supabase
-    .from('livestock_master')
-    .select('id, tag_id, client_name, monthly_palai_fee, status')
-    .eq('farm_id', farm.id)
-    .neq('ownership', 'Self')
-    .eq('status', 'Active')
-
-  // 2. Fetch Global Farm Transactions
-  const { data: globalTxns } = await supabase
-    .from('transactions')
-    .select('*')
-    .eq('farm_id', farm.id)
-    .order('txn_date', { ascending: false })
-
-  // 3. Fetch Per-Animal Financial Logs
-  const { data: animalFinLogs } = await supabase
-    .from('animal_financial_logs')
-    .select(`
-      *,
-      livestock_master (
+  // Run independent read queries in parallel to speed up page load
+  const [
+    { data: palaiAnimals },
+    { data: globalTxns },
+    { data: animalFinLogs },
+  ] = await Promise.all([
+    supabase
+      .from('livestock_master')
+      .select('id, tag_id, client_name, monthly_palai_fee, status')
+      .eq('farm_id', farm.id)
+      .neq('ownership', 'Self')
+      .eq('status', 'Active'),
+    supabase
+      .from('transactions')
+      .select('id, txn_date, type, category, amount, description')
+      .eq('farm_id', farm.id)
+      .order('txn_date', { ascending: false }),
+    supabase
+      .from('animal_financial_logs')
+      .select(`
         id,
-        tag_id,
-        species
-      )
-    `)
-    .eq('farm_id', farm.id)
-    .order('transaction_date', { ascending: false })
+        animal_id,
+        entry_type,
+        category,
+        amount,
+        transaction_date,
+        notes,
+        livestock_master (
+          id,
+          tag_id,
+          species
+        )
+      `)
+      .eq('farm_id', farm.id)
+      .order('transaction_date', { ascending: false }),
+  ])
 
   // Merge Ledger
   type UnifiedLedgerItem = {
@@ -89,7 +124,7 @@ export default async function FinancesPage({
       source: 'global',
       date: String(t.txn_date).split('T')[0],
       type: t.type === 'Income' ? 'Income' : 'Expense',
-      category: t.category,
+      category: t.category || 'General',
       amount: Number(t.amount) || 0,
       description: t.description || '',
     })
@@ -102,7 +137,7 @@ export default async function FinancesPage({
       source: 'animal',
       date: String(f.transaction_date).split('T')[0],
       type: f.entry_type === 'Revenue' ? 'Income' : 'Expense',
-      category: f.category,
+      category: f.category || 'General',
       amount: Number(f.amount) || 0,
       description: f.notes || '',
       animalId: f.animal_id,
@@ -113,10 +148,29 @@ export default async function FinancesPage({
   unifiedList.sort((a, b) => b.date.localeCompare(a.date))
 
   const filteredLedger = unifiedList.filter(item => {
-    if (filterType === 'Income') return item.type === 'Income'
-    if (filterType === 'Expense') return item.type === 'Expense'
-    return true
+    if (filterType === 'Income' && item.type !== 'Income') return false
+    if (filterType === 'Expense' && item.type !== 'Expense') return false
+    if (!normalizedQuery) return true
+
+    const haystack = [
+      item.category,
+      item.description,
+      item.tagId || '',
+      item.type,
+      formatDateDDMMYYYY(item.date),
+      String(item.amount),
+    ]
+      .join(' ')
+      .toLowerCase()
+
+    return haystack.includes(normalizedQuery)
   })
+
+  const totalFilteredCount = filteredLedger.length
+  const totalPages = Math.max(1, Math.ceil(totalFilteredCount / pageSize))
+  const safePage = Math.min(currentPage, totalPages)
+  const startIndex = (safePage - 1) * pageSize
+  const paginatedLedger = filteredLedger.slice(startIndex, startIndex + pageSize)
 
   const totalIncome = unifiedList.filter(t => t.type === 'Income').reduce((acc, t) => acc + t.amount, 0)
   const totalExpense = unifiedList.filter(t => t.type === 'Expense').reduce((acc, t) => acc + t.amount, 0)
@@ -156,7 +210,6 @@ export default async function FinancesPage({
     let billedCount = 0
 
     for (const animal of activePalai) {
-      // Duplicate check for this animal and month
       const { data: existingLog } = await supabaseClient
         .from('animal_financial_logs')
         .select('id')
@@ -168,7 +221,6 @@ export default async function FinancesPage({
 
       const feeAmount = Number(animal.monthly_palai_fee) > 0 ? Number(animal.monthly_palai_fee) : defaultFee
 
-      // 1. Insert into animal_financial_logs
       await supabaseClient.from('animal_financial_logs').insert([
         {
           farm_id: farm.id,
@@ -181,7 +233,6 @@ export default async function FinancesPage({
         },
       ])
 
-      // 2. Add due amount to Client's Receivable balance in Contacts Directory
       if (animal.client_name) {
         const { data: contactMatch } = await supabaseClient
           .from('contacts')
@@ -444,37 +495,67 @@ export default async function FinancesPage({
         {/* Ledger & Add Entry */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <h2 className="font-bold text-slate-800 text-sm">Unified Transaction History</h2>
-                <p className="text-[11px] text-slate-400">Includes direct farm entries & animal-specific ledgers</p>
+            <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h2 className="font-bold text-slate-800 text-sm">Unified Transaction History</h2>
+                  <p className="text-[11px] text-slate-400">
+                    Showing {paginatedLedger.length} of {totalFilteredCount} matching entries (Total: {unifiedList.length})
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <Link
+                    href={buildFinancesUrl({ filter: 'All', q: searchQuery, page: 1 })}
+                    className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${
+                      filterType === 'All' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    All
+                  </Link>
+                  <Link
+                    href={buildFinancesUrl({ filter: 'Income', q: searchQuery, page: 1 })}
+                    className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${
+                      filterType === 'Income' ? 'bg-emerald-600 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    Income
+                  </Link>
+                  <Link
+                    href={buildFinancesUrl({ filter: 'Expense', q: searchQuery, page: 1 })}
+                    className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${
+                      filterType === 'Expense' ? 'bg-rose-600 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    Expense
+                  </Link>
+                </div>
               </div>
-              <div className="flex items-center gap-1.5">
-                <Link
-                  href="/finances"
-                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${
-                    filterType === 'All' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
-                  }`}
+
+              {/* Search Bar */}
+              <form method="GET" action="/finances" className="flex items-center gap-2">
+                {filterType !== 'All' && <input type="hidden" name="filter" value={filterType} />}
+                <input
+                  type="text"
+                  name="q"
+                  defaultValue={searchQuery}
+                  placeholder="Search by category, tag ID, notes, or amount..."
+                  className="flex-1 px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs text-slate-900 focus:ring-2 focus:ring-indigo-500"
+                />
+                <button
+                  type="submit"
+                  className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold transition"
                 >
-                  All ({unifiedList.length})
-                </Link>
-                <Link
-                  href="/finances?filter=Income"
-                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${
-                    filterType === 'Income' ? 'bg-emerald-600 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
-                  }`}
-                >
-                  Income
-                </Link>
-                <Link
-                  href="/finances?filter=Expense"
-                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${
-                    filterType === 'Expense' ? 'bg-rose-600 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
-                  }`}
-                >
-                  Expense
-                </Link>
-              </div>
+                  Search
+                </button>
+                {(searchQuery || filterType !== 'All') && (
+                  <Link
+                    href="/finances"
+                    className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition"
+                  >
+                    Reset
+                  </Link>
+                )}
+              </form>
             </div>
 
             <div className="overflow-x-auto">
@@ -490,8 +571,8 @@ export default async function FinancesPage({
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-slate-100">
-                  {filteredLedger.length > 0 ? (
-                    filteredLedger.map((txn) => {
+                  {paginatedLedger.length > 0 ? (
+                    paginatedLedger.map((txn) => {
                       const isIncome = txn.type === 'Income'
                       return (
                         <tr key={`${txn.source}-${txn.id}`} className="hover:bg-slate-50 transition-colors">
@@ -535,13 +616,49 @@ export default async function FinancesPage({
                   ) : (
                     <tr>
                       <td colSpan={6} className="px-6 py-12 text-center text-sm text-slate-400">
-                        No transactions recorded yet.
+                        No matching transactions found.
                       </td>
                     </tr>
                   )}
                 </tbody>
               </table>
             </div>
+
+            {/* Pagination Controls */}
+            {totalFilteredCount > 0 && (
+              <div className="px-6 py-3.5 border-t border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                <span className="text-slate-500">
+                  Page <strong className="text-slate-800">{safePage}</strong> of <strong className="text-slate-800">{totalPages}</strong>
+                </span>
+                <div className="flex items-center gap-2">
+                  {safePage > 1 ? (
+                    <Link
+                      href={buildFinancesUrl({ filter: filterType, q: searchQuery, page: safePage - 1 })}
+                      className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 font-semibold rounded-lg border border-slate-200 transition"
+                    >
+                      ← Previous
+                    </Link>
+                  ) : (
+                    <span className="px-3 py-1.5 bg-slate-100 text-slate-400 font-semibold rounded-lg border border-slate-200 cursor-not-allowed">
+                      ← Previous
+                    </span>
+                  )}
+
+                  {safePage < totalPages ? (
+                    <Link
+                      href={buildFinancesUrl({ filter: filterType, q: searchQuery, page: safePage + 1 })}
+                      className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 font-semibold rounded-lg border border-slate-200 transition"
+                    >
+                      Next →
+                    </Link>
+                  ) : (
+                    <span className="px-3 py-1.5 bg-slate-100 text-slate-400 font-semibold rounded-lg border border-slate-200 cursor-not-allowed">
+                      Next →
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 h-fit space-y-5">
