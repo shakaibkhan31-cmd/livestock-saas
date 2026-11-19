@@ -216,11 +216,19 @@ export default async function FinancesPage({
   // Server Action: Add Global Farm Transaction
   const addTransaction = async (formData: FormData) => {
     'use server'
-    const type = formData.get('type') as string
-    const category = formData.get('category') as string
-    const amount = formData.get('amount') as string
-    const txn_date = formData.get('txn_date') as string
-    const description = formData.get('description') as string
+    const rawType = ((formData.get('type') as string) || 'Expense').trim()
+    const type = rawType === 'Income' ? 'Income' : 'Expense'
+    const category = ((formData.get('category') as string) || '').trim()
+    const parsedAmount = parseFloat((formData.get('amount') as string) || '0')
+    const txn_date = ((formData.get('txn_date') as string) || '').trim()
+    const description = ((formData.get('description') as string) || '').trim()
+
+    if (!category) {
+      return redirect(`/finances?error=${encodeURIComponent('Category is required.')}`)
+    }
+    if (isNaN(parsedAmount) || parsedAmount <= 0) {
+      return redirect(`/finances?error=${encodeURIComponent('Please enter a valid amount greater than 0.')}`)
+    }
 
     const supabaseClient = await createClient()
 
@@ -229,7 +237,7 @@ export default async function FinancesPage({
         farm_id: farm.id,
         type,
         category,
-        amount: parseFloat(amount),
+        amount: parsedAmount,
         txn_date: txn_date || new Date().toISOString().split('T')[0],
         description: description || null,
       },
