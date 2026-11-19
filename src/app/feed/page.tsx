@@ -21,6 +21,32 @@ function formatDateDDMMYYYY(dateInput?: string | null): string {
   return `${day}/${month}/${year}`
 }
 
+function buildFeedUrl({
+  species,
+  entryType,
+  alloc,
+  q,
+  page,
+  splitDate,
+}: {
+  species?: string
+  entryType?: string
+  alloc?: string
+  q?: string
+  page?: number
+  splitDate?: string
+}) {
+  const sp = new URLSearchParams()
+  if (species && species !== 'All') sp.set('species', species)
+  if (entryType && entryType !== 'All') sp.set('entryType', entryType)
+  if (alloc && alloc !== 'All') sp.set('alloc', alloc)
+  if (q && q.trim()) sp.set('q', q.trim())
+  if (splitDate && splitDate.trim()) sp.set('splitDate', splitDate.trim())
+  if (page && page > 1) sp.set('page', String(page))
+  const qs = sp.toString()
+  return qs ? `/feed?${qs}` : '/feed'
+}
+
 const SPECIES_OPTIONS = [
   'Goat',
   'Sheep',
@@ -57,12 +83,29 @@ const DEFAULT_FEED_SUGGESTIONS = [
 export default async function FeedManagementPage({
   searchParams,
 }: {
-  searchParams: Promise<{ msg?: string; error?: string; species?: string; splitDate?: string }>
+  searchParams: Promise<{
+    msg?: string
+    error?: string
+    species?: string
+    splitDate?: string
+    entryType?: string
+    alloc?: string
+    q?: string
+    page?: string
+  }>
 }) {
   const params = await searchParams
   const statusMsg = params.msg
   const errorMsg = params.error
   const selectedSpeciesFilter = params.species || 'All'
+  const selectedEntryType =
+    params.entryType === 'Purchase' || params.entryType === 'Consumption' ? params.entryType : 'All'
+  const selectedAllocFilter =
+    params.alloc === 'Pending' || params.alloc === 'Allocated' ? params.alloc : 'All'
+  const searchQuery = (params.q || '').trim()
+  const normalizedQuery = searchQuery.toLowerCase()
+  const currentPage = Math.max(1, parseInt(params.page || '1', 10) || 1)
+  const pageSize = 15
 
   // RBAC Check
   const { user, farm, role } = await getUserFarmAndRole()
@@ -72,19 +115,22 @@ export default async function FeedManagementPage({
 
   const supabase = await createClient()
 
-  // 1. Fetch all feed logs for this farm
-  const { data: allFeedLogs } = await supabase
-    .from('feed_logs')
-    .select('*')
-    .eq('farm_id', farm.id)
-    .order('log_date', { ascending: false })
-
-  // 2. Fetch active animals (grouped by species)
-  const { data: activeAnimals } = await supabase
-    .from('livestock_master')
-    .select('id, tag_id, species, ownership, client_name, acquisition_date')
-    .eq('farm_id', farm.id)
-    .eq('status', 'Active')
+  // Run independent queries in parallel to speed up page load
+  const [
+    { data: allFeedLogs },
+    { data: activeAnimals },
+  ] = await Promise.all([
+    supabase
+      .from('feed_logs')
+      .select('id, target_species, entry_type, feed_type, quantity_kg, total_cost, log_date, notes, is_allocated')
+      .eq('farm_id', farm.id)
+      .order('log_date', { ascending: false }),
+    supabase
+      .from('livestock_master')
+      .select('id, tag_id, species, ownership, client_name, acquisition_date')
+      .eq('farm_id', farm.id)
+      .eq('status', 'Active'),
+  ])
 
   // Auto-learn custom feed names from previous entries + merge with defaults
   const dynamicFeedSuggestions = Array.from(
@@ -94,11 +140,45 @@ export default async function FeedManagementPage({
     ])
   ).sort()
 
-  // Filter feed logs if a specific species tab is selected
-  const feedLogs = (allFeedLogs || []).filter(log => {
+  // Species-level logs used for KPIs & Live Shed Stock
+  const speciesFeedLogs = (allFeedLogs || []).filter(log => {
     if (selectedSpeciesFilter === 'All') return true
     return (log.target_species || 'Goat') === selectedSpeciesFilter
   })
+
+  // Ledger-specific filtering (Entry Type + Allocation Status + Search Query)
+  const filteredLedgerLogs = speciesFeedLogs.filter(log => {
+    const isPurchase = log.entry_type === 'Purchase' || !log.entry_type
+
+    if (selectedEntryType === 'Purchase' && !isPurchase) return false
+    if (selectedEntryType === 'Consumption' && isPurchase) return false
+
+    if (selectedAllocFilter === 'Pending' && (!isPurchase || log.is_allocated)) return false
+    if (selectedAllocFilter === 'Allocated' && (!isPurchase || !log.is_allocated)) return false
+
+    if (!normalizedQuery) return true
+
+    const haystack = [
+      log.feed_type || '',
+      log.target_species || 'Goat',
+      log.notes || '',
+      isPurchase ? 'stock in purchase' : 'stock out consumption',
+      formatDateDDMMYYYY(log.log_date),
+      String(log.quantity_kg || ''),
+      String(log.total_cost || ''),
+    ]
+      .join(' ')
+      .toLowerCase()
+
+    return haystack.includes(normalizedQuery)
+  })
+
+  // Pagination slice for Ledger table
+  const totalLedgerCount = filteredLedgerLogs.length
+  const totalPages = Math.max(1, Math.ceil(totalLedgerCount / pageSize))
+  const safePage = Math.min(currentPage, totalPages)
+  const startIndex = (safePage - 1) * pageSize
+  const paginatedFeedLogs = filteredLedgerLogs.slice(startIndex, startIndex + pageSize)
 
   // Calculate Bulk Stock Inventory per (Species + Feed Type)
   type StockSummary = {
@@ -113,7 +193,7 @@ export default async function FeedManagementPage({
   }
 
   const stockMap: Record<string, StockSummary> = {}
-  feedLogs.forEach(log => {
+  speciesFeedLogs.forEach(log => {
     const sp = (log.target_species || 'Goat').trim()
     const ft = (log.feed_type || 'General Feed').trim()
     const key = `${sp}__${ft}`
@@ -165,15 +245,15 @@ export default async function FeedManagementPage({
     }
   })
 
-  const filteredUnallocatedPool = feedLogs
+  const filteredUnallocatedPool = speciesFeedLogs
     .filter(l => !l.is_allocated && (l.entry_type === 'Purchase' || !l.entry_type) && Number(l.total_cost) > 0)
     .reduce((sum, l) => sum + (Number(l.total_cost) || 0), 0)
 
-  const filteredUnallocatedBillsCount = feedLogs.filter(
+  const filteredUnallocatedBillsCount = speciesFeedLogs.filter(
     l => !l.is_allocated && (l.entry_type === 'Purchase' || !l.entry_type) && Number(l.total_cost) > 0
   ).length
 
-  const totalPurchasedSpend = feedLogs
+  const totalPurchasedSpend = speciesFeedLogs
     .filter(l => l.entry_type === 'Purchase' || !l.entry_type)
     .reduce((sum, l) => sum + (Number(l.total_cost) || 0), 0)
 
@@ -386,7 +466,6 @@ export default async function FeedManagementPage({
 
     const { data: rawAnimals } = await animalQuery
 
-    // Only include animals that existed on or before the ledger/allocation date
     const cutoffDateStr = String(allocationDate).split('T')[0]
     const animals = (rawAnimals || []).filter(a => {
       if (!a.acquisition_date) return true
@@ -469,6 +548,8 @@ export default async function FeedManagementPage({
 
   const matchingCount = matchingActiveAnimals.length
   const estimatedShare = matchingCount > 0 ? Math.round(filteredUnallocatedPool / matchingCount) : 0
+  const hasLedgerFilters =
+    selectedEntryType !== 'All' || selectedAllocFilter !== 'All' || searchQuery.length > 0
 
   return (
     <div className="min-h-screen bg-slate-50/80 py-7 px-4 sm:px-6 lg:px-8">
@@ -523,7 +604,14 @@ export default async function FeedManagementPage({
         <div className="bg-white px-3 py-2.5 rounded-2xl border border-slate-200/90 shadow-xs flex flex-wrap items-center gap-1.5">
           <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider px-2.5">Species:</span>
           <Link
-            href="/feed"
+            href={buildFeedUrl({
+              species: 'All',
+              entryType: selectedEntryType,
+              alloc: selectedAllocFilter,
+              q: searchQuery,
+              splitDate: params.splitDate,
+              page: 1,
+            })}
             className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
               selectedSpeciesFilter === 'All'
                 ? 'bg-slate-900 text-white shadow-xs'
@@ -538,7 +626,14 @@ export default async function FeedManagementPage({
             return (
               <Link
                 key={sp}
-                href={`/feed?species=${encodeURIComponent(sp)}`}
+                href={buildFeedUrl({
+                  species: sp,
+                  entryType: selectedEntryType,
+                  alloc: selectedAllocFilter,
+                  q: searchQuery,
+                  splitDate: params.splitDate,
+                  page: 1,
+                })}
                 className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 ${
                   selectedSpeciesFilter === sp
                     ? 'bg-emerald-600 text-white shadow-xs'
@@ -673,20 +768,136 @@ export default async function FeedManagementPage({
         {/* Main Workspace: Left Ledger + Right Sticky Action Forms */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
 
-          {/* Left 7 Cols: Clean Transaction Ledger */}
+          {/* Left 7 Cols: Searchable, Filterable & Paginated Transaction Ledger */}
           <div className="lg:col-span-7 bg-white rounded-2xl shadow-xs border border-slate-200/90 overflow-hidden">
-            <div className="px-5 py-3.5 border-b border-slate-100 bg-slate-50/70 flex items-center justify-between">
-              <div>
-                <h2 className="font-bold text-slate-900 text-sm">
-                  {selectedSpeciesFilter === 'All'
-                    ? 'Purchase & Stock-Out Ledger'
-                    : `${selectedSpeciesFilter} Feed Ledger`}
-                </h2>
-                <p className="text-[11px] text-slate-500">Chronological feed inflows and closing stock adjustments</p>
+            <div className="px-5 py-3.5 border-b border-slate-100 bg-slate-50/70 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <h2 className="font-bold text-slate-900 text-sm">
+                    {selectedSpeciesFilter === 'All'
+                      ? 'Purchase & Stock-Out Ledger'
+                      : `${selectedSpeciesFilter} Feed Ledger`}
+                  </h2>
+                  <p className="text-[11px] text-slate-500">
+                    Showing {paginatedFeedLogs.length} of {totalLedgerCount} matching entries (Species Total: {speciesFeedLogs.length})
+                  </p>
+                </div>
+
+                {/* Type & Allocation Filter Pills */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Link
+                    href={buildFeedUrl({
+                      species: selectedSpeciesFilter,
+                      entryType: 'All',
+                      alloc: 'All',
+                      q: searchQuery,
+                      splitDate: params.splitDate,
+                      page: 1,
+                    })}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
+                      selectedEntryType === 'All' && selectedAllocFilter === 'All'
+                        ? 'bg-slate-900 text-white'
+                        : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    All
+                  </Link>
+                  <Link
+                    href={buildFeedUrl({
+                      species: selectedSpeciesFilter,
+                      entryType: 'Purchase',
+                      alloc: selectedAllocFilter,
+                      q: searchQuery,
+                      splitDate: params.splitDate,
+                      page: 1,
+                    })}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
+                      selectedEntryType === 'Purchase'
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    Stock In
+                  </Link>
+                  <Link
+                    href={buildFeedUrl({
+                      species: selectedSpeciesFilter,
+                      entryType: 'Consumption',
+                      alloc: 'All',
+                      q: searchQuery,
+                      splitDate: params.splitDate,
+                      page: 1,
+                    })}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
+                      selectedEntryType === 'Consumption'
+                        ? 'bg-purple-600 text-white'
+                        : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    Stock Out
+                  </Link>
+                  {isAdmin && (
+                    <Link
+                      href={buildFeedUrl({
+                        species: selectedSpeciesFilter,
+                        entryType: 'Purchase',
+                        alloc: selectedAllocFilter === 'Pending' ? 'All' : 'Pending',
+                        q: searchQuery,
+                        splitDate: params.splitDate,
+                        page: 1,
+                      })}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
+                        selectedAllocFilter === 'Pending'
+                          ? 'bg-amber-600 text-white'
+                          : 'bg-white border border-amber-200 text-amber-800 hover:bg-amber-50'
+                      }`}
+                    >
+                      Pending Split
+                    </Link>
+                  )}
+                </div>
               </div>
-              <span className="text-xs font-semibold bg-slate-200/70 text-slate-700 px-2.5 py-1 rounded-full">
-                {feedLogs.length} entries
-              </span>
+
+              {/* Search Bar */}
+              <form method="GET" action="/feed" className="flex items-center gap-2">
+                {selectedSpeciesFilter !== 'All' && (
+                  <input type="hidden" name="species" value={selectedSpeciesFilter} />
+                )}
+                {selectedEntryType !== 'All' && (
+                  <input type="hidden" name="entryType" value={selectedEntryType} />
+                )}
+                {selectedAllocFilter !== 'All' && (
+                  <input type="hidden" name="alloc" value={selectedAllocFilter} />
+                )}
+                {params.splitDate && (
+                  <input type="hidden" name="splitDate" value={params.splitDate} />
+                )}
+                <input
+                  type="text"
+                  name="q"
+                  defaultValue={searchQuery}
+                  placeholder="Search ration item, vendor/notes, date, or cost..."
+                  className="flex-1 px-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs text-slate-900 focus:ring-2 focus:ring-emerald-600"
+                />
+                <button
+                  type="submit"
+                  className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold transition"
+                >
+                  Search
+                </button>
+                {hasLedgerFilters && (
+                  <Link
+                    href={buildFeedUrl({
+                      species: selectedSpeciesFilter,
+                      splitDate: params.splitDate,
+                      page: 1,
+                    })}
+                    className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition"
+                  >
+                    Reset
+                  </Link>
+                )}
+              </form>
             </div>
 
             <div className="overflow-x-auto">
@@ -701,8 +912,8 @@ export default async function FeedManagementPage({
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-slate-100">
-                  {feedLogs.length > 0 ? (
-                    feedLogs.map((log) => {
+                  {paginatedFeedLogs.length > 0 ? (
+                    paginatedFeedLogs.map((log) => {
                       const isPurchase = log.entry_type === 'Purchase' || !log.entry_type
                       const speciesLabel = log.target_species || 'Goat'
                       return (
@@ -767,6 +978,58 @@ export default async function FeedManagementPage({
                 </tbody>
               </table>
             </div>
+
+            {/* Pagination Footer */}
+            {totalLedgerCount > 0 && (
+              <div className="px-5 py-3 border-t border-slate-100 bg-slate-50/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
+                <span className="text-slate-500">
+                  Page <strong className="text-slate-800">{safePage}</strong> of{' '}
+                  <strong className="text-slate-800">{totalPages}</strong>
+                </span>
+
+                <div className="flex items-center gap-2">
+                  {safePage > 1 ? (
+                    <Link
+                      href={buildFeedUrl({
+                        species: selectedSpeciesFilter,
+                        entryType: selectedEntryType,
+                        alloc: selectedAllocFilter,
+                        q: searchQuery,
+                        splitDate: params.splitDate,
+                        page: safePage - 1,
+                      })}
+                      className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 font-semibold rounded-lg border border-slate-200 transition"
+                    >
+                      ← Previous
+                    </Link>
+                  ) : (
+                    <span className="px-3 py-1.5 bg-slate-100 text-slate-400 font-semibold rounded-lg border border-slate-200 cursor-not-allowed">
+                      ← Previous
+                    </span>
+                  )}
+
+                  {safePage < totalPages ? (
+                    <Link
+                      href={buildFeedUrl({
+                        species: selectedSpeciesFilter,
+                        entryType: selectedEntryType,
+                        alloc: selectedAllocFilter,
+                        q: searchQuery,
+                        splitDate: params.splitDate,
+                        page: safePage + 1,
+                      })}
+                      className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 font-semibold rounded-lg border border-slate-200 transition"
+                    >
+                      Next →
+                    </Link>
+                  ) : (
+                    <span className="px-3 py-1.5 bg-slate-100 text-slate-400 font-semibold rounded-lg border border-slate-200 cursor-not-allowed">
+                      Next →
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Right 5 Cols: Sticky Quick-Entry & Write-off Forms */}
