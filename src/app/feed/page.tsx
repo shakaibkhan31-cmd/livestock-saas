@@ -266,7 +266,7 @@ export default async function FeedManagementPage({
     return redirect(`/feed?msg=${encodeURIComponent('Feed log entry deleted.')}`)
   }
 
-  // SERVER ACTION 3: Multi-Item Feed Stock Adjustment / Closing Write-off (Admin Only)
+  // SERVER ACTION 3: Multi-Item Feed Stock Adjustment / Closing Write-off (With Auto Cost Calculation)
   const adjustFeedStock = async (formData: FormData) => {
     'use server'
     const target_species = (formData.get('target_species') as string) || 'Goat'
@@ -288,30 +288,40 @@ export default async function FeedManagementPage({
 
       const { data: itemLogs } = await supabaseClient
         .from('feed_logs')
-        .select('quantity_kg, entry_type')
+        .select('quantity_kg, total_cost, entry_type')
         .eq('farm_id', farm.id)
         .eq('target_species', target_species)
         .eq('feed_type', ft)
 
-      let totalPurchased = 0
-      let totalConsumed = 0
+      let totalPurchasedKg = 0
+      let totalPurchasedCost = 0
+      let totalConsumedKg = 0
+
       ;(itemLogs || []).forEach(l => {
         const q = Number(l.quantity_kg) || 0
-        if (l.entry_type === 'Purchase' || !l.entry_type) totalPurchased += q
-        else totalConsumed += q
+        const c = Number(l.total_cost) || 0
+        if (l.entry_type === 'Purchase' || !l.entry_type) {
+          totalPurchasedKg += q
+          totalPurchasedCost += c
+        } else {
+          totalConsumedKg += q
+        }
       })
 
-      const currentRemaining = totalPurchased - totalConsumed
+      const currentRemaining = totalPurchasedKg - totalConsumedKg
       const diff = Number((currentRemaining - targetRemainingKg).toFixed(3))
 
       if (diff > 0) {
+        const avgRatePerKg = totalPurchasedKg > 0 ? totalPurchasedCost / totalPurchasedKg : 0
+        const adjustedCost = avgRatePerKg > 0 ? Math.round(avgRatePerKg * diff) : 0
+
         adjustmentsToInsert.push({
           farm_id: farm.id,
           target_species,
           entry_type: 'Consumption',
           feed_type: ft,
           quantity_kg: diff,
-          total_cost: 0,
+          total_cost: adjustedCost,
           log_date,
           notes: `${notes} (${currentRemaining.toFixed(1)}kg -> ${targetRemainingKg.toFixed(1)}kg)`,
           is_allocated: true,
@@ -644,7 +654,7 @@ export default async function FeedManagementPage({
               <div>
                 <h2 className="text-base font-bold text-slate-900">Feed Stock Adjustment / Closing Write-off</h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Record closing physical stock for multiple items at once to auto-calculate stock out
+                  Record closing physical stock for multiple items at once to auto-calculate stock out & cost
                 </p>
               </div>
               <button
