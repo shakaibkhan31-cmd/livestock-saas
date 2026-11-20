@@ -2,6 +2,10 @@ import { createClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
 import Link from 'next/link'
 import { getUserFarmAndRole } from '@/utils/rbac'
+import {
+  computeWeightedAnimalsForPool,
+  formatDateDDMMYYYY,
+} from '@/utils/breakeven'
 
 const SPECIES_OPTIONS = [
   'Goat',
@@ -15,22 +19,6 @@ const SPECIES_OPTIONS = [
   'Quail',
   'Shared (All Species)',
 ]
-
-function formatDateDDMMYYYY(dateInput?: string | null): string {
-  if (!dateInput) return 'N/A'
-  const datePart = String(dateInput).split('T')[0]
-  const parts = datePart.split('-')
-  if (parts.length === 3) {
-    const [year, month, day] = parts
-    return `${day}/${month}/${year}`
-  }
-  const d = new Date(dateInput)
-  if (isNaN(d.getTime())) return 'N/A'
-  const day = String(d.getDate()).padStart(2, '0')
-  const month = String(d.getMonth() + 1).padStart(2, '0')
-  const year = d.getFullYear()
-  return `${day}/${month}/${year}`
-}
 
 function extractSpeciesFromTxn(txn: { target_species?: string | null; description?: string | null }): string {
   const colVal = (txn.target_species || '').trim()
@@ -47,14 +35,6 @@ function extractSpeciesFromTxn(txn: { target_species?: string | null; descriptio
 function stripSpeciesTag(description?: string | null): string {
   if (!description) return ''
   return description.replace(/\s*\[Species:\s*[^\]]+\]\s*/gi, ' ').trim()
-}
-
-function daysBetweenDateStrings(startStr?: string | null, endStr?: string | null): number {
-  if (!startStr || !endStr) return 30
-  const s = new Date(`${String(startStr).split('T')[0]}T00:00:00Z`).getTime()
-  const e = new Date(`${String(endStr).split('T')[0]}T00:00:00Z`).getTime()
-  if (isNaN(s) || isNaN(e)) return 30
-  return Math.max(1, Math.round((e - s) / (1000 * 60 * 60 * 24)))
 }
 
 function buildFinancesUrl({
@@ -165,55 +145,6 @@ export default async function FinancesPage({
     }
   })
 
-  // Helper to compute effective weights without any 1kg fallback
-  const computeWeightedAnimals = (
-    poolAnimals: Array<{ id: string; tag_id: string; species: string; acquisition_date?: string | null }>,
-    refDateStr: string
-  ) => {
-    const eligible = poolAnimals.filter(a => {
-      if (!a.acquisition_date) return true
-      return String(a.acquisition_date).split('T')[0] <= refDateStr
-    })
-
-    const loggedWeights = eligible
-      .map(a => latestWeightByAnimal[a.id] ?? 0)
-      .filter(w => w > 0)
-
-    const speciesAvgWeight =
-      loggedWeights.length > 0
-        ? loggedWeights.reduce((sum, w) => sum + w, 0) / loggedWeights.length
-        : 0
-
-    return eligible.map(a => {
-      const rawWeight = latestWeightByAnimal[a.id] ?? 0
-      const acqStr = a.acquisition_date ? String(a.acquisition_date).split('T')[0] : null
-      const tenureDays = acqStr ? daysBetweenDateStrings(acqStr, refDateStr) : 30
-
-      let effectiveWeight = rawWeight
-      let weightSource: 'Logged' | 'Species Avg' | 'Tenure Days' = 'Logged'
-
-      if (rawWeight > 0) {
-        effectiveWeight = rawWeight
-        weightSource = 'Logged'
-      } else if (speciesAvgWeight > 0) {
-        effectiveWeight = Number(speciesAvgWeight.toFixed(1))
-        weightSource = 'Species Avg'
-      } else {
-        effectiveWeight = tenureDays
-        weightSource = 'Tenure Days'
-      }
-
-      return {
-        ...a,
-        acqStr,
-        tenureDays,
-        rawWeight,
-        effectiveWeight,
-        weightSource,
-      }
-    })
-  }
-
   // Merge Ledger
   type UnifiedLedgerItem = {
     id: string
@@ -294,9 +225,13 @@ export default async function FinancesPage({
   const netBalance = totalIncome - totalExpense
   const unrecoveredDeficit = netBalance < 0 ? Math.abs(netBalance) : 0
 
-  // Preview for default Goat species on initial load
+  // Preview for default Goat species using shared breakeven pool helper
   const defaultGoatSelfAnimals = (selfAnimals || []).filter(a => (a.species || 'Goat') === 'Goat')
-  const previewWeightedAnimals = computeWeightedAnimals(defaultGoatSelfAnimals, todayStr)
+  const previewWeightedAnimals = computeWeightedAnimalsForPool(
+    defaultGoatSelfAnimals,
+    latestWeightByAnimal,
+    todayStr
+  )
   const previewTotalWeight = previewWeightedAnimals.reduce((sum, a) => sum + a.effectiveWeight, 0)
 
   const expenseByCategory: Record<string, number> = {}
@@ -309,7 +244,7 @@ export default async function FinancesPage({
 
   const sortedExpenseCategories = Object.entries(expenseByCategory).sort((a, b) => b[1] - a[1])
 
-  // Server Action: One-Click Species-Scoped Weight / Acquisition-Based Deficit Allocation
+  // Server Action: One-Click Species-Scoped Weight & Acquisition-Based Deficit Allocation
   const allocateDeficitByWeight = async (formData: FormData) => {
     'use server'
     const targetSpecies = ((formData.get('allocate_species') as string) || 'Goat').trim()
@@ -341,7 +276,6 @@ export default async function FinancesPage({
         .order('recorded_date', { ascending: false }),
     ])
 
-    // Filter financial logs by targetSpecies unless Shared (All Species)
     const isSharedPool = targetSpecies === 'Shared (All Species)'
 
     let speciesIncome = 0
@@ -364,7 +298,6 @@ export default async function FinancesPage({
       else speciesExpense += amt
     })
 
-    // Fallback to overall unrecovered deficit if species-specific pool is 0 but custom/overall deficit is entered
     let overallIncome = 0
     let overallExpense = 0
     ;(liveGlobalTxns || []).forEach((t: any) => {
@@ -407,53 +340,19 @@ export default async function FinancesPage({
       }
     })
 
-    const eligibleAnimals = matchingSelfAnimals.filter(a => {
-      if (!a.acquisition_date) return true
-      return String(a.acquisition_date).split('T')[0] <= allocationDate
-    })
+    const weightedAnimals = computeWeightedAnimalsForPool(
+      matchingSelfAnimals,
+      latestWeights,
+      allocationDate
+    )
 
-    if (eligibleAnimals.length === 0) {
+    if (weightedAnimals.length === 0) {
       return redirect(
         `/finances?error=${encodeURIComponent(
           `No active ${targetSpecies} animals existed on or before ${formatDateDDMMYYYY(allocationDate)}.`
         )}`
       )
     }
-
-    const loggedWeights = eligibleAnimals
-      .map(a => latestWeights[a.id] ?? 0)
-      .filter(w => w > 0)
-
-    const speciesAvgWeight =
-      loggedWeights.length > 0
-        ? loggedWeights.reduce((sum, w) => sum + w, 0) / loggedWeights.length
-        : 0
-
-    const weightedAnimals = eligibleAnimals.map(a => {
-      const rawWeight = latestWeights[a.id] ?? 0
-      const acqStr = a.acquisition_date ? String(a.acquisition_date).split('T')[0] : null
-      const tenureDays = acqStr ? daysBetweenDateStrings(acqStr, allocationDate) : 30
-
-      let effectiveWeight = rawWeight
-      let basisNote = `${rawWeight} kg logged`
-
-      if (rawWeight > 0) {
-        effectiveWeight = rawWeight
-        basisNote = `${rawWeight} kg logged`
-      } else if (speciesAvgWeight > 0) {
-        effectiveWeight = Number(speciesAvgWeight.toFixed(1))
-        basisNote = `~${effectiveWeight} kg species avg (Acq: ${formatDateDDMMYYYY(acqStr)})`
-      } else {
-        effectiveWeight = tenureDays
-        basisNote = `${tenureDays}d tenure since Acq: ${formatDateDDMMYYYY(acqStr)}`
-      }
-
-      return {
-        ...a,
-        effectiveWeight,
-        basisNote,
-      }
-    })
 
     const sumEffectiveWeight = weightedAnimals.reduce((sum, a) => sum + a.effectiveWeight, 0)
     const allocationTag = `Farm Deficit Split [${targetSpecies}] (${periodLabel} @ ${allocationDate})`

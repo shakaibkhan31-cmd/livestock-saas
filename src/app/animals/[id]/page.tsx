@@ -1,23 +1,12 @@
 import { createClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
 import Link from 'next/link'
-
-// Helper: Consistent DD/MM/YYYY Date Formatter
-function formatDateDDMMYYYY(dateInput?: string | null): string {
-  if (!dateInput) return 'N/A'
-  const datePart = String(dateInput).split('T')[0]
-  const parts = datePart.split('-')
-  if (parts.length === 3) {
-    const [year, month, day] = parts
-    return `${day}/${month}/${year}`
-  }
-  const d = new Date(dateInput)
-  if (isNaN(d.getTime())) return 'N/A'
-  const day = String(d.getDate()).padStart(2, '0')
-  const month = String(d.getMonth() + 1).padStart(2, '0')
-  const year = d.getFullYear()
-  return `${day}/${month}/${year}`
-}
+import {
+  calculateAdgKgPerDay,
+  calculateAnimalBreakEven,
+  daysBetweenDateStrings,
+  formatDateDDMMYYYY,
+} from '@/utils/breakeven'
 
 export default async function AnimalDetailPage({
   params,
@@ -244,55 +233,37 @@ export default async function AnimalDetailPage({
   const totalCostOutflow = (isSelfOwned ? purchaseCost : 0) + loggedExpenses
   const netPnL = loggedRevenue - totalCostOutflow
 
-  // Break-Even & Daily Burn Projection for Farm-Owned (Self) Animals
+  // Shared Break-Even & Daily Burn Projection for Farm-Owned (Self) Animals
   const todayStr = new Date().toISOString().split('T')[0]
-  const todayMs = new Date(`${todayStr}T00:00:00Z`).getTime()
   const acqDateStr = animal.acquisition_date ? String(animal.acquisition_date).split('T')[0] : null
-  const acqMs = acqDateStr ? new Date(`${acqDateStr}T00:00:00Z`).getTime() : null
-
-  const activeDays = acqMs && !isNaN(acqMs)
-    ? Math.max(1, Math.round((todayMs - acqMs) / (1000 * 60 * 60 * 24)))
+  const activeDays = acqDateStr
+    ? daysBetweenDateStrings(acqDateStr, todayStr, 1)
     : Math.max(1, (financialLogs || []).length || 30)
 
-  // Rearing/running expenses exclude initial purchase cost basis so burn rate reflects ongoing care
-  const dailyBurnRate = loggedExpenses > 0 ? Math.round(loggedExpenses / activeDays) : 0
+  const adgKgPerDay = calculateAdgKgPerDay(weightLogs)
 
-  // Average Daily Gain (ADG in kg/day) between earliest and latest weight log
-  let adgKgPerDay: number | null = null
-  if (weightLogs && weightLogs.length >= 2) {
-    const newestLog = weightLogs[0]
-    const oldestLog = weightLogs[weightLogs.length - 1]
-    const newestMs = new Date(`${String(newestLog.recorded_date).split('T')[0]}T00:00:00Z`).getTime()
-    const oldestMs = new Date(`${String(oldestLog.recorded_date).split('T')[0]}T00:00:00Z`).getTime()
-    const spanDays = Math.max(1, Math.round((newestMs - oldestMs) / (1000 * 60 * 60 * 24)))
-    adgKgPerDay = (Number(newestLog.weight_kg) - Number(oldestLog.weight_kg)) / spanDays
-  }
-
-  const fixedSellingCosts = transportCost + agentFeeCost
-  const commFactor = Math.max(0.05, 1 - commissionPct / 100)
-
-  const calcBreakEvenSale = (futureDays: number) => {
-    const projectedCost = totalCostOutflow + dailyBurnRate * futureDays + fixedSellingCosts
-    return Math.round(projectedCost / commFactor)
-  }
-
-  const breakEvenToday = calcBreakEvenSale(0)
-  const breakEven30Days = calcBreakEvenSale(30)
-  const breakEven60Days = calcBreakEvenSale(60)
-
-  const perKgToday = latestWeight && latestWeight > 0 ? Math.round(breakEvenToday / latestWeight) : null
-  const projWeight30 = latestWeight && adgKgPerDay !== null
-    ? Number(Math.max(latestWeight, latestWeight + adgKgPerDay * 30).toFixed(1))
-    : null
-  const projWeight60 = latestWeight && adgKgPerDay !== null
-    ? Number(Math.max(latestWeight, latestWeight + adgKgPerDay * 60).toFixed(1))
-    : null
-
-  const perKg30Days = projWeight30 && projWeight30 > 0 ? Math.round(breakEven30Days / projWeight30) : null
-  const perKg60Days = projWeight60 && projWeight60 > 0 ? Math.round(breakEven60Days / projWeight60) : null
-
-  const extraCost30 = dailyBurnRate * 30
-  const extraCost60 = dailyBurnRate * 60
+  const {
+    dailyBurnRate,
+    breakEvenToday,
+    breakEven30Days,
+    breakEven60Days,
+    perKgToday,
+    perKg30Days,
+    perKg60Days,
+    projWeight30,
+    projWeight60,
+    extraCost30,
+    extraCost60,
+  } = calculateAnimalBreakEven({
+    purchaseCost: isSelfOwned ? purchaseCost : 0,
+    loggedExpenses,
+    activeDays,
+    latestWeight,
+    adgKgPerDay,
+    commissionPct,
+    transportCost,
+    agentFeeCost,
+  })
 
   // Upcoming / Overdue Medical Alerts (within next 7 days or past due)
   const sevenDaysFromNow = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
