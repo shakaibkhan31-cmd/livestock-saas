@@ -3,6 +3,19 @@ import { redirect } from 'next/navigation'
 import Link from 'next/link'
 import { getUserFarmAndRole } from '@/utils/rbac'
 
+const SPECIES_OPTIONS = [
+  'Goat',
+  'Sheep',
+  'Cattle',
+  'Buffalo',
+  'Chicken',
+  'Rabbit',
+  'Horse',
+  'Dog',
+  'Quail',
+  'Shared (All Species)',
+]
+
 function formatDateDDMMYYYY(dateInput?: string | null): string {
   if (!dateInput) return 'N/A'
   const datePart = String(dateInput).split('T')[0]
@@ -17,6 +30,31 @@ function formatDateDDMMYYYY(dateInput?: string | null): string {
   const month = String(d.getMonth() + 1).padStart(2, '0')
   const year = d.getFullYear()
   return `${day}/${month}/${year}`
+}
+
+function extractSpeciesFromTxn(txn: { target_species?: string | null; description?: string | null }): string {
+  const colVal = (txn.target_species || '').trim()
+  if (colVal) return colVal
+
+  const desc = txn.description || ''
+  const match = desc.match(/\[Species:\s*([^\]]+)\]/i)
+  if (match && match[1]) {
+    return match[1].trim()
+  }
+  return 'Goat'
+}
+
+function stripSpeciesTag(description?: string | null): string {
+  if (!description) return ''
+  return description.replace(/\s*\[Species:\s*[^\]]+\]\s*/gi, ' ').trim()
+}
+
+function daysBetweenDateStrings(startStr?: string | null, endStr?: string | null): number {
+  if (!startStr || !endStr) return 30
+  const s = new Date(`${String(startStr).split('T')[0]}T00:00:00Z`).getTime()
+  const e = new Date(`${String(endStr).split('T')[0]}T00:00:00Z`).getTime()
+  if (isNaN(s) || isNaN(e)) return 30
+  return Math.max(1, Math.round((e - s) / (1000 * 60 * 60 * 24)))
 }
 
 function buildFinancesUrl({
@@ -82,7 +120,7 @@ export default async function FinancesPage({
       .eq('status', 'Active'),
     supabase
       .from('livestock_master')
-      .select('id, tag_id, species, status')
+      .select('id, tag_id, species, acquisition_date, status')
       .eq('farm_id', farm.id)
       .eq('ownership', 'Self')
       .eq('status', 'Active'),
@@ -93,7 +131,7 @@ export default async function FinancesPage({
       .order('recorded_date', { ascending: false }),
     supabase
       .from('transactions')
-      .select('id, txn_date, type, category, amount, description')
+      .select('id, txn_date, type, category, amount, description, target_species')
       .eq('farm_id', farm.id)
       .order('txn_date', { ascending: false }),
     supabase
@@ -116,6 +154,9 @@ export default async function FinancesPage({
       .order('transaction_date', { ascending: false }),
   ])
 
+  const todayStr = new Date().toISOString().split('T')[0]
+  const currentMonthStr = todayStr.slice(0, 7)
+
   // Latest weight per animal
   const latestWeightByAnimal: Record<string, number> = {}
   ;(weightLogs || []).forEach(w => {
@@ -124,17 +165,54 @@ export default async function FinancesPage({
     }
   })
 
-  const selfAnimalsWithWeight = (selfAnimals || []).map(a => {
-    const rawWeight = latestWeightByAnimal[a.id] ?? 0
-    const effectiveWeight = rawWeight > 0 ? rawWeight : 1
-    return {
-      ...a,
-      rawWeight,
-      effectiveWeight,
-    }
-  })
+  // Helper to compute effective weights without any 1kg fallback
+  const computeWeightedAnimals = (
+    poolAnimals: Array<{ id: string; tag_id: string; species: string; acquisition_date?: string | null }>,
+    refDateStr: string
+  ) => {
+    const eligible = poolAnimals.filter(a => {
+      if (!a.acquisition_date) return true
+      return String(a.acquisition_date).split('T')[0] <= refDateStr
+    })
 
-  const totalSelfWeight = selfAnimalsWithWeight.reduce((sum, a) => sum + a.effectiveWeight, 0)
+    const loggedWeights = eligible
+      .map(a => latestWeightByAnimal[a.id] ?? 0)
+      .filter(w => w > 0)
+
+    const speciesAvgWeight =
+      loggedWeights.length > 0
+        ? loggedWeights.reduce((sum, w) => sum + w, 0) / loggedWeights.length
+        : 0
+
+    return eligible.map(a => {
+      const rawWeight = latestWeightByAnimal[a.id] ?? 0
+      const acqStr = a.acquisition_date ? String(a.acquisition_date).split('T')[0] : null
+      const tenureDays = acqStr ? daysBetweenDateStrings(acqStr, refDateStr) : 30
+
+      let effectiveWeight = rawWeight
+      let weightSource: 'Logged' | 'Species Avg' | 'Tenure Days' = 'Logged'
+
+      if (rawWeight > 0) {
+        effectiveWeight = rawWeight
+        weightSource = 'Logged'
+      } else if (speciesAvgWeight > 0) {
+        effectiveWeight = Number(speciesAvgWeight.toFixed(1))
+        weightSource = 'Species Avg'
+      } else {
+        effectiveWeight = tenureDays
+        weightSource = 'Tenure Days'
+      }
+
+      return {
+        ...a,
+        acqStr,
+        tenureDays,
+        rawWeight,
+        effectiveWeight,
+        weightSource,
+      }
+    })
+  }
 
   // Merge Ledger
   type UnifiedLedgerItem = {
@@ -145,13 +223,16 @@ export default async function FinancesPage({
     category: string
     amount: number
     description: string
+    targetSpecies?: string
     animalId?: string
     tagId?: string
   }
 
   const unifiedList: UnifiedLedgerItem[] = []
 
-  ;(globalTxns || []).forEach(t => {
+  ;(globalTxns || []).forEach((t: any) => {
+    const sp = extractSpeciesFromTxn(t)
+    const cleanDesc = stripSpeciesTag(t.description)
     unifiedList.push({
       id: t.id,
       source: 'global',
@@ -159,7 +240,8 @@ export default async function FinancesPage({
       type: t.type === 'Income' ? 'Income' : 'Expense',
       category: t.category || 'General',
       amount: Number(t.amount) || 0,
-      description: t.description || '',
+      description: cleanDesc,
+      targetSpecies: sp,
     })
   })
 
@@ -173,6 +255,7 @@ export default async function FinancesPage({
       category: f.category || 'General',
       amount: Number(f.amount) || 0,
       description: f.notes || '',
+      targetSpecies: animalInfo?.species || 'Goat',
       animalId: f.animal_id,
       tagId: animalInfo?.tag_id || 'Animal',
     })
@@ -189,6 +272,7 @@ export default async function FinancesPage({
       item.category,
       item.description,
       item.tagId || '',
+      item.targetSpecies || '',
       item.type,
       formatDateDDMMYYYY(item.date),
       String(item.amount),
@@ -210,6 +294,11 @@ export default async function FinancesPage({
   const netBalance = totalIncome - totalExpense
   const unrecoveredDeficit = netBalance < 0 ? Math.abs(netBalance) : 0
 
+  // Preview for default Goat species on initial load
+  const defaultGoatSelfAnimals = (selfAnimals || []).filter(a => (a.species || 'Goat') === 'Goat')
+  const previewWeightedAnimals = computeWeightedAnimals(defaultGoatSelfAnimals, todayStr)
+  const previewTotalWeight = previewWeightedAnimals.reduce((sum, a) => sum + a.effectiveWeight, 0)
+
   const expenseByCategory: Record<string, number> = {}
   unifiedList
     .filter(t => t.type === 'Expense')
@@ -220,28 +309,28 @@ export default async function FinancesPage({
 
   const sortedExpenseCategories = Object.entries(expenseByCategory).sort((a, b) => b[1] - a[1])
 
-  // Server Action: One-Click Weight-Based Deficit Allocation to Farm-Owned (Self) Animals
+  // Server Action: One-Click Species-Scoped Weight / Acquisition-Based Deficit Allocation
   const allocateDeficitByWeight = async (formData: FormData) => {
     'use server'
+    const targetSpecies = ((formData.get('allocate_species') as string) || 'Goat').trim()
     const allocationDate = ((formData.get('allocation_date') as string) || '').trim() || new Date().toISOString().split('T')[0]
-    const periodLabel = ((formData.get('period_label') as string) || '').trim() || 'Jul-Nov 2026 Deficit'
+    const periodLabel = ((formData.get('period_label') as string) || '').trim() || `${targetSpecies} Deficit Split`
     const customAmountRaw = ((formData.get('custom_amount') as string) || '').trim()
     const parsedCustomAmount = customAmountRaw ? parseFloat(customAmountRaw) : NaN
 
     const supabaseClient = await createClient()
 
-    // Re-verify live farm deficit so allocation matches latest ledger state
     const [
       { data: liveGlobalTxns },
       { data: liveAnimalLogs },
       { data: liveSelfAnimals },
       { data: liveWeightLogs },
     ] = await Promise.all([
-      supabaseClient.from('transactions').select('type, amount').eq('farm_id', farm.id),
-      supabaseClient.from('animal_financial_logs').select('entry_type, amount').eq('farm_id', farm.id),
+      supabaseClient.from('transactions').select('type, amount, target_species, description').eq('farm_id', farm.id),
+      supabaseClient.from('animal_financial_logs').select('entry_type, amount, livestock_master(species)').eq('farm_id', farm.id),
       supabaseClient
         .from('livestock_master')
-        .select('id, tag_id, species')
+        .select('id, tag_id, species, acquisition_date')
         .eq('farm_id', farm.id)
         .eq('ownership', 'Self')
         .eq('status', 'Active'),
@@ -252,33 +341,63 @@ export default async function FinancesPage({
         .order('recorded_date', { ascending: false }),
     ])
 
-    let liveIncome = 0
-    let liveExpense = 0
+    // Filter financial logs by targetSpecies unless Shared (All Species)
+    const isSharedPool = targetSpecies === 'Shared (All Species)'
 
-    ;(liveGlobalTxns || []).forEach(t => {
+    let speciesIncome = 0
+    let speciesExpense = 0
+
+    ;(liveGlobalTxns || []).forEach((t: any) => {
+      const txnSp = extractSpeciesFromTxn(t)
+      if (!isSharedPool && txnSp !== targetSpecies && txnSp !== 'Shared (All Species)') return
       const amt = Number(t.amount) || 0
-      if (t.type === 'Income') liveIncome += amt
-      else liveExpense += amt
+      if (t.type === 'Income') speciesIncome += amt
+      else speciesExpense += amt
     })
 
-    ;(liveAnimalLogs || []).forEach(f => {
+    ;(liveAnimalLogs || []).forEach((f: any) => {
+      const animalInfo = Array.isArray(f.livestock_master) ? f.livestock_master[0] : f.livestock_master
+      const finSp = animalInfo?.species || 'Goat'
+      if (!isSharedPool && finSp !== targetSpecies) return
       const amt = Number(f.amount) || 0
-      if (f.entry_type === 'Revenue') liveIncome += amt
-      else liveExpense += amt
+      if (f.entry_type === 'Revenue') speciesIncome += amt
+      else speciesExpense += amt
     })
 
-    const computedDeficit = Math.max(0, liveExpense - liveIncome)
+    // Fallback to overall unrecovered deficit if species-specific pool is 0 but custom/overall deficit is entered
+    let overallIncome = 0
+    let overallExpense = 0
+    ;(liveGlobalTxns || []).forEach((t: any) => {
+      const amt = Number(t.amount) || 0
+      if (t.type === 'Income') overallIncome += amt
+      else overallExpense += amt
+    })
+    ;(liveAnimalLogs || []).forEach((f: any) => {
+      const amt = Number(f.amount) || 0
+      if (f.entry_type === 'Revenue') overallIncome += amt
+      else overallExpense += amt
+    })
+
+    const speciesDeficit = Math.max(0, speciesExpense - speciesIncome)
+    const overallDeficit = Math.max(0, overallExpense - overallIncome)
+    const suggestedPool = speciesDeficit > 0 ? speciesDeficit : overallDeficit
+
     const poolToAllocate =
       !isNaN(parsedCustomAmount) && parsedCustomAmount > 0
         ? Math.round(parsedCustomAmount)
-        : Math.round(computedDeficit)
+        : Math.round(suggestedPool)
 
     if (poolToAllocate <= 0) {
-      return redirect(`/finances?error=${encodeURIComponent('No unrecovered farm deficit available to allocate.')}`)
+      return redirect(`/finances?error=${encodeURIComponent(`No unrecovered deficit available to allocate for ${targetSpecies}.`)}`)
     }
 
-    if (!liveSelfAnimals || liveSelfAnimals.length === 0) {
-      return redirect(`/finances?error=${encodeURIComponent('No active farm-owned (Self) animals found for allocation.')}`)
+    const matchingSelfAnimals = (liveSelfAnimals || []).filter(a => {
+      if (isSharedPool) return true
+      return (a.species || 'Goat') === targetSpecies
+    })
+
+    if (matchingSelfAnimals.length === 0) {
+      return redirect(`/finances?error=${encodeURIComponent(`No active farm-owned (Self) ${targetSpecies} animals found.`)}`)
     }
 
     const latestWeights: Record<string, number> = {}
@@ -288,17 +407,56 @@ export default async function FinancesPage({
       }
     })
 
-    const weightedAnimals = liveSelfAnimals.map(a => {
-      const w = latestWeights[a.id] ?? 0
+    const eligibleAnimals = matchingSelfAnimals.filter(a => {
+      if (!a.acquisition_date) return true
+      return String(a.acquisition_date).split('T')[0] <= allocationDate
+    })
+
+    if (eligibleAnimals.length === 0) {
+      return redirect(
+        `/finances?error=${encodeURIComponent(
+          `No active ${targetSpecies} animals existed on or before ${formatDateDDMMYYYY(allocationDate)}.`
+        )}`
+      )
+    }
+
+    const loggedWeights = eligibleAnimals
+      .map(a => latestWeights[a.id] ?? 0)
+      .filter(w => w > 0)
+
+    const speciesAvgWeight =
+      loggedWeights.length > 0
+        ? loggedWeights.reduce((sum, w) => sum + w, 0) / loggedWeights.length
+        : 0
+
+    const weightedAnimals = eligibleAnimals.map(a => {
+      const rawWeight = latestWeights[a.id] ?? 0
+      const acqStr = a.acquisition_date ? String(a.acquisition_date).split('T')[0] : null
+      const tenureDays = acqStr ? daysBetweenDateStrings(acqStr, allocationDate) : 30
+
+      let effectiveWeight = rawWeight
+      let basisNote = `${rawWeight} kg logged`
+
+      if (rawWeight > 0) {
+        effectiveWeight = rawWeight
+        basisNote = `${rawWeight} kg logged`
+      } else if (speciesAvgWeight > 0) {
+        effectiveWeight = Number(speciesAvgWeight.toFixed(1))
+        basisNote = `~${effectiveWeight} kg species avg (Acq: ${formatDateDDMMYYYY(acqStr)})`
+      } else {
+        effectiveWeight = tenureDays
+        basisNote = `${tenureDays}d tenure since Acq: ${formatDateDDMMYYYY(acqStr)}`
+      }
+
       return {
         ...a,
-        rawWeight: w,
-        effectiveWeight: w > 0 ? w : 1,
+        effectiveWeight,
+        basisNote,
       }
     })
 
     const sumEffectiveWeight = weightedAnimals.reduce((sum, a) => sum + a.effectiveWeight, 0)
-    const allocationTag = `Farm Deficit Split (${periodLabel} @ ${allocationDate})`
+    const allocationTag = `Farm Deficit Split [${targetSpecies}] (${periodLabel} @ ${allocationDate})`
 
     const insertsToApply: Array<{
       animal_id: string
@@ -333,7 +491,6 @@ export default async function FinancesPage({
       allocatedSum += shareAmount
 
       if (shareAmount > 0) {
-        const weightLabel = animal.rawWeight > 0 ? `${animal.rawWeight} kg` : '1 kg (fallback)'
         insertsToApply.push({
           animal_id: animal.id,
           farm_id: farm.id,
@@ -341,13 +498,17 @@ export default async function FinancesPage({
           category: 'Farm Overhead / Deficit Share',
           amount: shareAmount,
           transaction_date: allocationDate,
-          notes: `${allocationTag} — Weight share ${(shareRatio * 100).toFixed(1)}% (${weightLabel})`,
+          notes: `${allocationTag} — ${(shareRatio * 100).toFixed(1)}% (${animal.basisNote})`,
         })
       }
     }
 
     if (insertsToApply.length === 0) {
-      return redirect(`/finances?msg=${encodeURIComponent(`Deficit (${periodLabel} @ ${allocationDate}) was already allocated to active Self animals.`)}`)
+      return redirect(
+        `/finances?msg=${encodeURIComponent(
+          `Deficit for ${targetSpecies} (${periodLabel} @ ${allocationDate}) was already allocated.`
+        )}`
+      )
     }
 
     const { error: insertErr } = await supabaseClient
@@ -360,7 +521,7 @@ export default async function FinancesPage({
 
     return redirect(
       `/finances?msg=${encodeURIComponent(
-        `Allocated Rs. ${poolToAllocate.toLocaleString()} by weight across ${insertsToApply.length} farm-owned (Self) animal(s) in animal_financial_logs.`
+        `Allocated Rs. ${poolToAllocate.toLocaleString()} (${targetSpecies}) across ${insertsToApply.length} Self animal(s) in animal_financial_logs.`
       )}`
     )
   }
@@ -368,7 +529,7 @@ export default async function FinancesPage({
   // Server Action: Run Monthly Palai Auto-Billing
   const runMonthlyPalaiBilling = async (formData: FormData) => {
     'use server'
-    const billingMonth = formData.get('billing_month') as string // e.g. "2026-11"
+    const billingMonth = formData.get('billing_month') as string
     const defaultFee = parseFloat(formData.get('default_fee') as string) || 5000
 
     const supabaseClient = await createClient()
@@ -443,15 +604,16 @@ export default async function FinancesPage({
     )
   }
 
-  // Server Action: Add Global Farm Transaction
+  // Server Action: Add Global Farm Transaction (with Target Species)
   const addTransaction = async (formData: FormData) => {
     'use server'
     const rawType = ((formData.get('type') as string) || 'Expense').trim()
     const type = rawType === 'Income' ? 'Income' : 'Expense'
+    const targetSpecies = ((formData.get('target_species') as string) || 'Goat').trim()
     const category = ((formData.get('category') as string) || '').trim()
     const parsedAmount = parseFloat((formData.get('amount') as string) || '0')
     const txn_date = ((formData.get('txn_date') as string) || '').trim()
-    const description = ((formData.get('description') as string) || '').trim()
+    const rawDescription = ((formData.get('description') as string) || '').trim()
 
     if (!category) {
       return redirect(`/finances?error=${encodeURIComponent('Category is required.')}`)
@@ -459,6 +621,10 @@ export default async function FinancesPage({
     if (isNaN(parsedAmount) || parsedAmount <= 0) {
       return redirect(`/finances?error=${encodeURIComponent('Please enter a valid amount greater than 0.')}`)
     }
+
+    const descriptionWithTag = rawDescription
+      ? `${rawDescription} [Species: ${targetSpecies}]`
+      : `[Species: ${targetSpecies}]`
 
     const supabaseClient = await createClient()
 
@@ -469,12 +635,13 @@ export default async function FinancesPage({
         category,
         amount: parsedAmount,
         txn_date: txn_date || new Date().toISOString().split('T')[0],
-        description: description || null,
+        description: descriptionWithTag,
+        target_species: targetSpecies,
       },
     ])
 
     if (error) return redirect(`/finances?error=${encodeURIComponent(error.message)}`)
-    return redirect(`/finances?msg=${encodeURIComponent('Transaction recorded successfully.')}`)
+    return redirect(`/finances?msg=${encodeURIComponent(`Transaction recorded under ${targetSpecies}.`)}`)
   }
 
   // Server Action: Delete Transaction
@@ -495,9 +662,6 @@ export default async function FinancesPage({
     if (error) return redirect(`/finances?error=${encodeURIComponent(error.message)}`)
     return redirect(`/finances?msg=${encodeURIComponent('Entry deleted successfully.')}`)
   }
-
-  const todayStr = new Date().toISOString().split('T')[0]
-  const currentMonthStr = todayStr.slice(0, 7)
 
   return (
     <div className="min-h-screen bg-slate-50 py-10 px-4 sm:px-6 lg:px-8">
@@ -593,27 +757,39 @@ export default async function FinancesPage({
           </form>
         </div>
 
-        {/* One-Click Weight-Based Deficit Allocation to Farm-Owned (Self) Animals */}
+        {/* One-Click Species-Scoped Weight & Acquisition-Based Deficit Allocation */}
         <div className="bg-white p-6 rounded-2xl border border-amber-200 shadow-sm space-y-4">
-          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
             <div className="space-y-1">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-amber-100 text-amber-900 border border-amber-300">
                   Farm-Owned Break-Even Sync
                 </span>
                 <span className="text-xs font-mono text-slate-500">
-                  Active Self Animals: <strong>{selfAnimalsWithWeight.length}</strong> • Total Weight: <strong>{totalSelfWeight.toFixed(1)} kg</strong>
+                  Goat Self Preview: <strong>{previewWeightedAnimals.length}</strong> animals • Total Weightage: <strong>{previewTotalWeight.toFixed(1)}</strong>
                 </span>
               </div>
               <h2 className="text-base font-bold text-slate-900">
-                One-Click Weight-Based Deficit Allocation (to Animal Financial Logs)
+                One-Click Species-Scoped Deficit Allocation (to Animal Financial Logs)
               </h2>
               <p className="text-xs text-slate-500 max-w-2xl">
-                Distributes unrecovered farm deficit (<strong className="font-mono text-rose-700">Rs. {unrecoveredDeficit.toLocaleString()}</strong>) proportionally by latest weight into each active <code className="text-slate-700">Self</code> animal&apos;s <code className="text-slate-700">animal_financial_logs</code> as a permanent Expense entry.
+                Allocates unrecovered deficit (<strong className="font-mono text-rose-700">Rs. {unrecoveredDeficit.toLocaleString()}</strong>) to matching active <code className="text-slate-700">Self</code> animals by weight &amp; acquisition date—using species average weight or tenure days instead of a 1 kg fallback.
               </p>
             </div>
 
             <form action={allocateDeficitByWeight} className="flex flex-wrap items-end gap-2.5 bg-amber-50/70 p-3.5 rounded-xl border border-amber-200">
+              <div>
+                <label className="block text-[10px] font-bold uppercase text-amber-900 mb-1">Target Species</label>
+                <select
+                  name="allocate_species"
+                  defaultValue="Goat"
+                  className="px-2.5 py-1.5 bg-white border border-amber-300 rounded-lg text-xs font-semibold text-slate-900"
+                >
+                  {SPECIES_OPTIONS.map(sp => (
+                    <option key={sp} value={sp}>{sp}</option>
+                  ))}
+                </select>
+              </div>
               <div>
                 <label className="block text-[10px] font-bold uppercase text-amber-900 mb-1">Pool Amount (PKR)</label>
                 <input
@@ -623,7 +799,7 @@ export default async function FinancesPage({
                   step="1"
                   defaultValue={unrecoveredDeficit > 0 ? unrecoveredDeficit : ''}
                   placeholder={String(unrecoveredDeficit || 0)}
-                  className="w-32 px-2.5 py-1.5 bg-white border border-amber-300 rounded-lg text-xs font-mono font-bold text-slate-900"
+                  className="w-28 px-2.5 py-1.5 bg-white border border-amber-300 rounded-lg text-xs font-mono font-bold text-slate-900"
                 />
               </div>
               <div>
@@ -632,7 +808,7 @@ export default async function FinancesPage({
                   name="period_label"
                   type="text"
                   defaultValue="Jul-Nov 2026 Deficit"
-                  className="w-40 px-2.5 py-1.5 bg-white border border-amber-300 rounded-lg text-xs text-slate-900"
+                  className="w-36 px-2.5 py-1.5 bg-white border border-amber-300 rounded-lg text-xs text-slate-900"
                 />
               </div>
               <div>
@@ -647,7 +823,7 @@ export default async function FinancesPage({
               </div>
               <button
                 type="submit"
-                disabled={selfAnimalsWithWeight.length === 0}
+                disabled={(selfAnimals || []).length === 0}
                 className="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:bg-slate-300 text-white font-bold rounded-lg text-xs shadow-xs transition"
               >
                 ⚖️ Allocate by Weight
@@ -655,10 +831,10 @@ export default async function FinancesPage({
             </form>
           </div>
 
-          {selfAnimalsWithWeight.length > 0 && (
+          {previewWeightedAnimals.length > 0 && (
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2 border-t border-slate-100">
-              {selfAnimalsWithWeight.map(a => {
-                const ratio = totalSelfWeight > 0 ? a.effectiveWeight / totalSelfWeight : 0
+              {previewWeightedAnimals.map(a => {
+                const ratio = previewTotalWeight > 0 ? a.effectiveWeight / previewTotalWeight : 0
                 const previewShare = Math.round(unrecoveredDeficit * ratio)
                 return (
                   <div key={a.id} className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-200/80 flex items-center justify-between text-xs">
@@ -667,7 +843,10 @@ export default async function FinancesPage({
                         {a.tag_id}
                       </Link>
                       <span className="text-[11px] text-slate-500 ml-1.5">
-                        ({a.rawWeight > 0 ? `${a.rawWeight} kg` : 'No weight log'} • {(ratio * 100).toFixed(1)}%)
+                        ({a.weightSource === 'Logged'
+                          ? `${a.rawWeight} kg`
+                          : `${a.weightSource}: ${a.effectiveWeight}`}{' '}
+                        • Acq: {formatDateDDMMYYYY(a.acqStr)} • {(ratio * 100).toFixed(1)}%)
                       </span>
                     </div>
                     <span className="font-mono font-bold text-rose-700">
@@ -804,7 +983,7 @@ export default async function FinancesPage({
                   type="text"
                   name="q"
                   defaultValue={searchQuery}
-                  placeholder="Search by category, tag ID, notes, or amount..."
+                  placeholder="Search by category, species, tag ID, notes, or amount..."
                   className="flex-1 px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs text-slate-900 focus:ring-2 focus:ring-indigo-500"
                 />
                 <button
@@ -829,7 +1008,7 @@ export default async function FinancesPage({
                 <thead className="bg-slate-50">
                   <tr>
                     <th className="px-5 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase">Date</th>
-                    <th className="px-5 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase">Tag / Source</th>
+                    <th className="px-5 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase">Tag / Species</th>
                     <th className="px-5 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase">Category</th>
                     <th className="px-5 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase">Amount</th>
                     <th className="px-5 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase">Notes</th>
@@ -855,7 +1034,7 @@ export default async function FinancesPage({
                               </Link>
                             ) : (
                               <span className="inline-flex items-center px-2 py-0.5 text-[11px] font-semibold rounded-md bg-slate-100 text-slate-700 border border-slate-200">
-                                General Farm
+                                {txn.targetSpecies || 'Goat'}
                               </span>
                             )}
                           </td>
@@ -934,16 +1113,32 @@ export default async function FinancesPage({
             </div>
 
             <form action={addTransaction} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Type *</label>
-                <select
-                  name="type"
-                  required
-                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-semibold text-slate-900"
-                >
-                  <option value="Income">Income (Aamdani)</option>
-                  <option value="Expense">Expense (Kharcha)</option>
-                </select>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Type *</label>
+                  <select
+                    name="type"
+                    required
+                    className="w-full px-3 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-semibold text-slate-900"
+                  >
+                    <option value="Expense">Expense (-)</option>
+                    <option value="Income">Income (+)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">Target Species *</label>
+                  <select
+                    name="target_species"
+                    required
+                    defaultValue="Goat"
+                    className="w-full px-3 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-semibold text-slate-900"
+                  >
+                    {SPECIES_OPTIONS.map(sp => (
+                      <option key={sp} value={sp}>{sp}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
 
               <div>
