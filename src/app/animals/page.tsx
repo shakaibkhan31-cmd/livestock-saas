@@ -222,8 +222,12 @@ export default async function AnimalsMasterPage({
   }
 
   const totalCount = enrichedAnimals.length
-  const selfCount = enrichedAnimals.filter(a => a.ownership === 'Self').length
-  const palaiCount = enrichedAnimals.filter(a => a.ownership !== 'Self').length
+  const selfAnimals = enrichedAnimals.filter(a => a.ownership === 'Self')
+  const palaiAnimals = enrichedAnimals.filter(a => a.ownership !== 'Self')
+  const selfCount = selfAnimals.length
+  const palaiCount = palaiAnimals.length
+  const activeCount = enrichedAnimals.filter(a => a.status === 'Active').length
+  const totalSelfCostBasis = selfAnimals.reduce((sum, a) => sum + (Number(a.cost_basis) || 0), 0)
 
   return (
     <div className="min-h-screen bg-slate-50 py-10 px-4 sm:px-6 lg:px-8">
@@ -257,6 +261,35 @@ export default async function AnimalsMasterPage({
             >
               + Add Animal
             </Link>
+          </div>
+        </div>
+
+        {/* KPI Summary Cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-slate-900">
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Total Livestock</p>
+            <p className="text-2xl font-bold text-slate-900 font-mono mt-1">{totalCount}</p>
+            <p className="text-[11px] text-slate-400 mt-0.5">{activeCount} Active in shed</p>
+          </div>
+
+          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-blue-600">
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Farm-Owned (Self)</p>
+            <p className="text-2xl font-bold text-blue-700 font-mono mt-1">{selfCount}</p>
+            <p className="text-[11px] text-slate-400 mt-0.5">Tracked for break-even &amp; sale</p>
+          </div>
+
+          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-purple-600">
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Palai (Client)</p>
+            <p className="text-2xl font-bold text-purple-700 font-mono mt-1">{palaiCount}</p>
+            <p className="text-[11px] text-slate-400 mt-0.5">Client boarding animals</p>
+          </div>
+
+          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-emerald-600">
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Self Cost Basis</p>
+            <p className="text-2xl font-bold text-emerald-700 font-mono mt-1">
+              Rs. {totalSelfCostBasis.toLocaleString()}
+            </p>
+            <p className="text-[11px] text-slate-400 mt-0.5">Initial purchase outlay (Self)</p>
           </div>
         </div>
 
