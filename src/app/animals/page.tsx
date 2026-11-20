@@ -179,7 +179,6 @@ export default async function AnimalsMasterPage({
       ownership: r.ownership === 'Client' ? 'Client' : 'Self',
       client_name: r.client_name || null,
       cost_basis: parseFloat(r.cost_basis || '0') || 0,
-      monthly_boarding_rate: parseFloat(r.monthly_boarding_rate || '0') || 0,
       acquisition_date: r.acquisition_date || new Date().toISOString().split('T')[0],
       status: 'Active',
     }))

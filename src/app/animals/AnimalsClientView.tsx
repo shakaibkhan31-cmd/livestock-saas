@@ -53,6 +53,7 @@ export default function AnimalsClientView({
   const [showImportModal, setShowImportModal] = useState(false)
   const [parsedRows, setParsedRows] = useState<Array<Record<string, string>>>([])
   const [csvError, setCsvError] = useState('')
+  const [isImporting, setIsImporting] = useState(false)
 
   const filteredAnimals = animals.filter(animal => {
     const q = searchQuery.trim().toLowerCase()
@@ -433,12 +434,13 @@ export default function AnimalsClientView({
               <h3 className="text-base font-bold text-slate-900">Bulk Import Animals via CSV</h3>
               <button
                 type="button"
+                disabled={isImporting}
                 onClick={() => {
                   setShowImportModal(false)
                   setParsedRows([])
                   setCsvError('')
                 }}
-                className="text-slate-400 hover:text-slate-700 font-bold text-lg"
+                className="text-slate-400 hover:text-slate-700 font-bold text-lg disabled:opacity-40"
               >
                 ×
               </button>
@@ -452,8 +454,9 @@ export default function AnimalsClientView({
                 </div>
                 <button
                   type="button"
+                  disabled={isImporting}
                   onClick={downloadSampleCsv}
-                  className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold rounded-lg transition"
+                  className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold rounded-lg transition disabled:opacity-40"
                 >
                   Download CSV
                 </button>
@@ -464,8 +467,9 @@ export default function AnimalsClientView({
                 <input
                   type="file"
                   accept=".csv"
+                  disabled={isImporting}
                   onChange={handleCsvFileUpload}
-                  className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-green-50 file:text-green-700 hover:file:bg-green-100 cursor-pointer"
+                  className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-green-50 file:text-green-700 hover:file:bg-green-100 cursor-pointer disabled:opacity-40"
                 />
               </div>
 
@@ -490,25 +494,38 @@ export default function AnimalsClientView({
                 </div>
               )}
 
-              <form action={bulkImportAction} className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+              <form
+                action={async (formData) => {
+                  setIsImporting(true)
+                  try {
+                    await bulkImportAction(formData)
+                  } finally {
+                    setIsImporting(false)
+                  }
+                }}
+                className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100"
+              >
                 <input type="hidden" name="csvRows" value={JSON.stringify(parsedRows)} />
                 <button
                   type="button"
+                  disabled={isImporting}
                   onClick={() => {
                     setShowImportModal(false)
                     setParsedRows([])
+                    setCsvError('')
                   }}
-                  className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-medium hover:bg-slate-50"
+                  className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-medium hover:bg-slate-50 disabled:opacity-40"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={parsedRows.length === 0}
-                  onClick={() => setShowImportModal(false)}
+                  disabled={parsedRows.length === 0 || isImporting}
                   className="px-5 py-2 rounded-xl bg-green-600 text-white text-xs font-semibold hover:bg-green-700 disabled:opacity-40 transition"
                 >
-                  Import {parsedRows.length > 0 ? `${parsedRows.length} Animals` : ''}
+                  {isImporting
+                    ? 'Importing...'
+                    : `Import ${parsedRows.length > 0 ? `${parsedRows.length} Animals` : ''}`}
                 </button>
               </form>
             </div>
