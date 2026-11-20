@@ -69,6 +69,8 @@ export default async function FinancesPage({
   // Run independent read queries in parallel to speed up page load
   const [
     { data: palaiAnimals },
+    { data: selfAnimals },
+    { data: weightLogs },
     { data: globalTxns },
     { data: animalFinLogs },
   ] = await Promise.all([
@@ -78,6 +80,17 @@ export default async function FinancesPage({
       .eq('farm_id', farm.id)
       .neq('ownership', 'Self')
       .eq('status', 'Active'),
+    supabase
+      .from('livestock_master')
+      .select('id, tag_id, species, status')
+      .eq('farm_id', farm.id)
+      .eq('ownership', 'Self')
+      .eq('status', 'Active'),
+    supabase
+      .from('animal_weight_logs')
+      .select('animal_id, weight_kg, recorded_date')
+      .eq('farm_id', farm.id)
+      .order('recorded_date', { ascending: false }),
     supabase
       .from('transactions')
       .select('id, txn_date, type, category, amount, description')
@@ -102,6 +115,26 @@ export default async function FinancesPage({
       .eq('farm_id', farm.id)
       .order('transaction_date', { ascending: false }),
   ])
+
+  // Latest weight per animal
+  const latestWeightByAnimal: Record<string, number> = {}
+  ;(weightLogs || []).forEach(w => {
+    if (w.animal_id && latestWeightByAnimal[w.animal_id] === undefined) {
+      latestWeightByAnimal[w.animal_id] = Math.max(0, Number(w.weight_kg) || 0)
+    }
+  })
+
+  const selfAnimalsWithWeight = (selfAnimals || []).map(a => {
+    const rawWeight = latestWeightByAnimal[a.id] ?? 0
+    const effectiveWeight = rawWeight > 0 ? rawWeight : 1
+    return {
+      ...a,
+      rawWeight,
+      effectiveWeight,
+    }
+  })
+
+  const totalSelfWeight = selfAnimalsWithWeight.reduce((sum, a) => sum + a.effectiveWeight, 0)
 
   // Merge Ledger
   type UnifiedLedgerItem = {
@@ -175,6 +208,7 @@ export default async function FinancesPage({
   const totalIncome = unifiedList.filter(t => t.type === 'Income').reduce((acc, t) => acc + t.amount, 0)
   const totalExpense = unifiedList.filter(t => t.type === 'Expense').reduce((acc, t) => acc + t.amount, 0)
   const netBalance = totalIncome - totalExpense
+  const unrecoveredDeficit = netBalance < 0 ? Math.abs(netBalance) : 0
 
   const expenseByCategory: Record<string, number> = {}
   unifiedList
@@ -185,6 +219,151 @@ export default async function FinancesPage({
     })
 
   const sortedExpenseCategories = Object.entries(expenseByCategory).sort((a, b) => b[1] - a[1])
+
+  // Server Action: One-Click Weight-Based Deficit Allocation to Farm-Owned (Self) Animals
+  const allocateDeficitByWeight = async (formData: FormData) => {
+    'use server'
+    const allocationDate = ((formData.get('allocation_date') as string) || '').trim() || new Date().toISOString().split('T')[0]
+    const periodLabel = ((formData.get('period_label') as string) || '').trim() || 'Jul-Nov 2026 Deficit'
+    const customAmountRaw = ((formData.get('custom_amount') as string) || '').trim()
+    const parsedCustomAmount = customAmountRaw ? parseFloat(customAmountRaw) : NaN
+
+    const supabaseClient = await createClient()
+
+    // Re-verify live farm deficit so allocation matches latest ledger state
+    const [
+      { data: liveGlobalTxns },
+      { data: liveAnimalLogs },
+      { data: liveSelfAnimals },
+      { data: liveWeightLogs },
+    ] = await Promise.all([
+      supabaseClient.from('transactions').select('type, amount').eq('farm_id', farm.id),
+      supabaseClient.from('animal_financial_logs').select('entry_type, amount').eq('farm_id', farm.id),
+      supabaseClient
+        .from('livestock_master')
+        .select('id, tag_id, species')
+        .eq('farm_id', farm.id)
+        .eq('ownership', 'Self')
+        .eq('status', 'Active'),
+      supabaseClient
+        .from('animal_weight_logs')
+        .select('animal_id, weight_kg, recorded_date')
+        .eq('farm_id', farm.id)
+        .order('recorded_date', { ascending: false }),
+    ])
+
+    let liveIncome = 0
+    let liveExpense = 0
+
+    ;(liveGlobalTxns || []).forEach(t => {
+      const amt = Number(t.amount) || 0
+      if (t.type === 'Income') liveIncome += amt
+      else liveExpense += amt
+    })
+
+    ;(liveAnimalLogs || []).forEach(f => {
+      const amt = Number(f.amount) || 0
+      if (f.entry_type === 'Revenue') liveIncome += amt
+      else liveExpense += amt
+    })
+
+    const computedDeficit = Math.max(0, liveExpense - liveIncome)
+    const poolToAllocate =
+      !isNaN(parsedCustomAmount) && parsedCustomAmount > 0
+        ? Math.round(parsedCustomAmount)
+        : Math.round(computedDeficit)
+
+    if (poolToAllocate <= 0) {
+      return redirect(`/finances?error=${encodeURIComponent('No unrecovered farm deficit available to allocate.')}`)
+    }
+
+    if (!liveSelfAnimals || liveSelfAnimals.length === 0) {
+      return redirect(`/finances?error=${encodeURIComponent('No active farm-owned (Self) animals found for allocation.')}`)
+    }
+
+    const latestWeights: Record<string, number> = {}
+    ;(liveWeightLogs || []).forEach(w => {
+      if (w.animal_id && latestWeights[w.animal_id] === undefined) {
+        latestWeights[w.animal_id] = Math.max(0, Number(w.weight_kg) || 0)
+      }
+    })
+
+    const weightedAnimals = liveSelfAnimals.map(a => {
+      const w = latestWeights[a.id] ?? 0
+      return {
+        ...a,
+        rawWeight: w,
+        effectiveWeight: w > 0 ? w : 1,
+      }
+    })
+
+    const sumEffectiveWeight = weightedAnimals.reduce((sum, a) => sum + a.effectiveWeight, 0)
+    const allocationTag = `Farm Deficit Split (${periodLabel} @ ${allocationDate})`
+
+    const insertsToApply: Array<{
+      animal_id: string
+      farm_id: string
+      entry_type: string
+      category: string
+      amount: number
+      transaction_date: string
+      notes: string
+    }> = []
+
+    let allocatedSum = 0
+
+    for (let idx = 0; idx < weightedAnimals.length; idx++) {
+      const animal = weightedAnimals[idx]
+
+      const { data: existingEntry } = await supabaseClient
+        .from('animal_financial_logs')
+        .select('id')
+        .eq('animal_id', animal.id)
+        .eq('notes', allocationTag)
+        .maybeSingle()
+
+      if (existingEntry) continue
+
+      const shareRatio = animal.effectiveWeight / sumEffectiveWeight
+      const isLast = idx === weightedAnimals.length - 1
+      const shareAmount = isLast
+        ? Math.max(0, poolToAllocate - allocatedSum)
+        : Math.round(poolToAllocate * shareRatio)
+
+      allocatedSum += shareAmount
+
+      if (shareAmount > 0) {
+        const weightLabel = animal.rawWeight > 0 ? `${animal.rawWeight} kg` : '1 kg (fallback)'
+        insertsToApply.push({
+          animal_id: animal.id,
+          farm_id: farm.id,
+          entry_type: 'Expense',
+          category: 'Farm Overhead / Deficit Share',
+          amount: shareAmount,
+          transaction_date: allocationDate,
+          notes: `${allocationTag} — Weight share ${(shareRatio * 100).toFixed(1)}% (${weightLabel})`,
+        })
+      }
+    }
+
+    if (insertsToApply.length === 0) {
+      return redirect(`/finances?msg=${encodeURIComponent(`Deficit (${periodLabel} @ ${allocationDate}) was already allocated to active Self animals.`)}`)
+    }
+
+    const { error: insertErr } = await supabaseClient
+      .from('animal_financial_logs')
+      .insert(insertsToApply)
+
+    if (insertErr) {
+      return redirect(`/finances?error=${encodeURIComponent('Allocation failed: ' + insertErr.message)}`)
+    }
+
+    return redirect(
+      `/finances?msg=${encodeURIComponent(
+        `Allocated Rs. ${poolToAllocate.toLocaleString()} by weight across ${insertsToApply.length} farm-owned (Self) animal(s) in animal_financial_logs.`
+      )}`
+    )
+  }
 
   // Server Action: Run Monthly Palai Auto-Billing
   const runMonthlyPalaiBilling = async (formData: FormData) => {
@@ -412,6 +591,93 @@ export default async function FinancesPage({
               ⚡ Run Monthly Billing
             </button>
           </form>
+        </div>
+
+        {/* One-Click Weight-Based Deficit Allocation to Farm-Owned (Self) Animals */}
+        <div className="bg-white p-6 rounded-2xl border border-amber-200 shadow-sm space-y-4">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-amber-100 text-amber-900 border border-amber-300">
+                  Farm-Owned Break-Even Sync
+                </span>
+                <span className="text-xs font-mono text-slate-500">
+                  Active Self Animals: <strong>{selfAnimalsWithWeight.length}</strong> • Total Weight: <strong>{totalSelfWeight.toFixed(1)} kg</strong>
+                </span>
+              </div>
+              <h2 className="text-base font-bold text-slate-900">
+                One-Click Weight-Based Deficit Allocation (to Animal Financial Logs)
+              </h2>
+              <p className="text-xs text-slate-500 max-w-2xl">
+                Distributes unrecovered farm deficit (<strong className="font-mono text-rose-700">Rs. {unrecoveredDeficit.toLocaleString()}</strong>) proportionally by latest weight into each active <code className="text-slate-700">Self</code> animal&apos;s <code className="text-slate-700">animal_financial_logs</code> as a permanent Expense entry.
+              </p>
+            </div>
+
+            <form action={allocateDeficitByWeight} className="flex flex-wrap items-end gap-2.5 bg-amber-50/70 p-3.5 rounded-xl border border-amber-200">
+              <div>
+                <label className="block text-[10px] font-bold uppercase text-amber-900 mb-1">Pool Amount (PKR)</label>
+                <input
+                  name="custom_amount"
+                  type="number"
+                  min="1"
+                  step="1"
+                  defaultValue={unrecoveredDeficit > 0 ? unrecoveredDeficit : ''}
+                  placeholder={String(unrecoveredDeficit || 0)}
+                  className="w-32 px-2.5 py-1.5 bg-white border border-amber-300 rounded-lg text-xs font-mono font-bold text-slate-900"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold uppercase text-amber-900 mb-1">Period Label</label>
+                <input
+                  name="period_label"
+                  type="text"
+                  defaultValue="Jul-Nov 2026 Deficit"
+                  className="w-40 px-2.5 py-1.5 bg-white border border-amber-300 rounded-lg text-xs text-slate-900"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold uppercase text-amber-900 mb-1">Entry Date</label>
+                <input
+                  name="allocation_date"
+                  type="date"
+                  required
+                  defaultValue={todayStr}
+                  className="px-2.5 py-1.5 bg-white border border-amber-300 rounded-lg text-xs text-slate-900"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={selfAnimalsWithWeight.length === 0}
+                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:bg-slate-300 text-white font-bold rounded-lg text-xs shadow-xs transition"
+              >
+                ⚖️ Allocate by Weight
+              </button>
+            </form>
+          </div>
+
+          {selfAnimalsWithWeight.length > 0 && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2 border-t border-slate-100">
+              {selfAnimalsWithWeight.map(a => {
+                const ratio = totalSelfWeight > 0 ? a.effectiveWeight / totalSelfWeight : 0
+                const previewShare = Math.round(unrecoveredDeficit * ratio)
+                return (
+                  <div key={a.id} className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-200/80 flex items-center justify-between text-xs">
+                    <div>
+                      <Link href={`/animals/${a.id}`} className="font-mono font-bold text-slate-900 hover:text-indigo-600">
+                        {a.tag_id}
+                      </Link>
+                      <span className="text-[11px] text-slate-500 ml-1.5">
+                        ({a.rawWeight > 0 ? `${a.rawWeight} kg` : 'No weight log'} • {(ratio * 100).toFixed(1)}%)
+                      </span>
+                    </div>
+                    <span className="font-mono font-bold text-rose-700">
+                      +Rs. {previewShare.toLocaleString()}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </div>
 
         {/* Summary Cards */}
