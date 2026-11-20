@@ -9,6 +9,37 @@ import {
 } from '@/utils/breakeven'
 import AnimalsClientView, { type AnimalItem } from './AnimalsClientView'
 
+function normalizeDateToISO(rawDate?: string): string {
+  const fallback = new Date().toISOString().split('T')[0]
+  const val = (rawDate || '').trim()
+  if (!val) return fallback
+
+  // Already YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(val)) {
+    return val
+  }
+
+  // DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
+  const fullMatch = val.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/)
+  if (fullMatch) {
+    const day = fullMatch[1].padStart(2, '0')
+    const month = fullMatch[2].padStart(2, '0')
+    const year = fullMatch[3]
+    return `${year}-${month}-${day}`
+  }
+
+  // DD-MM-YY or DD/MM/YY (e.g., 17-01-25 -> 2025-01-17)
+  const shortMatch = val.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2})$/)
+  if (shortMatch) {
+    const day = shortMatch[1].padStart(2, '0')
+    const month = shortMatch[2].padStart(2, '0')
+    const year = `20${shortMatch[3]}`
+    return `${year}-${month}-${day}`
+  }
+
+  return fallback
+}
+
 export default async function AnimalsMasterPage({
   searchParams,
 }: {
@@ -179,7 +210,7 @@ export default async function AnimalsMasterPage({
       ownership: r.ownership === 'Client' ? 'Client' : 'Self',
       client_name: r.client_name || null,
       cost_basis: parseFloat(r.cost_basis || '0') || 0,
-      acquisition_date: r.acquisition_date || new Date().toISOString().split('T')[0],
+      acquisition_date: normalizeDateToISO(r.acquisition_date),
       status: 'Active',
     }))
 
