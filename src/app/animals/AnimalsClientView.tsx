@@ -3,25 +3,42 @@
 import { useState } from 'react'
 import Link from 'next/link'
 
-interface Animal {
+export interface AnimalItem {
   id: string
   tag_id: string
   species: string
-  breed_name?: string
+  breed_name?: string | null
   ownership: string
-  client_name?: string
+  client_name?: string | null
   sex: string
   status: string
   cost_basis: number
-  photo_url?: string
-  speciesEmoji?: string
+  photo_url?: string | null
+  acquisition_date?: string | null
+  breakEven?: {
+    breakEvenToday: number
+    perKgToday: number | null
+    latestWeight: number | null
+  } | null
 }
 
 interface AnimalsClientViewProps {
-  animals: Animal[]
+  animals: AnimalItem[]
   deleteAction: (formData: FormData) => Promise<void>
   bulkUpdateAction: (formData: FormData) => Promise<void>
   bulkImportAction: (formData: FormData) => Promise<void>
+}
+
+export function getSpeciesEmoji(species?: string | null): string {
+  const s = (species || '').toLowerCase().trim()
+  if (s.includes('chicken') || s.includes('poultry') || s.includes('hen') || s.includes('rooster')) return '🐔'
+  if (s.includes('sheep') || s.includes('lamb') || s.includes('dumba')) return '🐑'
+  if (s.includes('cow') || s.includes('cattle') || s.includes('buffalo') || s.includes('bull') || s.includes('calf')) return '🐄'
+  if (s.includes('rabbit') || s.includes('bunny')) return '🐇'
+  if (s.includes('horse') || s.includes('mare') || s.includes('stallion')) return '🐎'
+  if (s.includes('dog') || s.includes('puppy')) return '🐕'
+  if (s.includes('quail') || s.includes('bird') || s.includes('duck')) return '🐦'
+  return '🐐'
 }
 
 export default function AnimalsClientView({
@@ -37,26 +54,25 @@ export default function AnimalsClientView({
   const [parsedRows, setParsedRows] = useState<Array<Record<string, string>>>([])
   const [csvError, setCsvError] = useState('')
 
-  // Filter animals
   const filteredAnimals = animals.filter(animal => {
+    const q = searchQuery.trim().toLowerCase()
     const matchesSearch =
-      animal.tag_id.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      animal.species.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (animal.breed_name && animal.breed_name.toLowerCase().includes(searchQuery.toLowerCase())) ||
-      (animal.client_name && animal.client_name.toLowerCase().includes(searchQuery.toLowerCase()))
+      !q ||
+      animal.tag_id.toLowerCase().includes(q) ||
+      animal.species.toLowerCase().includes(q) ||
+      (animal.breed_name && animal.breed_name.toLowerCase().includes(q)) ||
+      (animal.client_name && animal.client_name.toLowerCase().includes(q))
 
     const matchesOwnership = filterOwnership === 'All' || animal.ownership === filterOwnership
     return matchesSearch && matchesOwnership
   })
 
-  // Toggle Single Checkbox
   const toggleSelect = (id: string) => {
     setSelectedIds(prev =>
       prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]
     )
   }
 
-  // Toggle Select All Visible
   const toggleSelectAll = () => {
     if (selectedIds.length === filteredAnimals.length && filteredAnimals.length > 0) {
       setSelectedIds([])
@@ -65,22 +81,19 @@ export default function AnimalsClientView({
     }
   }
 
-  // Download Sample CSV Template
   const downloadSampleCsv = () => {
     const headers = 'tag_id,species,breed_name,sex,ownership,client_name,cost_basis,monthly_boarding_rate,acquisition_date'
     const sample1 = 'G-08,Goat,Gulabi,Male,Self,,28000,0,2026-11-17'
     const sample2 = 'G-09,Goat,Kamori,Male,Client,Zainab,0,5000,2026-11-17'
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers, sample1, sample2].join('\n')
-    const encodedUri = encodeURI(csvContent)
     const link = document.createElement('a')
-    link.setAttribute('href', encodedUri)
+    link.setAttribute('href', encodeURI(csvContent))
     link.setAttribute('download', 'baabaashed_bulk_template.csv')
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
   }
 
-  // Parse Uploaded CSV File
   const handleCsvFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     setCsvError('')
     setParsedRows([])
@@ -90,7 +103,7 @@ export default function AnimalsClientView({
     const reader = new FileReader()
     reader.onload = (event) => {
       try {
-        const text = event.target?.result as string
+        const text = (event.target?.result as string) || ''
         const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
         if (lines.length < 2) {
           setCsvError('CSV file must contain a header row and at least one data row.')
@@ -108,16 +121,26 @@ export default function AnimalsClientView({
         })
 
         setParsedRows(rows)
-      } catch (err) {
+      } catch {
         setCsvError('Failed to parse CSV file. Please use the sample template format.')
       }
     }
     reader.readAsText(file)
   }
 
-  // Export Current Filtered Stock to CSV
   const exportFilteredCsv = () => {
-    const headers = ['Tag ID', 'Species', 'Breed', 'Ownership', 'Client Name', 'Sex', 'Status', 'Cost Basis (PKR)']
+    const headers = [
+      'Tag ID',
+      'Species',
+      'Breed',
+      'Ownership',
+      'Client Name',
+      'Sex',
+      'Status',
+      'Cost Basis (PKR)',
+      'Break-Even Today (PKR)',
+      'Break-Even Per KG (PKR)',
+    ]
     const rows = filteredAnimals.map(a => [
       a.tag_id,
       a.species,
@@ -127,6 +150,8 @@ export default function AnimalsClientView({
       a.sex,
       a.status,
       a.cost_basis || 0,
+      a.ownership === 'Self' && a.breakEven ? a.breakEven.breakEvenToday : '',
+      a.ownership === 'Self' && a.breakEven && a.breakEven.perKgToday !== null ? a.breakEven.perKgToday : '',
     ])
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(r => r.join(','))].join('\n')
     const link = document.createElement('a')
@@ -139,7 +164,6 @@ export default function AnimalsClientView({
 
   return (
     <div className="space-y-4">
-      
       {/* Multi-Select Bulk Action Bar */}
       {selectedIds.length > 0 && (
         <div className="bg-slate-900 text-white px-5 py-3.5 rounded-2xl shadow-lg flex flex-col sm:flex-row items-center justify-between gap-4">
@@ -152,7 +176,6 @@ export default function AnimalsClientView({
 
           <form action={bulkUpdateAction} className="flex flex-wrap items-center gap-2">
             <input type="hidden" name="selectedIds" value={JSON.stringify(selectedIds)} />
-            
             <button
               type="submit"
               name="bulkAction"
@@ -198,7 +221,6 @@ export default function AnimalsClientView({
 
       {/* Main Card */}
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-        
         {/* Search, Filter & Bulk CSV Toolbar */}
         <div className="p-4 sm:p-6 border-b border-slate-100 flex flex-col lg:flex-row items-center justify-between gap-4 bg-slate-50/50">
           <div className="w-full lg:w-80">
@@ -214,6 +236,7 @@ export default function AnimalsClientView({
           <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto justify-between lg:justify-end">
             <div className="flex items-center gap-1.5">
               <button
+                type="button"
                 onClick={() => setFilterOwnership('All')}
                 className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${
                   filterOwnership === 'All' ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
@@ -222,6 +245,7 @@ export default function AnimalsClientView({
                 All Stock
               </button>
               <button
+                type="button"
                 onClick={() => setFilterOwnership('Self')}
                 className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${
                   filterOwnership === 'Self' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
@@ -230,6 +254,7 @@ export default function AnimalsClientView({
                 Self Owned
               </button>
               <button
+                type="button"
                 onClick={() => setFilterOwnership('Client')}
                 className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${
                   filterOwnership === 'Client' ? 'bg-purple-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
@@ -273,19 +298,22 @@ export default function AnimalsClientView({
                     className="h-4 w-4 rounded border-slate-300 accent-green-600 cursor-pointer"
                   />
                 </th>
-                <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Animal / Tag ID</th>
-                <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Species & Breed</th>
-                <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Ownership</th>
-                <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Sex</th>
-                <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Status</th>
-                <th className="px-6 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Cost Basis (PKR)</th>
-                <th className="px-6 py-3.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wider">Actions</th>
+                <th className="px-5 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Animal / Tag ID</th>
+                <th className="px-5 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Species &amp; Breed</th>
+                <th className="px-5 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Ownership</th>
+                <th className="px-5 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Break-Even (Self)</th>
+                <th className="px-5 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Status</th>
+                <th className="px-5 py-3.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Cost Basis</th>
+                <th className="px-5 py-3.5 text-right text-xs font-semibold text-slate-500 uppercase tracking-wider">Actions</th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-slate-100">
               {filteredAnimals.length > 0 ? (
                 filteredAnimals.map((animal) => {
                   const isChecked = selectedIds.includes(animal.id)
+                  const isSelf = animal.ownership === 'Self'
+                  const emoji = getSpeciesEmoji(animal.species)
+
                   return (
                     <tr
                       key={animal.id}
@@ -299,54 +327,73 @@ export default function AnimalsClientView({
                           className="h-4 w-4 rounded border-slate-300 accent-green-600 cursor-pointer"
                         />
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
+                      <td className="px-5 py-4 whitespace-nowrap">
                         <div className="flex items-center gap-3">
                           <div className="h-10 w-10 rounded-xl bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center shrink-0">
                             {animal.photo_url ? (
                               <img src={animal.photo_url} alt={animal.tag_id} className="h-full w-full object-cover" />
                             ) : (
-                              <span className="text-xl">
-                                {animal.speciesEmoji || (
-                                  animal.species?.toLowerCase().includes('chicken') ? '🐔' :
-                                  animal.species?.toLowerCase().includes('sheep') ? '🐑' :
-                                  animal.species?.toLowerCase().includes('cow') || animal.species?.toLowerCase().includes('cattle') || animal.species?.toLowerCase().includes('buffalo') ? '🐄' :
-                                  animal.species?.toLowerCase().includes('rabbit') ? '🐇' :
-                                  animal.species?.toLowerCase().includes('horse') ? '🐎' : '🐐'
-                                )}
-                              </span>
+                              <span className="text-xl">{emoji}</span>
                             )}
                           </div>
-                          <Link
-                            href={`/animals/${animal.id}`}
-                            className="font-mono font-semibold text-green-700 hover:text-green-800 hover:underline bg-green-50 px-2.5 py-1 rounded-lg border border-green-200 inline-block"
-                          >
-                            {animal.tag_id}
-                          </Link>
+                          <div>
+                            <Link
+                              href={`/animals/${animal.id}`}
+                              className="font-mono font-semibold text-green-700 hover:text-green-800 hover:underline bg-green-50 px-2.5 py-1 rounded-lg border border-green-200 inline-block"
+                            >
+                              {animal.tag_id}
+                            </Link>
+                            <p className="text-[11px] text-slate-400 mt-0.5">{animal.sex}</p>
+                          </div>
                         </div>
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm font-medium text-slate-800">{animal.species}</div>
+                      <td className="px-5 py-4 whitespace-nowrap">
+                        <div className="text-sm font-medium text-slate-800 flex items-center gap-1.5">
+                          <span>{emoji}</span>
+                          <span>{animal.species}</span>
+                        </div>
                         {animal.breed_name && <div className="text-xs text-slate-400">{animal.breed_name}</div>}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
+                      <td className="px-5 py-4 whitespace-nowrap">
                         <span className={`inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-full ${
-                          animal.ownership === 'Self'
+                          isSelf
                             ? 'bg-blue-50 text-blue-700 border border-blue-200'
                             : 'bg-purple-50 text-purple-700 border border-purple-200'
                         }`}>
                           {animal.ownership} {animal.client_name ? `(${animal.client_name})` : ''}
                         </span>
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-600">{animal.sex}</td>
-                      <td className="px-6 py-4 whitespace-nowrap">
+                      <td className="px-5 py-4 whitespace-nowrap">
+                        {isSelf && animal.breakEven ? (
+                          <div className="space-y-1">
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-mono font-bold bg-slate-900 text-amber-300">
+                              Rs. {animal.breakEven.breakEvenToday.toLocaleString()}
+                            </span>
+                            <div>
+                              {animal.breakEven.perKgToday !== null && animal.breakEven.latestWeight ? (
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-mono font-bold bg-emerald-100 text-emerald-900 border border-emerald-300">
+                                  Rs. {animal.breakEven.perKgToday.toLocaleString()}/kg
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-medium bg-slate-100 text-slate-500 border border-slate-200">
+                                  No weight log
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-slate-400">—</span>
+                        )}
+                      </td>
+                      <td className="px-5 py-4 whitespace-nowrap">
                         <span className="inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
                           {animal.status}
                         </span>
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-slate-900">
+                      <td className="px-5 py-4 whitespace-nowrap text-sm font-semibold text-slate-900">
                         Rs. {Number(animal.cost_basis || 0).toLocaleString()}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2">
+                      <td className="px-5 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2">
                         <Link
                           href={`/animals/${animal.id}/edit`}
                           className="inline-flex items-center px-3 py-1.5 rounded-lg text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 transition text-xs font-medium"
@@ -436,7 +483,7 @@ export default function AnimalsClientView({
                   <div className="max-h-32 overflow-y-auto text-xs text-emerald-700 font-mono space-y-1">
                     {parsedRows.map((row, idx) => (
                       <div key={idx}>
-                        • {row.tag_id || 'Auto-Tag'} — {row.species || 'Goat'} ({row.ownership || 'Self'})
+                        • {getSpeciesEmoji(row.species)} {row.tag_id || 'Auto-Tag'} — {row.species || 'Goat'} ({row.ownership || 'Self'})
                       </div>
                     ))}
                   </div>
@@ -468,7 +515,6 @@ export default function AnimalsClientView({
           </div>
         </div>
       )}
-
     </div>
   )
 }
