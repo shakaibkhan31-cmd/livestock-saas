@@ -1,195 +1,190 @@
 import { createClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
 import Link from 'next/link'
-import AnimalsClientView from './AnimalsClientView'
+import { getUserFarmAndRole } from '@/utils/rbac'
+import {
+  calculateAdgKgPerDay,
+  calculateAnimalBreakEven,
+  daysBetweenDateStrings,
+} from '@/utils/breakeven'
 
-// Helper: Species-wise clean emoji fallback function
-function getSpeciesEmoji(species?: string): string {
-  const sp = (species || 'Goat').toLowerCase()
-  if (sp.includes('chicken') || sp.includes('bird') || sp.includes('quail') || sp.includes('poultry')) {
-    return '🐔'
+function formatDateDDMMYYYY(dateInput?: string | null): string {
+  if (!dateInput) return 'N/A'
+  const datePart = String(dateInput).split('T')[0]
+  const parts = datePart.split('-')
+  if (parts.length === 3) {
+    const [year, month, day] = parts
+    return `${day}/${month}/${year}`
   }
-  if (sp.includes('sheep') || sp.includes('lamb')) {
-    return '🐑'
-  }
-  if (sp.includes('cattle') || sp.includes('cow') || sp.includes('buffalo') || sp.includes('bull')) {
-    return '🐄'
-  }
-  if (sp.includes('rabbit')) {
-    return '🐇'
-  }
-  if (sp.includes('horse') || sp.includes('pony')) {
-    return '🐎'
-  }
-  return '🐐' // Default Goat
+  const d = new Date(dateInput)
+  if (isNaN(d.getTime())) return 'N/A'
+  const day = String(d.getDate()).padStart(2, '0')
+  const month = String(d.getMonth() + 1).padStart(2, '0')
+  const year = d.getFullYear()
+  return `${day}/${month}/${year}`
 }
 
-export default async function AnimalsPage({
+export default async function AnimalsMasterPage({
   searchParams,
 }: {
-  searchParams: Promise<{ msg?: string; error?: string }>
+  searchParams: Promise<{
+    msg?: string
+    error?: string
+    species?: string
+    ownership?: string
+    q?: string
+  }>
 }) {
   const params = await searchParams
   const statusMsg = params.msg
   const errorMsg = params.error
+  const selectedSpecies = params.species || 'All'
+  const selectedOwnership = params.ownership || 'All'
+  const searchQuery = (params.q || '').trim().toLowerCase()
+
+  const { user, farm, role } = await getUserFarmAndRole()
+  if (!user) return redirect('/login')
+  if (!farm) return redirect('/onboarding')
 
   const supabase = await createClient()
 
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return redirect('/login')
-
-  const { data: farm } = await supabase
-    .from('farms')
-    .select('id, farm_name')
-    .eq('owner_id', user.id)
-    .single()
-
-  if (!farm) return redirect('/onboarding')
-
-  // Fetch active animals
-  const { data: rawAnimals } = await supabase
-    .from('livestock_master')
-    .select('*')
-    .eq('farm_id', farm.id)
-    .eq('status', 'Active')
-    .order('created_at', { ascending: false })
-
-  // Map animals to attach species emoji fallback
-  const animals = (rawAnimals || []).map(animal => ({
-    ...animal,
-    photo_url: animal.photo_url && animal.photo_url.trim() !== '' ? animal.photo_url : null,
-    speciesEmoji: getSpeciesEmoji(animal.species)
-  }))
-
-  // 1. Single Delete Server Action
-  async function deleteAnimal(formData: FormData) {
-    'use server'
-    const animalId = formData.get('animalId') as string
-    const supabaseClient = await createClient()
-
-    await supabaseClient
+  const [
+    { data: animals, error },
+    { data: weightLogs },
+    { data: financialLogs },
+  ] = await Promise.all([
+    supabase
       .from('livestock_master')
-      .delete()
-      .eq('id', animalId)
+      .select('*')
+      .eq('farm_id', farm.id)
+      .order('created_at', { ascending: false }),
+    supabase
+      .from('animal_weight_logs')
+      .select('animal_id, weight_kg, recorded_date')
+      .eq('farm_id', farm.id)
+      .order('recorded_date', { ascending: false }),
+    supabase
+      .from('animal_financial_logs')
+      .select('animal_id, entry_type, amount')
+      .eq('farm_id', farm.id),
+  ])
 
-    return redirect('/animals')
-  }
+  const todayStr = new Date().toISOString().split('T')[0]
 
-  // 2. Bulk Status Update / Delete Server Action
-  async function bulkUpdateAnimals(formData: FormData) {
-    'use server'
-    const idsRaw = formData.get('selectedIds') as string
-    const bulkAction = formData.get('bulkAction') as string
+  // Group weight logs & expense totals by animal_id
+  const weightLogsByAnimal: Record<string, Array<{ weight_kg: number | string; recorded_date: string }>> = {}
+  ;(weightLogs || []).forEach(w => {
+    if (!w.animal_id) return
+    if (!weightLogsByAnimal[w.animal_id]) weightLogsByAnimal[w.animal_id] = []
+    weightLogsByAnimal[w.animal_id].push({
+      weight_kg: w.weight_kg,
+      recorded_date: w.recorded_date,
+    })
+  })
 
-    if (!idsRaw || !bulkAction) return redirect('/animals')
-    const ids = JSON.parse(idsRaw) as string[]
-    if (ids.length === 0) return redirect('/animals')
+  const expenseByAnimal: Record<string, number> = {}
+  ;(financialLogs || []).forEach(f => {
+    if (!f.animal_id || f.entry_type !== 'Expense') return
+    expenseByAnimal[f.animal_id] = (expenseByAnimal[f.animal_id] || 0) + (Number(f.amount) || 0)
+  })
 
-    const supabaseClient = await createClient()
-
-    if (bulkAction === 'DELETE') {
-      const { error } = await supabaseClient
-        .from('livestock_master')
-        .delete()
-        .in('id', ids)
-
-      if (error) return redirect(`/animals?error=${encodeURIComponent(error.message)}`)
-      return redirect(`/animals?msg=${encodeURIComponent(`${ids.length} animal(s) deleted successfully.`)}`)
-    } else {
-      const { error } = await supabaseClient
-        .from('livestock_master')
-        .update({ status: bulkAction })
-        .in('id', ids)
-
-      if (error) return redirect(`/animals?error=${encodeURIComponent(error.message)}`)
-      return redirect(`/animals?msg=${encodeURIComponent(`${ids.length} animal(s) marked as ${bulkAction}.`)}`)
+  // Precompute break-even summary for Self animals
+  const breakEvenByAnimal: Record<
+    string,
+    {
+      breakEvenToday: number
+      perKgToday: number | null
+      latestWeight: number | null
     }
-  }
+  > = {}
 
-  // 3. Bulk CSV Import Server Action
-  async function bulkImportCsv(formData: FormData) {
-    'use server'
-    const csvRowsRaw = formData.get('csvRows') as string
-    if (!csvRowsRaw) return redirect('/animals?error=No+CSV+data+provided')
+  ;(animals || []).forEach(a => {
+    if (a.ownership !== 'Self') return
 
-    const rows = JSON.parse(csvRowsRaw) as Array<Record<string, string>>
-    if (!rows || rows.length === 0) return redirect('/animals?error=CSV+file+is+empty')
+    const aWeights = weightLogsByAnimal[a.id] || []
+    const latestWeight = aWeights.length > 0 ? Number(aWeights[0].weight_kg) : null
+    const adgKgPerDay = calculateAdgKgPerDay(aWeights)
+    const loggedExpenses = expenseByAnimal[a.id] || 0
+    const purchaseCost = Number(a.cost_basis || 0)
+    const acqDateStr = a.acquisition_date ? String(a.acquisition_date).split('T')[0] : null
+    const activeDays = acqDateStr ? daysBetweenDateStrings(acqDateStr, todayStr, 1) : 30
 
-    const supabaseClient = await createClient()
-    const { data: { user: currentUser } } = await supabaseClient.auth.getUser()
-    if (!currentUser) return redirect('/login')
-
-    const { data: currentFarm } = await supabaseClient
-      .from('farms')
-      .select('id')
-      .eq('owner_id', currentUser.id)
-      .single()
-
-    if (!currentFarm) return redirect('/onboarding')
-
-    const today = new Date().toISOString().split('T')[0]
-
-    const recordsToInsert = rows.map((r, idx) => {
-      const rawOwn = (r.ownership || 'Self').trim()
-      const ownership = rawOwn.toLowerCase().includes('client') || rawOwn.toLowerCase().includes('palai')
-        ? 'Client'
-        : 'Self'
-
-      return {
-        farm_id: currentFarm.id,
-        tag_id: (r.tag_id || `IMP-${Date.now()}-${idx + 1}`).trim(),
-        species: (r.species || 'Goat').trim(),
-        breed_name: r.breed_name ? r.breed_name.trim() : null,
-        sex: (r.sex || 'Male').trim(),
-        ownership,
-        client_name: ownership === 'Client' ? (r.client_name?.trim() || 'Client') : null,
-        cost_basis: r.cost_basis ? parseFloat(r.cost_basis) || 0 : 0,
-        monthly_boarding_rate: ownership === 'Client' && r.monthly_boarding_rate ? parseFloat(r.monthly_boarding_rate) || 0 : 0,
-        acquisition_date: r.acquisition_date?.trim() || today,
-        status: 'Active',
-      }
+    const res = calculateAnimalBreakEven({
+      purchaseCost,
+      loggedExpenses,
+      activeDays,
+      latestWeight,
+      adgKgPerDay,
     })
 
-    const { error } = await supabaseClient
-      .from('livestock_master')
-      .insert(recordsToInsert)
-
-    if (error) {
-      return redirect(`/animals?error=${encodeURIComponent('CSV Import Failed: ' + error.message)}`)
+    breakEvenByAnimal[a.id] = {
+      breakEvenToday: res.breakEvenToday,
+      perKgToday: res.perKgToday,
+      latestWeight,
     }
+  })
 
-    return redirect(`/animals?msg=${encodeURIComponent(`Successfully imported ${recordsToInsert.length} animals!`)}`)
-  }
+  const speciesList = Array.from(
+    new Set((animals || []).map(a => a.species).filter(Boolean))
+  ).sort()
 
-  // Calculate Quick Stats
-  const totalStock = animals ? animals.length : 0
-  const selfStock = animals ? animals.filter(a => a.ownership === 'Self').length : 0
-  const palaiStock = animals ? animals.filter(a => a.ownership === 'Client').length : 0
-  const totalValuation = animals ? animals.reduce((acc, curr) => acc + (Number(curr.cost_basis) || 0), 0) : 0
+  const filteredAnimals = (animals || []).filter(a => {
+    if (selectedSpecies !== 'All' && a.species !== selectedSpecies) return false
+    if (selectedOwnership !== 'All' && a.ownership !== selectedOwnership) return false
+    if (!searchQuery) return true
+
+    const haystack = [
+      a.tag_id,
+      a.species,
+      a.breed_name || '',
+      a.client_name || '',
+      a.status || '',
+      a.ownership || '',
+    ]
+      .join(' ')
+      .toLowerCase()
+
+    return haystack.includes(searchQuery)
+  })
+
+  const totalCount = (animals || []).length
+  const selfCount = (animals || []).filter(a => a.ownership === 'Self').length
+  const palaiCount = (animals || []).filter(a => a.ownership !== 'Self').length
 
   return (
     <div className="min-h-screen bg-slate-50 py-10 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-7xl mx-auto space-y-8">
-        
-        {/* Top Header & Action */}
+      <div className="max-w-7xl mx-auto space-y-6">
+
+        {/* Top Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
             <div className="flex items-center gap-2">
-              <span className="h-3 w-3 rounded-full bg-green-500 animate-pulse"></span>
-              <span className="text-xs font-semibold uppercase tracking-wider text-green-700 bg-green-50 px-2.5 py-0.5 rounded-full border border-green-200">
-                Live Operations
+              <span className="text-xs font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                {farm.farm_name} • {role}
               </span>
             </div>
-            <h1 className="text-3xl font-bold text-slate-900 tracking-tight mt-1">{farm.farm_name}</h1>
-            <p className="text-sm text-slate-500">Livestock Master & Inventory Management (Active Stock)</p>
+            <h1 className="text-3xl font-bold text-slate-900 tracking-tight mt-1">Livestock Master</h1>
+            <p className="text-sm text-slate-500">
+              Total: <strong>{totalCount}</strong> • Farm-Owned (Self): <strong>{selfCount}</strong> • Palai: <strong>{palaiCount}</strong>
+            </p>
           </div>
-          
-          <Link
-            href="/animals/new"
-            className="inline-flex items-center justify-center px-5 py-2.5 bg-green-600 hover:bg-green-700 text-white font-medium rounded-xl shadow-sm transition text-sm gap-2"
-          >
-            <span className="text-lg leading-none">+</span> Add New Animal
-          </Link>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {role === 'admin' && (
+              <Link
+                href="/finances"
+                className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-xl shadow-sm transition text-sm"
+              >
+                💰 Financials &amp; Billing
+              </Link>
+            )}
+            <Link
+              href="/animals/new"
+              className="px-4 py-2.5 bg-green-600 hover:bg-green-700 text-white font-semibold rounded-xl shadow-sm transition text-sm"
+            >
+              + Add Animal
+            </Link>
+          </div>
         </div>
 
         {/* Feedback Banners */}
@@ -205,34 +200,177 @@ export default async function AnimalsPage({
             <Link href="/animals" className="text-red-500 font-bold hover:text-red-800">×</Link>
           </div>
         )}
+        {error && (
+          <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-2xl text-sm">
+            <strong>Database Error:</strong> {error.message}
+          </div>
+        )}
 
-        {/* Quick KPI Summary Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Active Stock</p>
-            <p className="text-2xl font-bold text-slate-900 mt-1">{totalStock} <span className="text-sm font-normal text-slate-400">heads</span></p>
+        {/* Filter & Search Bar */}
+        <form
+          method="GET"
+          action="/animals"
+          className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm grid grid-cols-1 sm:grid-cols-4 gap-3"
+        >
+          <div>
+            <label className="block text-[11px] font-semibold text-slate-500 uppercase mb-1">Search Tag / Breed / Client</label>
+            <input
+              type="text"
+              name="q"
+              defaultValue={params.q || ''}
+              placeholder="e.g. G-01, Gulabi, Client..."
+              className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
+            />
           </div>
-          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Self Owned</p>
-            <p className="text-2xl font-bold text-blue-600 mt-1">{selfStock} <span className="text-sm font-normal text-slate-400">animals</span></p>
-          </div>
-          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Client Palai (Boarding)</p>
-            <p className="text-2xl font-bold text-purple-600 mt-1">{palaiStock} <span className="text-sm font-normal text-slate-400">animals</span></p>
-          </div>
-          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Cost Valuation</p>
-            <p className="text-2xl font-bold text-slate-900 mt-1">Rs. {totalValuation.toLocaleString()}</p>
-          </div>
-        </div>
 
-        {/* Interactive Search, Bulk Import & Multi-Select Table */}
-        <AnimalsClientView
-          animals={animals || []}
-          deleteAction={deleteAnimal}
-          bulkUpdateAction={bulkUpdateAnimals}
-          bulkImportAction={bulkImportCsv}
-        />
+          <div>
+            <label className="block text-[11px] font-semibold text-slate-500 uppercase mb-1">Species</label>
+            <select
+              name="species"
+              defaultValue={selectedSpecies}
+              className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold text-slate-900"
+            >
+              <option value="All">All Species</option>
+              {speciesList.map(sp => (
+                <option key={sp} value={sp}>{sp}</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-semibold text-slate-500 uppercase mb-1">Ownership</label>
+            <select
+              name="ownership"
+              defaultValue={selectedOwnership}
+              className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold text-slate-900"
+            >
+              <option value="All">All (Self &amp; Palai)</option>
+              <option value="Self">Farm-Owned (Self)</option>
+              <option value="Client">Palai (Client)</option>
+            </select>
+          </div>
+
+          <div className="flex items-end gap-2">
+            <button
+              type="submit"
+              className="flex-1 py-2 px-4 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold transition"
+            >
+              Apply Filters
+            </button>
+            <Link
+              href="/animals"
+              className="py-2 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition"
+            >
+              Reset
+            </Link>
+          </div>
+        </form>
+
+        {/* Livestock Cards Grid */}
+        {filteredAnimals.length > 0 ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+            {filteredAnimals.map(animal => {
+              const isSelf = animal.ownership === 'Self'
+              const be = breakEvenByAnimal[animal.id]
+
+              return (
+                <div
+                  key={animal.id}
+                  className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 flex flex-col justify-between gap-4 hover:border-slate-300 transition"
+                >
+                  <div className="space-y-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-3">
+                        <div className="h-12 w-12 rounded-xl bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center shrink-0">
+                          {animal.photo_url ? (
+                            <img src={animal.photo_url} alt={animal.tag_id} className="h-full w-full object-cover" />
+                          ) : (
+                            <span className="text-xl">🐐</span>
+                          )}
+                        </div>
+                        <div>
+                          <Link
+                            href={`/animals/${animal.id}`}
+                            className="text-lg font-bold font-mono text-slate-900 hover:text-indigo-600 transition"
+                          >
+                            {animal.tag_id}
+                          </Link>
+                          <p className="text-xs text-slate-500">
+                            {animal.species} {animal.breed_name ? `• ${animal.breed_name}` : ''} • {animal.sex}
+                          </p>
+                        </div>
+                      </div>
+
+                      <span className="px-2.5 py-0.5 text-[11px] font-semibold rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                        {animal.status}
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span
+                        className={`px-2.5 py-0.5 rounded-full font-semibold border ${
+                          isSelf
+                            ? 'bg-slate-900 text-white border-slate-900'
+                            : 'bg-purple-50 text-purple-700 border-purple-200'
+                        }`}
+                      >
+                        {isSelf ? 'Farm-Owned (Self)' : `Palai (${animal.client_name || 'Client'})`}
+                      </span>
+                      <span className="text-slate-400 font-mono">
+                        Acq: {formatDateDDMMYYYY(animal.acquisition_date)}
+                      </span>
+                    </div>
+
+                    {/* Today Break-Even & Per-KG Break-Even Badges for Farm-Owned (Self) Animals */}
+                    {isSelf && be && (
+                      <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-200/90 space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-1.5">
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-mono font-bold bg-slate-900 text-amber-300">
+                            Break-Even: Rs. {be.breakEvenToday.toLocaleString()}
+                          </span>
+
+                          {be.perKgToday !== null && be.latestWeight ? (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-mono font-bold bg-emerald-100 text-emerald-900 border border-emerald-300">
+                              Rs. {be.perKgToday.toLocaleString()}/kg
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium bg-slate-100 text-slate-600 border border-slate-200">
+                              No weight log
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-slate-500">
+                          {be.latestWeight
+                            ? `Latest weight: ${be.latestWeight} kg • Today sale floor`
+                            : 'Add weight log on detail page for /kg benchmark'}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
+                    <Link
+                      href={`/animals/${animal.id}`}
+                      className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 transition"
+                    >
+                      Open Profile &amp; Logs →
+                    </Link>
+                    <Link
+                      href={`/animals/${animal.id}/edit`}
+                      className="text-xs font-medium text-slate-500 hover:text-slate-800 transition"
+                    >
+                      Edit
+                    </Link>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        ) : (
+          <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center text-sm text-slate-400">
+            No animals match the selected filters.
+          </div>
+        )}
 
       </div>
     </div>
