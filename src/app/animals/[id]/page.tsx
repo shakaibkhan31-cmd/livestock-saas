@@ -24,12 +24,22 @@ export default async function AnimalDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>
-  searchParams: Promise<{ error?: string; editLogId?: string }>
+  searchParams: Promise<{
+    error?: string
+    editLogId?: string
+    commPct?: string
+    transport?: string
+    agentFee?: string
+  }>
 }) {
   const { id } = await params
   const resolvedSearchParams = await searchParams
   const errorMessage = resolvedSearchParams.error
   const editLogId = resolvedSearchParams.editLogId
+
+  const commissionPct = Math.max(0, parseFloat(resolvedSearchParams.commPct ?? '3') || 0)
+  const transportCost = Math.max(0, parseFloat(resolvedSearchParams.transport ?? '0') || 0)
+  const agentFeeCost = Math.max(0, parseFloat(resolvedSearchParams.agentFee ?? '0') || 0)
 
   const supabase = await createClient()
 
@@ -230,11 +240,61 @@ export default async function AnimalDetailPage({
     .filter(f => f.entry_type === 'Revenue')
     .reduce((sum, f) => sum + Number(f.amount || 0), 0)
 
-  const totalCostOutflow = (animal.ownership === 'Self' ? purchaseCost : 0) + loggedExpenses
+  const isSelfOwned = animal.ownership === 'Self'
+  const totalCostOutflow = (isSelfOwned ? purchaseCost : 0) + loggedExpenses
   const netPnL = loggedRevenue - totalCostOutflow
 
-  // Upcoming / Overdue Medical Alerts (within next 7 days or past due)
+  // Break-Even & Daily Burn Projection for Farm-Owned (Self) Animals
   const todayStr = new Date().toISOString().split('T')[0]
+  const todayMs = new Date(`${todayStr}T00:00:00Z`).getTime()
+  const acqDateStr = animal.acquisition_date ? String(animal.acquisition_date).split('T')[0] : null
+  const acqMs = acqDateStr ? new Date(`${acqDateStr}T00:00:00Z`).getTime() : null
+
+  const activeDays = acqMs && !isNaN(acqMs)
+    ? Math.max(1, Math.round((todayMs - acqMs) / (1000 * 60 * 60 * 24)))
+    : Math.max(1, (financialLogs || []).length || 30)
+
+  // Rearing/running expenses exclude initial purchase cost basis so burn rate reflects ongoing care
+  const dailyBurnRate = loggedExpenses > 0 ? Math.round(loggedExpenses / activeDays) : 0
+
+  // Average Daily Gain (ADG in kg/day) between earliest and latest weight log
+  let adgKgPerDay: number | null = null
+  if (weightLogs && weightLogs.length >= 2) {
+    const newestLog = weightLogs[0]
+    const oldestLog = weightLogs[weightLogs.length - 1]
+    const newestMs = new Date(`${String(newestLog.recorded_date).split('T')[0]}T00:00:00Z`).getTime()
+    const oldestMs = new Date(`${String(oldestLog.recorded_date).split('T')[0]}T00:00:00Z`).getTime()
+    const spanDays = Math.max(1, Math.round((newestMs - oldestMs) / (1000 * 60 * 60 * 24)))
+    adgKgPerDay = (Number(newestLog.weight_kg) - Number(oldestLog.weight_kg)) / spanDays
+  }
+
+  const fixedSellingCosts = transportCost + agentFeeCost
+  const commFactor = Math.max(0.05, 1 - commissionPct / 100)
+
+  const calcBreakEvenSale = (futureDays: number) => {
+    const projectedCost = totalCostOutflow + dailyBurnRate * futureDays + fixedSellingCosts
+    return Math.round(projectedCost / commFactor)
+  }
+
+  const breakEvenToday = calcBreakEvenSale(0)
+  const breakEven30Days = calcBreakEvenSale(30)
+  const breakEven60Days = calcBreakEvenSale(60)
+
+  const perKgToday = latestWeight && latestWeight > 0 ? Math.round(breakEvenToday / latestWeight) : null
+  const projWeight30 = latestWeight && adgKgPerDay !== null
+    ? Number(Math.max(latestWeight, latestWeight + adgKgPerDay * 30).toFixed(1))
+    : null
+  const projWeight60 = latestWeight && adgKgPerDay !== null
+    ? Number(Math.max(latestWeight, latestWeight + adgKgPerDay * 60).toFixed(1))
+    : null
+
+  const perKg30Days = projWeight30 && projWeight30 > 0 ? Math.round(breakEven30Days / projWeight30) : null
+  const perKg60Days = projWeight60 && projWeight60 > 0 ? Math.round(breakEven60Days / projWeight60) : null
+
+  const extraCost30 = dailyBurnRate * 30
+  const extraCost60 = dailyBurnRate * 60
+
+  // Upcoming / Overdue Medical Alerts (within next 7 days or past due)
   const sevenDaysFromNow = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
   const dueAlerts = (medicalLogs || []).filter(m => m.next_due_date && m.next_due_date <= sevenDaysFromNow)
 
@@ -252,7 +312,7 @@ export default async function AnimalDetailPage({
     timelineEvents.push({
       date: String(animal.acquisition_date).split('T')[0],
       title: 'Animal Onboarded',
-      subtitle: `${animal.ownership === 'Self' ? 'Farm Stock' : `Palai (${animal.client_name})`}`,
+      subtitle: `${isSelfOwned ? 'Farm Stock' : `Palai (${animal.client_name})`}`,
       badgeColor: 'bg-slate-800',
     })
   }
@@ -369,6 +429,140 @@ export default async function AnimalDetailPage({
           </div>
         )}
 
+        {/* Break-Even & Per-KG / Future Projection Engine (Farm-Owned / Self Animals) */}
+        {isSelfOwned && (
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="px-6 py-4 bg-slate-900 text-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded bg-emerald-500/20 text-emerald-300 border border-emerald-400/30">
+                    Farm-Owned (Self)
+                  </span>
+                  <h2 className="text-sm font-bold">Break-Even Sale Price & Future Projection</h2>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  Daily cost accumulation ({activeDays} days active) + mandi selling cost & per-kg benchmark
+                </p>
+              </div>
+              <div className="text-xs font-mono text-slate-300">
+                Burn Rate: <strong className="text-amber-300">Rs. {dailyBurnRate.toLocaleString()}/day</strong>
+                {adgKgPerDay !== null && (
+                  <span className="ml-3">
+                    ADG: <strong className="text-emerald-300">{adgKgPerDay >= 0 ? `+${adgKgPerDay.toFixed(2)}` : adgKgPerDay.toFixed(2)} kg/day</strong>
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="p-6 space-y-5">
+              {/* Selling Cost Assumptions Form */}
+              <form method="GET" action={`/animals/${animal.id}`} className="grid grid-cols-1 sm:grid-cols-4 gap-3 p-3.5 bg-slate-50 rounded-xl border border-slate-200">
+                {editLogId && <input type="hidden" name="editLogId" value={editLogId} />}
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">Mandi Commission (%)</label>
+                  <input
+                    name="commPct"
+                    type="number"
+                    step="0.5"
+                    min="0"
+                    max="50"
+                    defaultValue={commissionPct}
+                    className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">Transport (PKR)</label>
+                  <input
+                    name="transport"
+                    type="number"
+                    step="1"
+                    min="0"
+                    defaultValue={transportCost}
+                    className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">Agent Fee (PKR)</label>
+                  <input
+                    name="agentFee"
+                    type="number"
+                    step="1"
+                    min="0"
+                    defaultValue={agentFeeCost}
+                    className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900"
+                  />
+                </div>
+                <div className="flex items-end">
+                  <button
+                    type="submit"
+                    className="w-full py-1.5 px-3 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold transition"
+                  >
+                    Recalculate Break-Even
+                  </button>
+                </div>
+              </form>
+
+              {/* Horizon Cards: Today vs +30 Days vs +60 Days */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* Today */}
+                <div className="p-4 rounded-xl border border-emerald-200 bg-emerald-50/40 space-y-1.5">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-emerald-800">Today Break-Even Sale</p>
+                  <p className="text-2xl font-bold font-mono text-slate-900">Rs. {breakEvenToday.toLocaleString()}</p>
+                  <p className="text-xs font-mono text-emerald-700">
+                    {perKgToday !== null && latestWeight
+                      ? `Rs. ${perKgToday.toLocaleString()} / kg (@ ${latestWeight} kg)`
+                      : 'Add weight log for /kg rate'}
+                  </p>
+                  <p className="text-[11px] text-slate-500">
+                    Cost to date: Rs. {totalCostOutflow.toLocaleString()} + selling costs
+                  </p>
+                </div>
+
+                {/* +30 Days */}
+                <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 space-y-1.5">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-slate-600">+30 Days Break-Even</p>
+                  <p className="text-2xl font-bold font-mono text-slate-900">Rs. {breakEven30Days.toLocaleString()}</p>
+                  <p className="text-xs font-mono text-indigo-700">
+                    {perKg30Days !== null && projWeight30
+                      ? `Rs. ${perKg30Days.toLocaleString()} / kg (Est. ${projWeight30} kg)`
+                      : 'Need 2+ weight logs for est. weight'}
+                  </p>
+                  <p className="text-[11px] text-slate-500">
+                    Extra holding cost: +Rs. {extraCost30.toLocaleString()}
+                  </p>
+                </div>
+
+                {/* +60 Days */}
+                <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 space-y-1.5">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-slate-600">+60 Days Break-Even</p>
+                  <p className="text-2xl font-bold font-mono text-slate-900">Rs. {breakEven60Days.toLocaleString()}</p>
+                  <p className="text-xs font-mono text-indigo-700">
+                    {perKg60Days !== null && projWeight60
+                      ? `Rs. ${perKg60Days.toLocaleString()} / kg (Est. ${projWeight60} kg)`
+                      : 'Need 2+ weight logs for est. weight'}
+                  </p>
+                  <p className="text-[11px] text-slate-500">
+                    Extra holding cost: +Rs. {extraCost60.toLocaleString()}
+                  </p>
+                </div>
+              </div>
+
+              {/* Opportunity & Growth Note */}
+              <div className="px-4 py-3 rounded-xl bg-amber-50/70 border border-amber-200 text-xs text-amber-900 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <span>
+                  <strong>Holding Opportunity Check:</strong> Keeping for 30 days adds <strong>Rs. {extraCost30.toLocaleString()}</strong> in burn
+                  {projWeight30 && latestWeight ? ` for ~+${(projWeight30 - latestWeight).toFixed(1)} kg projected gain` : ''}.
+                </span>
+                {perKgToday !== null && (
+                  <span className="font-mono font-bold text-slate-900 shrink-0">
+                    Mandi Target: &gt; Rs. {perKgToday.toLocaleString()}/kg
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Grid Layout: Left Profile + QR + Timeline | Right Weight + Medical + Financial */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           
@@ -381,7 +575,7 @@ export default async function AnimalDetailPage({
               <div>
                 <p className="text-xs text-slate-500">Ownership Structure</p>
                 <p className="text-sm font-semibold text-slate-900 mt-0.5">
-                  {animal.ownership === 'Self' ? 'Self (Farm Owned)' : `Palai (${animal.client_name})`}
+                  {isSelfOwned ? 'Self (Farm Owned)' : `Palai (${animal.client_name})`}
                 </p>
               </div>
 
