@@ -131,6 +131,12 @@ export interface ShortCycleMixSummary {
   unassignedBatchCount: number
 }
 
+function isVoidWalletRow(row: { notes?: string | null; source_type?: string | null }): boolean {
+  const notes = String(row.notes || '').toUpperCase()
+  const src = String(row.source_type || '').toUpperCase()
+  return notes.startsWith('[VOID]') || notes.includes('VOIDED') || src.startsWith('VOID_')
+}
+
 export function inferStaggeredBatchFromDate(acquisitionDate?: string | null): string {
   if (!acquisitionDate) return 'Batch A (Jan–Jul)'
   const parts = String(acquisitionDate).split('T')[0].split('-')
@@ -451,8 +457,8 @@ export async function ensureDefaultWallets(
 }
 
 /**
- * Computes balance directly from SUM(wallet_transactions) and syncs farm_wallets.
- * Postgres trigger `trg_sync_wallet_balance` also keeps current_balance synced automatically.
+ * Computes balance directly from non-VOID wallet_transactions and syncs farm_wallets.
+ * Note: Ensure DB trigger `trg_sync_wallet_balance` also ignores VOID entries if active.
  */
 export async function recalculateWalletBalance(
   supabase: SupabaseClient,
@@ -461,11 +467,12 @@ export async function recalculateWalletBalance(
 ): Promise<number> {
   const { data: txns } = await supabase
     .from('wallet_transactions')
-    .select('entry_type, amount')
+    .select('entry_type, amount, source_type, notes')
     .eq('farm_id', farmId)
     .eq('wallet_id', walletId)
 
   const balance = (txns || []).reduce((sum, row: any) => {
+    if (isVoidWalletRow(row)) return sum
     const amt = Number(row.amount) || 0
     return row.entry_type === 'IN' ? sum + amt : sum - amt
   }, 0)
@@ -480,14 +487,67 @@ export async function recalculateWalletBalance(
 }
 
 /**
- * 60/20/20 Sale Proceeds Split across 3 dedicated wallets:
+ * Marks linked wallet entries as VOID by reference_key prefix/list and recalculates affected wallets.
+ */
+export async function voidLinkedWalletEntriesByReferenceKeys({
+  supabase,
+  farmId,
+  referenceKeys,
+  voidReason = 'Parent transaction voided',
+}: {
+  supabase: SupabaseClient
+  farmId: string
+  referenceKeys: string[]
+  voidReason?: string
+}): Promise<{ voidedCount: number; affectedWalletIds: string[] }> {
+  const cleanKeys = Array.from(new Set(referenceKeys.map(k => k.trim()).filter(Boolean)))
+  if (cleanKeys.length === 0) {
+    return { voidedCount: 0, affectedWalletIds: [] }
+  }
+
+  const { data: matchingRows, error } = await supabase
+    .from('wallet_transactions')
+    .select('id, wallet_id, notes, source_type')
+    .eq('farm_id', farmId)
+    .in('reference_key', cleanKeys)
+
+  if (error || !matchingRows || matchingRows.length === 0) {
+    return { voidedCount: 0, affectedWalletIds: [] }
+  }
+
+  const walletIds = Array.from(new Set(matchingRows.map((r: any) => r.wallet_id).filter(Boolean)))
+  let voidedCount = 0
+
+  for (const row of matchingRows as any[]) {
+    if (isVoidWalletRow(row)) continue
+    const existingNotes = String(row.notes || '').trim()
+    const nextNotes = `[VOID] ${voidReason}${existingNotes ? ` — ${existingNotes}` : ''}`
+    await supabase
+      .from('wallet_transactions')
+      .update({ notes: nextNotes })
+      .eq('id', row.id)
+      .eq('farm_id', farmId)
+    voidedCount++
+  }
+
+  await Promise.all(
+    walletIds.map(walletId => recalculateWalletBalance(supabase, farmId, walletId))
+  )
+
+  return { voidedCount, affectedWalletIds: walletIds }
+}
+
+/**
+ * 60/20/20 Sale Proceeds Split across 3 dedicated wallets linked to source/animal ID:
  * - 60% -> ANIMAL_CAPITAL
  * - 20% -> OPERATING_CASH
- * - 20% -> OWNER_PROFIT (Owner Draw / Retained Profit wallet)
+ * - 20% -> OWNER_PROFIT
+ * Uses `SALE_SPLIT` (valid in SQL.txt constraint) and stores deterministic `reference_key`s.
  */
 export async function applySaleProceedsSplitToWallets({
   supabase,
   farmId,
+  sourceTxnId,
   animalId,
   tagId,
   salePrice,
@@ -495,7 +555,8 @@ export async function applySaleProceedsSplitToWallets({
 }: {
   supabase: SupabaseClient
   farmId: string
-  animalId: string
+  sourceTxnId?: string
+  animalId?: string | null
   tagId: string
   salePrice: number
   txnDate: string
@@ -517,18 +578,19 @@ export async function applySaleProceedsSplitToWallets({
     }
   }
 
-  const capRef = `SALE_SPLIT_60_${animalId}`
-  const opRef = `SALE_SPLIT_20_OPS_${animalId}`
-  const profRef = `SALE_SPLIT_20_OWNER_${animalId}`
+  const linkId = sourceTxnId || animalId || `${tagId}_${txnDate}`
+  const capRef = `SALE_TXN:${linkId}:60_CAP`
+  const opRef = `SALE_TXN:${linkId}:20_OPS`
+  const profRef = `SALE_TXN:${linkId}:20_OWN`
 
   const { data: existingCap } = await supabase
     .from('wallet_transactions')
-    .select('id')
+    .select('id, notes, source_type')
     .eq('farm_id', farmId)
     .eq('reference_key', capRef)
     .maybeSingle()
 
-  if (existingCap) {
+  if (existingCap && !isVoidWalletRow(existingCap)) {
     return {
       applied: false,
       alreadyProcessed: true,
@@ -545,13 +607,13 @@ export async function applySaleProceedsSplitToWallets({
     rowsToInsert.push({
       farm_id: farmId,
       wallet_id: capitalWallet.id,
-      animal_id: animalId,
+      animal_id: animalId || null,
       reference_key: capRef,
       entry_type: 'IN',
       amount: breakdown.capital60,
-      source_type: 'ANIMAL_SALE_60_CAPITAL',
+      source_type: 'SALE_SPLIT',
       txn_date: txnDate,
-      notes: `60% Animal Buying Capital from Sale of ${tagId} (Sale: Rs. ${breakdown.salePrice.toLocaleString()})`,
+      notes: `[SPLIT_60_CAPITAL | Ref:${linkId}] 60% Animal Buying Capital from ${tagId} (Sale: Rs. ${breakdown.salePrice.toLocaleString()})`,
     })
   }
 
@@ -559,13 +621,13 @@ export async function applySaleProceedsSplitToWallets({
     rowsToInsert.push({
       farm_id: farmId,
       wallet_id: operatingWallet.id,
-      animal_id: animalId,
+      animal_id: animalId || null,
       reference_key: opRef,
       entry_type: 'IN',
       amount: breakdown.operating20,
-      source_type: 'ANIMAL_SALE_20_OPERATING',
+      source_type: 'SALE_SPLIT',
       txn_date: txnDate,
-      notes: `20% Operating Cash from Sale of ${tagId} (Sale: Rs. ${breakdown.salePrice.toLocaleString()})`,
+      notes: `[SPLIT_20_OPERATING | Ref:${linkId}] 20% Operating Cash from ${tagId} (Sale: Rs. ${breakdown.salePrice.toLocaleString()})`,
     })
   }
 
@@ -573,18 +635,21 @@ export async function applySaleProceedsSplitToWallets({
     rowsToInsert.push({
       farm_id: farmId,
       wallet_id: ownerProfitWallet.id,
-      animal_id: animalId,
+      animal_id: animalId || null,
       reference_key: profRef,
       entry_type: 'IN',
       amount: breakdown.profit20,
-      source_type: 'ANIMAL_SALE_20_OWNER_PROFIT',
+      source_type: 'SALE_SPLIT',
       txn_date: txnDate,
-      notes: `20% Owner Draw / Retained Profit from Sale of ${tagId} (Sale: Rs. ${breakdown.salePrice.toLocaleString()})`,
+      notes: `[SPLIT_20_OWNER_PROFIT | Ref:${linkId}] 20% Owner Draw / Profit from ${tagId} (Sale: Rs. ${breakdown.salePrice.toLocaleString()})`,
     })
   }
 
   if (rowsToInsert.length > 0) {
-    await supabase.from('wallet_transactions').insert(rowsToInsert)
+    const { error: insErr } = await supabase.from('wallet_transactions').insert(rowsToInsert)
+    if (insErr) {
+      throw new Error(`Sale split wallet insert failed: ${insErr.message}`)
+    }
   }
 
   const [newCapitalBalance, newOperatingBalance, newOwnerProfitBalance] = await Promise.all([
@@ -644,12 +709,12 @@ export async function applyMortalityEmergencyClaim({
   const claimRef = `MORTALITY_CLAIM_${animalId}`
   const { data: existingClaim } = await supabase
     .from('wallet_transactions')
-    .select('id')
+    .select('id, notes, source_type')
     .eq('farm_id', farmId)
     .eq('reference_key', claimRef)
     .maybeSingle()
 
-  if (existingClaim) {
+  if (existingClaim && !isVoidWalletRow(existingClaim)) {
     return {
       applied: false,
       alreadyProcessed: true,
@@ -666,7 +731,7 @@ export async function applyMortalityEmergencyClaim({
   const reasonSuffix = causeNotes ? ` • Cause: ${causeNotes}` : ''
 
   if (absorbedFromEmergency > 0) {
-    await supabase.from('wallet_transactions').insert([
+    const { error: wtErr } = await supabase.from('wallet_transactions').insert([
       {
         farm_id: farmId,
         wallet_id: emergencyWallet.id,
@@ -681,6 +746,9 @@ export async function applyMortalityEmergencyClaim({
         }${reasonSuffix}`,
       },
     ])
+    if (wtErr) {
+      throw new Error(`Mortality claim insert failed: ${wtErr.message}`)
+    }
   }
 
   if (safeCost > 0) {

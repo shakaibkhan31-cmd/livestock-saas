@@ -10,14 +10,15 @@ import {
 import {
   CASH_CYCLE_ROLES,
   STAGGERED_BATCH_DEFINITIONS,
+  applySaleProceedsSplitToWallets,
   computeStaggeredBatchesAndShortCycle,
   computeWeeklyCashPulseAndRunway,
   ensureDefaultWallets,
   recalculateWalletBalance,
+  voidLinkedWalletEntriesByReferenceKeys,
   type WalletType,
 } from '@/utils/wallets'
 import FinancesExportButton, { type ExportableTxn } from './FinancesExportButton'
-
 
 function getPakistanDateString(): string {
   return new Intl.DateTimeFormat('en-CA', {
@@ -40,6 +41,19 @@ const SPECIES_OPTIONS = [
   'Quail',
   'Shared (All Species)',
 ]
+
+function isVoidText(val?: string | null): boolean {
+  const upper = String(val || '').trim().toUpperCase()
+  return upper.startsWith('[VOID]') || upper.startsWith('VOID:')
+}
+
+function parseSplitRoleFromNotes(notes?: string | null): '60_CAP' | '20_OPS' | '20_OWN' | null {
+  const s = String(notes || '')
+  if (s.includes('SPLIT_60_CAPITAL')) return '60_CAP'
+  if (s.includes('SPLIT_20_OPERATING')) return '20_OPS'
+  if (s.includes('SPLIT_20_OWNER_PROFIT')) return '20_OWN'
+  return null
+}
 
 function extractSpeciesFromTxn(txn: { target_species?: string | null; description?: string | null }): string {
   const colVal = (txn.target_species || '').trim()
@@ -231,6 +245,7 @@ export default async function FinancesPage({
         id,
         wallet_id,
         animal_id,
+        reference_key,
         entry_type,
         amount,
         source_type,
@@ -240,7 +255,7 @@ export default async function FinancesPage({
       `)
       .eq('farm_id', farm.id)
       .order('txn_date', { ascending: false })
-      .order('created_at', { ascending: false })
+      .order('created_at', { ascending: false }),
   ])
 
   const todayStr = getPakistanDateString()
@@ -276,20 +291,42 @@ export default async function FinancesPage({
       ? 100
       : 0
 
-  // Phase 4 Metrics: 60/20/20 Sale Split Totals & Mortality Claims from wallet_transactions
-  const allAuditRows = (walletAuditRows || []) as Array<any>
-  const sale60Total = allAuditRows
-    .filter(r => r.source_type === 'ANIMAL_SALE_60_CAPITAL' && r.entry_type === 'IN')
+  // Phase 4 Metrics: Active (non-VOID) Sale Split Totals & Mortality Claims from wallet_transactions
+  const allAuditRows = ((walletAuditRows || []) as Array<any>).map(r => ({
+    ...r,
+    isVoid: isVoidText(r.notes),
+    splitRole: parseSplitRoleFromNotes(r.notes),
+  }))
+
+  const activeAuditRows = allAuditRows.filter(r => !r.isVoid)
+
+  const sale60Total = activeAuditRows
+    .filter(
+      r =>
+        r.entry_type === 'IN' &&
+        (r.source_type === 'ANIMAL_SALE_60_CAPITAL' || r.splitRole === '60_CAP')
+    )
     .reduce((s, r) => s + (Number(r.amount) || 0), 0)
-  const sale20OpTotal = allAuditRows
-    .filter(r => r.source_type === 'ANIMAL_SALE_20_OPERATING' && r.entry_type === 'IN')
+
+  const sale20OpTotal = activeAuditRows
+    .filter(
+      r =>
+        r.entry_type === 'IN' &&
+        (r.source_type === 'ANIMAL_SALE_20_OPERATING' || r.splitRole === '20_OPS')
+    )
     .reduce((s, r) => s + (Number(r.amount) || 0), 0)
-  const sale20OwnerTotal = allAuditRows
-    .filter(r => r.source_type === 'ANIMAL_SALE_20_OWNER_PROFIT' && r.entry_type === 'IN')
+
+  const sale20OwnerTotal = activeAuditRows
+    .filter(
+      r =>
+        r.entry_type === 'IN' &&
+        (r.source_type === 'ANIMAL_SALE_20_OWNER_PROFIT' || r.splitRole === '20_OWN')
+    )
     .reduce((s, r) => s + (Number(r.amount) || 0), 0)
+
   const implied20RetainedProfit = sale20OwnerTotal
 
-  const mortalityClaimedTotal = allAuditRows
+  const mortalityClaimedTotal = activeAuditRows
     .filter(r => r.source_type === 'MORTALITY_CLAIM' && r.entry_type === 'OUT')
     .reduce((s, r) => s + (Number(r.amount) || 0), 0)
 
@@ -307,7 +344,6 @@ export default async function FinancesPage({
     const acqStr = a.acquisition_date ? String(a.acquisition_date).split('T')[0] : todayStr
     const daysBoarded = Math.max(1, daysBetweenDateStrings(acqStr, todayStr, 1))
     // BUSINESS RULE: Palai is billed in non-refundable 30-day advance blocks.
-    // Day 1-30 = Block 1; Day 31 begins Block 2.
     const billedMonths = Math.max(1, Math.ceil(daysBoarded / 30))
     const billedDays = billedMonths * 30
     const nextBillingDate = new Date(`${acqStr}T00:00:00Z`)
@@ -316,7 +352,7 @@ export default async function FinancesPage({
     const accruedBoarding = rate * billedMonths
 
     const animalRevenueLogs = (animalFinLogs || []).filter(
-      (f: any) => f.animal_id === a.id && f.entry_type === 'Revenue'
+      (f: any) => f.animal_id === a.id && f.entry_type === 'Revenue' && !isVoidText(f.notes)
     )
 
     const autoBilledRevenue = animalRevenueLogs
@@ -394,11 +430,13 @@ export default async function FinancesPage({
     animalId?: string
     tagId?: string
     isAutoBill?: boolean
+    isVoid?: boolean
   }
 
   const unifiedList: UnifiedLedgerItem[] = []
 
   ;(globalTxns || []).forEach((t: any) => {
+    const voidFlag = isVoidText(t.description)
     const sp = extractSpeciesFromTxn(t)
     const cleanDesc = stripSpeciesTag(t.description)
     unifiedList.push({
@@ -410,12 +448,14 @@ export default async function FinancesPage({
       amount: Number(t.amount) || 0,
       description: cleanDesc,
       targetSpecies: sp,
+      isVoid: voidFlag,
     })
   })
 
   ;(animalFinLogs || []).forEach((f: any) => {
     const animalInfo = Array.isArray(f.livestock_master) ? f.livestock_master[0] : f.livestock_master
     const noteStr = String(f.notes || '')
+    const voidFlag = isVoidText(noteStr)
     unifiedList.push({
       id: f.id,
       source: 'animal',
@@ -428,12 +468,15 @@ export default async function FinancesPage({
       animalId: f.animal_id,
       tagId: animalInfo?.tag_id || 'Animal',
       isAutoBill: noteStr.startsWith('Auto-Bill'),
+      isVoid: voidFlag,
     })
   })
 
   unifiedList.sort((a, b) => b.date.localeCompare(a.date))
 
-  const cashItemsForAnalytics = unifiedList
+  const activeLedgerItems = unifiedList.filter(item => !item.isVoid)
+
+  const cashItemsForAnalytics = activeLedgerItems
     .filter(item => !item.isAutoBill)
     .map(item => ({
       date: item.date,
@@ -495,15 +538,15 @@ export default async function FinancesPage({
     else row.cashOut += item.amount
   })
 
-  allAuditRows.forEach(r => {
+  activeAuditRows.forEach(r => {
     const ym = String(r.txn_date || todayStr).slice(0, 7)
     const row = ensureMonthRow(ym)
     const amt = Number(r.amount) || 0
-    if (r.source_type === 'ANIMAL_SALE_60_CAPITAL' && r.entry_type === 'IN') {
+    if (r.entry_type === 'IN' && (r.source_type === 'ANIMAL_SALE_60_CAPITAL' || r.splitRole === '60_CAP')) {
       row.capitalIn60 += amt
-    } else if (r.source_type === 'ANIMAL_SALE_20_OPERATING' && r.entry_type === 'IN') {
+    } else if (r.entry_type === 'IN' && (r.source_type === 'ANIMAL_SALE_20_OPERATING' || r.splitRole === '20_OPS')) {
       row.operatingIn20 += amt
-    } else if (r.source_type === 'ANIMAL_SALE_20_OWNER_PROFIT' && r.entry_type === 'IN') {
+    } else if (r.entry_type === 'IN' && (r.source_type === 'ANIMAL_SALE_20_OWNER_PROFIT' || r.splitRole === '20_OWN')) {
       row.retainedProfit20 += amt
     } else if (r.source_type === 'MORTALITY_CLAIM' && r.entry_type === 'OUT') {
       row.mortalityClaimed += amt
@@ -537,6 +580,7 @@ export default async function FinancesPage({
       item.tagId || '',
       item.targetSpecies || '',
       item.type,
+      item.isVoid ? 'void' : 'active',
       formatDateDDMMYYYY(item.date),
       String(item.amount),
     ]
@@ -555,7 +599,7 @@ export default async function FinancesPage({
         ? `${item.tagId} (${item.targetSpecies || 'Goat'})`
         : item.targetSpecies || 'Goat',
     amount: item.amount,
-    description: item.description,
+    description: item.isVoid ? `[VOID] ${item.description}` : item.description,
     source: item.source,
   }))
 
@@ -569,8 +613,8 @@ export default async function FinancesPage({
   const startIndex = (safePage - 1) * pageSize
   const paginatedLedger = filteredLedger.slice(startIndex, startIndex + pageSize)
 
-  const totalIncome = unifiedList.filter(t => t.type === 'Income').reduce((acc, t) => acc + t.amount, 0)
-  const totalExpense = unifiedList.filter(t => t.type === 'Expense').reduce((acc, t) => acc + t.amount, 0)
+  const totalIncome = activeLedgerItems.filter(t => t.type === 'Income').reduce((acc, t) => acc + t.amount, 0)
+  const totalExpense = activeLedgerItems.filter(t => t.type === 'Expense').reduce((acc, t) => acc + t.amount, 0)
   const netBalance = totalIncome - totalExpense
   const unrecoveredDeficit = netBalance < 0 ? Math.abs(netBalance) : 0
 
@@ -584,7 +628,7 @@ export default async function FinancesPage({
   const previewTotalWeight = previewWeightedAnimals.reduce((sum, a) => sum + a.effectiveWeight, 0)
 
   const expenseByCategory: Record<string, number> = {}
-  unifiedList
+  activeLedgerItems
     .filter(t => t.type === 'Expense')
     .forEach(t => {
       const cat = t.category || 'General'
@@ -596,6 +640,10 @@ export default async function FinancesPage({
   // Server Action: Assign Batch & Short-Cycle Role on an Animal
   const assignBatchAndCycleAction = async (formData: FormData) => {
     'use server'
+    const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
+    if (!actionUser || !actionFarm || actionRole !== 'admin' || actionFarm.id !== farm.id) {
+      return redirect(`/finances?error=${encodeURIComponent('Access denied: admin permission required for this financial action.')}`)
+    }
     const animalId = ((formData.get('animalId') as string) || '').trim()
     const batchLabel = ((formData.get('batch_label') as string) || '').trim()
     const cashCycleRole = ((formData.get('cash_cycle_role') as string) || 'Meat / Fattening').trim()
@@ -654,7 +702,7 @@ export default async function FinancesPage({
       walletType === 'EMERGENCY_MORTALITY' && entryType === 'OUT'
         ? 'MORTALITY_CLAIM'
         : walletType === 'OWNER_PROFIT' && entryType === 'OUT'
-        ? 'OWNER_DRAW'
+        ? 'PROFIT_DRAW'
         : 'WALLET_TRANSFER'
 
     const { error: wtErr } = await supabaseClient.from('wallet_transactions').insert([
@@ -682,8 +730,8 @@ export default async function FinancesPage({
     )
   }
 
-  // Phase 5 Server Action: Delete Wallet Audit Transaction & Recalculate Wallet Balance
-  const deleteWalletAuditRowAction = async (formData: FormData) => {
+  // Phase 5 Server Action: VOID Wallet Audit Transaction & Recalculate Wallet Balance
+  const voidWalletAuditRowAction = async (formData: FormData) => {
     'use server'
     const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
     if (!actionUser || !actionFarm || actionRole !== 'admin' || actionFarm.id !== farm.id) {
@@ -696,19 +744,35 @@ export default async function FinancesPage({
     }
 
     const supabaseClient = await createClient()
-    const { error: delErr } = await supabaseClient
+    const { data: existingRow, error: fetchErr } = await supabaseClient
       .from('wallet_transactions')
-      .delete()
+      .select('id, notes')
       .eq('id', wtId)
       .eq('farm_id', farm.id)
+      .maybeSingle()
 
-    if (delErr) {
-      return redirect(`/finances?error=${encodeURIComponent(delErr.message)}`)
+    if (fetchErr || !existingRow) {
+      return redirect(`/finances?error=${encodeURIComponent(fetchErr?.message || 'Wallet transaction not found.')}`)
+    }
+
+    if (!isVoidText(existingRow.notes)) {
+      const nextNotes = `[VOID] Manual audit void on ${getPakistanDateString()}${
+        existingRow.notes ? ` — ${existingRow.notes}` : ''
+      }`
+      const { error: voidErr } = await supabaseClient
+        .from('wallet_transactions')
+        .update({ notes: nextNotes })
+        .eq('id', wtId)
+        .eq('farm_id', farm.id)
+
+      if (voidErr) {
+        return redirect(`/finances?error=${encodeURIComponent(voidErr.message)}`)
+      }
     }
 
     await recalculateWalletBalance(supabaseClient, farm.id, walletId)
 
-    return redirect(`/finances?msg=${encodeURIComponent('Wallet audit entry removed and balance recalculated.')}`)
+    return redirect(`/finances?msg=${encodeURIComponent('Wallet audit entry marked as VOID and balance recalculated.')}`)
   }
 
   // Server Action: Log Palai Client Boarding Payment (credits Operating Cash Wallet)
@@ -740,30 +804,37 @@ export default async function FinancesPage({
       return redirect(`/finances?error=${encodeURIComponent('Palai animal not found.')}`)
     }
 
-    const { error: payErr } = await supabaseClient.from('animal_financial_logs').insert([
-      {
-        farm_id: farm.id,
-        animal_id: animalId,
-        entry_type: 'Revenue',
-        category: 'Palai Boarding Fee',
-        amount,
-        transaction_date: paymentDate,
-        notes: `${notes} (${palaiRow.client_name || palaiRow.tag_id})`,
-      },
-    ])
+    const { data: insertedPayLog, error: payErr } = await supabaseClient
+      .from('animal_financial_logs')
+      .insert([
+        {
+          farm_id: farm.id,
+          animal_id: animalId,
+          entry_type: 'Revenue',
+          category: 'Palai Boarding Fee',
+          amount,
+          transaction_date: paymentDate,
+          notes: `${notes} (${palaiRow.client_name || palaiRow.tag_id})`,
+        },
+      ])
+      .select('id')
+      .single()
 
     if (payErr) {
       return redirect(`/finances?error=${encodeURIComponent(payErr.message)}`)
     }
 
-    // Credit Palai client payment into Wallet 1: Operating Cash
+    // Credit Palai client payment into Wallet 1: Operating Cash with linked reference_key
     const farmWallets = await ensureDefaultWallets(supabaseClient, farm.id)
     const opWallet = farmWallets.find(w => w.wallet_type === 'OPERATING_CASH')
     if (opWallet) {
-      await supabaseClient.from('wallet_transactions').insert([
+      const refKey = insertedPayLog?.id ? `PALAI_LOG:${insertedPayLog.id}` : null
+      const { error: wtErr } = await supabaseClient.from('wallet_transactions').insert([
         {
           farm_id: farm.id,
           wallet_id: opWallet.id,
+          animal_id: animalId,
+          reference_key: refKey,
           entry_type: 'IN',
           amount,
           source_type: 'PALAI_PAYMENT',
@@ -771,24 +842,10 @@ export default async function FinancesPage({
           notes: `Palai Payment: ${palaiRow.tag_id} (${palaiRow.client_name || 'Client'})`,
         },
       ])
-      await recalculateWalletBalance(supabaseClient, farm.id, opWallet.id)
-    }
-
-    if (palaiRow.client_name) {
-      const { data: contactMatch } = await supabaseClient
-        .from('contacts')
-        .select('id, opening_balance')
-        .eq('farm_id', farm.id)
-        .ilike('name', palaiRow.client_name.trim())
-        .maybeSingle()
-
-      if (contactMatch) {
-        const nextBal = Math.max(0, (Number(contactMatch.opening_balance) || 0) - amount)
-        await supabaseClient
-          .from('contacts')
-          .update({ opening_balance: nextBal })
-          .eq('id', contactMatch.id)
+      if (wtErr) {
+        return redirect(`/finances?error=${encodeURIComponent(`Payment logged, but wallet sync failed: ${wtErr.message}`)}`)
       }
+      await recalculateWalletBalance(supabaseClient, farm.id, opWallet.id)
     }
 
     return redirect(
@@ -820,7 +877,7 @@ export default async function FinancesPage({
       { data: liveWeightLogs },
     ] = await Promise.all([
       supabaseClient.from('transactions').select('type, amount, target_species, description').eq('farm_id', farm.id),
-      supabaseClient.from('animal_financial_logs').select('entry_type, category, amount, livestock_master(species)').eq('farm_id', farm.id),
+      supabaseClient.from('animal_financial_logs').select('entry_type, category, amount, notes, livestock_master(species)').eq('farm_id', farm.id),
       supabaseClient
         .from('livestock_master')
         .select('id, tag_id, species, acquisition_date')
@@ -840,6 +897,7 @@ export default async function FinancesPage({
     let speciesExpense = 0
 
     ;(liveGlobalTxns || []).forEach((t: any) => {
+      if (isVoidText(t.description)) return
       const txnSp = extractSpeciesFromTxn(t)
       if (!isSharedPool && txnSp !== targetSpecies && txnSp !== 'Shared (All Species)') return
       const amt = Number(t.amount) || 0
@@ -848,6 +906,7 @@ export default async function FinancesPage({
     })
 
     ;(liveAnimalLogs || []).forEach((f: any) => {
+      if (isVoidText(f.notes)) return
       if (f.category === 'Farm Overhead / Deficit Share') return
       const animalInfo = Array.isArray(f.livestock_master) ? f.livestock_master[0] : f.livestock_master
       const finSp = animalInfo?.species || 'Goat'
@@ -860,11 +919,13 @@ export default async function FinancesPage({
     let overallIncome = 0
     let overallExpense = 0
     ;(liveGlobalTxns || []).forEach((t: any) => {
+      if (isVoidText(t.description)) return
       const amt = Number(t.amount) || 0
       if (t.type === 'Income') overallIncome += amt
       else overallExpense += amt
     })
     ;(liveAnimalLogs || []).forEach((f: any) => {
+      if (isVoidText(f.notes)) return
       if (f.category === 'Farm Overhead / Deficit Share') return
       const amt = Number(f.amount) || 0
       if (f.entry_type === 'Revenue') overallIncome += amt
@@ -927,7 +988,6 @@ export default async function FinancesPage({
       notes: string
     }> = []
 
-    // One idempotency lookup instead of one query per animal.
     const { data: existingAllocationRows, error: existingAllocationErr } = await supabaseClient
       .from('animal_financial_logs')
       .select('id, animal_id, notes')
@@ -939,7 +999,8 @@ export default async function FinancesPage({
       return redirect(`/finances?error=${encodeURIComponent('Could not verify prior allocation: ' + existingAllocationErr.message)}`)
     }
 
-    if ((existingAllocationRows || []).length > 0) {
+    const hasActivePriorAllocation = (existingAllocationRows || []).some((r: any) => !isVoidText(r.notes))
+    if (hasActivePriorAllocation) {
       return redirect(`/finances?msg=${encodeURIComponent(`Allocation tag already exists for ${targetSpecies} (${periodLabel} @ ${allocationDate}). No new entries created to avoid double allocation.`)}`)
     }
 
@@ -1018,19 +1079,23 @@ export default async function FinancesPage({
     const billingNoteTag = `Auto-Bill (${billingMonth})`
     const billingDate = `${billingMonth}-01`
 
-    // Fetch prior billing records once; avoids one query per animal.
     const { data: existingBillingRows, error: existingBillingErr } = await supabaseClient
       .from('animal_financial_logs')
-      .select('animal_id')
+      .select('animal_id, notes')
       .eq('farm_id', farm.id)
       .eq('category', 'Palai Monthly Fee')
-      .eq('notes', billingNoteTag)
+      .ilike('notes', `${billingNoteTag}%`)
 
     if (existingBillingErr) {
       return redirect(`/finances?error=${encodeURIComponent('Could not check existing Palai bills: ' + existingBillingErr.message)}`)
     }
 
-    const alreadyBilledAnimalIds = new Set((existingBillingRows || []).map((r: any) => r.animal_id))
+    const alreadyBilledAnimalIds = new Set(
+      (existingBillingRows || [])
+        .filter((r: any) => !isVoidText(r.notes))
+        .map((r: any) => r.animal_id)
+    )
+
     const billingInserts = activePalai
       .filter((animal: any) => !alreadyBilledAnimalIds.has(animal.id))
       .map((animal: any) => ({
@@ -1060,12 +1125,12 @@ export default async function FinancesPage({
 
     return redirect(
       `/finances?msg=${encodeURIComponent(
-        `Generated monthly Palai bills for ${billedCount} animal(s) for ${billingMonth}. Client receivables remain in the Palai ledger; contacts opening balances were not changed.`
+        `Generated monthly Palai bills for ${billedCount} animal(s) for ${billingMonth}.`
       )}`
     )
   }
 
-  // Server Action: Add Global Farm Transaction (with Target Species & Wallet Guardrail)
+  // Server Action: Add Global Farm Transaction (with Target Species, Wallet Guardrail & Linked Sale Split)
   const addTransaction = async (formData: FormData) => {
     'use server'
     const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
@@ -1088,7 +1153,6 @@ export default async function FinancesPage({
       return redirect(`/finances?error=${encodeURIComponent('Please enter a valid amount greater than 0.')}`)
     }
 
-    // Wallets Guardrail: Do not mix daily operating expenses into Animal Buying Capital
     const catLower = category.toLowerCase()
     const isOpsExpense =
       catLower.includes('feed') ||
@@ -1115,59 +1179,51 @@ export default async function FinancesPage({
 
     const supabaseClient = await createClient()
 
-    const { error } = await supabaseClient.from('transactions').insert([
-      {
-        farm_id: farm.id,
-        type,
-        category,
-        amount: parsedAmount,
-        txn_date,
-        description: descriptionWithTag,
-        target_species: targetSpecies,
-      },
-    ])
+    const { data: insertedTxn, error } = await supabaseClient
+      .from('transactions')
+      .insert([
+        {
+          farm_id: farm.id,
+          type,
+          category,
+          amount: parsedAmount,
+          txn_date,
+          description: descriptionWithTag,
+          target_species: targetSpecies,
+        },
+      ])
+      .select('id')
+      .single()
 
-    if (error) return redirect(`/finances?error=${encodeURIComponent(error.message)}`)
+    if (error || !insertedTxn) {
+      return redirect(`/finances?error=${encodeURIComponent(error?.message || 'Failed to save transaction.')}`)
+    }
 
-    // Sync wallet ledger. Only explicitly categorized animal-sale income uses 60/20/20.
-    const farmWallets = await ensureDefaultWallets(supabaseClient, farm.id)
-    const walletFor = (walletType: WalletType) => farmWallets.find(w => w.wallet_type === walletType)
-    const walletNotes = `${category} (${targetSpecies})${rawDescription ? ` — ${rawDescription}` : ''}`
-
+    const sourceTxnId = insertedTxn.id
     const isAnimalSaleIncome =
       type === 'Income' && (catLower.includes('animal sale') || catLower.includes('livestock sale'))
 
     if (isAnimalSaleIncome) {
-      const capitalAmount = Math.round(parsedAmount * 0.60)
-      const operatingAmount = Math.round(parsedAmount * 0.20)
-      const ownerProfitAmount = parsedAmount - capitalAmount - operatingAmount
-      const splitEntries = [
-        { walletType: 'ANIMAL_CAPITAL' as WalletType, amount: capitalAmount, sourceType: 'ANIMAL_SALE_60_CAPITAL' },
-        { walletType: 'OPERATING_CASH' as WalletType, amount: operatingAmount, sourceType: 'ANIMAL_SALE_20_OPERATING' },
-        { walletType: 'OWNER_PROFIT' as WalletType, amount: ownerProfitAmount, sourceType: 'ANIMAL_SALE_20_OWNER_PROFIT' },
-      ].filter(e => e.amount > 0)
-
-      for (const entry of splitEntries) {
-        const wallet = walletFor(entry.walletType)
-        if (!wallet) {
-          return redirect(`/finances?error=${encodeURIComponent(`Required wallet missing: ${entry.walletType}. Transaction saved, but wallet split is incomplete; reconcile before proceeding.`)}`)
-        }
-        const { error: walletInsertErr } = await supabaseClient.from('wallet_transactions').insert([{
-          farm_id: farm.id,
-          wallet_id: wallet.id,
-          entry_type: 'IN',
-          amount: entry.amount,
-          source_type: entry.sourceType,
-          txn_date,
-          notes: walletNotes,
-        }])
-        if (walletInsertErr) {
-          return redirect(`/finances?error=${encodeURIComponent(`Sale recorded, but wallet split failed: ${walletInsertErr.message}. Reconcile this transaction.`)}`)
-        }
-        await recalculateWalletBalance(supabaseClient, farm.id, wallet.id)
+      try {
+        await applySaleProceedsSplitToWallets({
+          supabase: supabaseClient,
+          farmId: farm.id,
+          sourceTxnId,
+          animalId: null,
+          tagId: targetSpecies,
+          salePrice: parsedAmount,
+          txnDate: txn_date,
+        })
+      } catch (splitErr: any) {
+        return redirect(
+          `/finances?error=${encodeURIComponent(
+            `Sale recorded (ID: ${sourceTxnId}), but 60/20/20 wallet split failed: ${splitErr?.message || 'Unknown error'}.`
+          )}`
+        )
       }
     } else {
-      const targetWallet = walletFor(selectedWalletType)
+      const farmWallets = await ensureDefaultWallets(supabaseClient, farm.id)
+      const targetWallet = farmWallets.find(w => w.wallet_type === selectedWalletType)
       if (targetWallet) {
         const sourceType =
           type === 'Income' && (catLower.includes('milk') || catLower.includes('manure'))
@@ -1175,20 +1231,28 @@ export default async function FinancesPage({
             : type === 'Income' && catLower.includes('palai')
             ? 'PALAI_PAYMENT'
             : type === 'Income'
-            ? 'OTHER_INCOME'
+            ? 'ANIMAL_SALE'
             : 'DAILY_EXPENSE'
 
-        const { error: walletInsertErr } = await supabaseClient.from('wallet_transactions').insert([{
-          farm_id: farm.id,
-          wallet_id: targetWallet.id,
-          entry_type: type === 'Income' ? 'IN' : 'OUT',
-          amount: parsedAmount,
-          source_type: sourceType,
-          txn_date,
-          notes: walletNotes,
-        }])
+        const walletNotes = `${category} (${targetSpecies})${rawDescription ? ` — ${rawDescription}` : ''}`
+        const { error: walletInsertErr } = await supabaseClient.from('wallet_transactions').insert([
+          {
+            farm_id: farm.id,
+            wallet_id: targetWallet.id,
+            reference_key: `GLOBAL_TXN:${sourceTxnId}`,
+            entry_type: type === 'Income' ? 'IN' : 'OUT',
+            amount: parsedAmount,
+            source_type: sourceType,
+            txn_date,
+            notes: walletNotes,
+          },
+        ])
         if (walletInsertErr) {
-          return redirect(`/finances?error=${encodeURIComponent(`Transaction saved, but wallet sync failed: ${walletInsertErr.message}. Reconcile this transaction.`)}`)
+          return redirect(
+            `/finances?error=${encodeURIComponent(
+              `Transaction saved (ID: ${sourceTxnId}), but wallet sync failed: ${walletInsertErr.message}.`
+            )}`
+          )
         }
         await recalculateWalletBalance(supabaseClient, farm.id, targetWallet.id)
       }
@@ -1197,30 +1261,109 @@ export default async function FinancesPage({
     return redirect(`/finances?msg=${encodeURIComponent(`Transaction recorded under ${targetSpecies}.`)}`)
   }
 
-  // NOTE: This remains a hard-delete action in this version. Safe VOID behavior requires
-  // status-aware wallet recalculation in @/utils/wallets and linked source IDs; do not deploy
-  // this delete action until those companion changes are applied.
-  // Server Action: Delete Transaction
-  const deleteTransaction = async (formData: FormData) => {
+  // Server Action: VOID Transaction + VOID Linked Wallet Entries + Recalculate Wallets
+  const voidTransactionAction = async (formData: FormData) => {
     'use server'
     const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
     if (!actionUser || !actionFarm || actionRole !== 'admin' || actionFarm.id !== farm.id) {
       return redirect(`/finances?error=${encodeURIComponent('Access denied: admin permission required for this financial action.')}`)
     }
-    const txnId = formData.get('txnId') as string
-    const source = formData.get('source') as string
+    const txnId = ((formData.get('txnId') as string) || '').trim()
+    const source = ((formData.get('source') as string) || 'global').trim()
+
+    if (!txnId) {
+      return redirect(`/finances?error=${encodeURIComponent('Invalid transaction ID.')}`)
+    }
+
     const supabaseClient = await createClient()
+    const voidStamp = `[VOID] Voided on ${getPakistanDateString()}`
 
-    const tableName = source === 'animal' ? 'animal_financial_logs' : 'transactions'
+    if (source === 'animal') {
+      const { data: finRow, error: finFetchErr } = await supabaseClient
+        .from('animal_financial_logs')
+        .select('id, animal_id, notes')
+        .eq('id', txnId)
+        .eq('farm_id', farm.id)
+        .maybeSingle()
 
-    const { error } = await supabaseClient
-      .from(tableName)
-      .delete()
-      .eq('id', txnId)
-      .eq('farm_id', farm.id)
+      if (finFetchErr || !finRow) {
+        return redirect(`/finances?error=${encodeURIComponent(finFetchErr?.message || 'Animal log not found.')}`)
+      }
 
-    if (error) return redirect(`/finances?error=${encodeURIComponent(error.message)}`)
-    return redirect(`/finances?msg=${encodeURIComponent('Entry deleted successfully.')}`)
+      if (isVoidText(finRow.notes)) {
+        return redirect(`/finances?msg=${encodeURIComponent('Entry is already marked as VOID.')}`)
+      }
+
+      const nextNotes = `${voidStamp}${finRow.notes ? ` — ${finRow.notes}` : ''}`
+      const { error: updErr } = await supabaseClient
+        .from('animal_financial_logs')
+        .update({ notes: nextNotes })
+        .eq('id', txnId)
+        .eq('farm_id', farm.id)
+
+      if (updErr) {
+        return redirect(`/finances?error=${encodeURIComponent(updErr.message)}`)
+      }
+
+      const candidateKeys = [
+        `PALAI_LOG:${txnId}`,
+        `SALE_TXN:${txnId}:60_CAP`,
+        `SALE_TXN:${txnId}:20_OPS`,
+        `SALE_TXN:${txnId}:20_OWN`,
+        finRow.animal_id ? `SALE_SPLIT_60_${finRow.animal_id}` : '',
+        finRow.animal_id ? `SALE_SPLIT_20_OPS_${finRow.animal_id}` : '',
+        finRow.animal_id ? `SALE_SPLIT_20_OWNER_${finRow.animal_id}` : '',
+      ].filter(Boolean)
+
+      await voidLinkedWalletEntriesByReferenceKeys({
+        supabase: supabaseClient,
+        farmId: farm.id,
+        referenceKeys: candidateKeys,
+        voidReason: `Animal log ${txnId} voided`,
+      })
+    } else {
+      const { data: globalRow, error: globalFetchErr } = await supabaseClient
+        .from('transactions')
+        .select('id, description')
+        .eq('id', txnId)
+        .eq('farm_id', farm.id)
+        .maybeSingle()
+
+      if (globalFetchErr || !globalRow) {
+        return redirect(`/finances?error=${encodeURIComponent(globalFetchErr?.message || 'Transaction not found.')}`)
+      }
+
+      if (isVoidText(globalRow.description)) {
+        return redirect(`/finances?msg=${encodeURIComponent('Transaction is already marked as VOID.')}`)
+      }
+
+      const nextDesc = `${voidStamp}${globalRow.description ? ` — ${globalRow.description}` : ''}`
+      const { error: updErr } = await supabaseClient
+        .from('transactions')
+        .update({ description: nextDesc })
+        .eq('id', txnId)
+        .eq('farm_id', farm.id)
+
+      if (updErr) {
+        return redirect(`/finances?error=${encodeURIComponent(updErr.message)}`)
+      }
+
+      const linkedKeys = [
+        `GLOBAL_TXN:${txnId}`,
+        `SALE_TXN:${txnId}:60_CAP`,
+        `SALE_TXN:${txnId}:20_OPS`,
+        `SALE_TXN:${txnId}:20_OWN`,
+      ]
+
+      await voidLinkedWalletEntriesByReferenceKeys({
+        supabase: supabaseClient,
+        farmId: farm.id,
+        referenceKeys: linkedKeys,
+        voidReason: `Transaction ${txnId} voided`,
+      })
+    }
+
+    return redirect(`/finances?msg=${encodeURIComponent('Transaction and any linked wallet entries marked as VOID; wallet balances reconciled.')}`)
   }
 
   return (
@@ -1237,7 +1380,7 @@ export default async function FinancesPage({
               </span>
             </div>
             <h1 className="text-3xl font-bold text-slate-900 tracking-tight mt-1">Financials &amp; Billing</h1>
-            <p className="text-sm text-slate-500">4 Wallets discipline, 60/20/20 sale split, owner draw wallet, mortality claims &amp; Palai billing</p>
+            <p className="text-sm text-slate-500">4 Wallets discipline, linked 60/20/20 sale split, VOID audit reconciliation &amp; Palai billing</p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -1273,7 +1416,6 @@ export default async function FinancesPage({
 
         {/* Phase 2: Weekly Cash Out vs Cash In Red Flag Card + 30-Day Runway */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Weekly Cash Pulse (7-Day Rule) */}
           <div
             className={`lg:col-span-2 p-6 rounded-2xl border shadow-sm space-y-4 ${
               cashPulse.isRedFlag
@@ -1735,7 +1877,7 @@ export default async function FinancesPage({
             <div className="px-5 py-4 border-b border-slate-100 bg-slate-900 text-white">
               <h2 className="text-sm font-bold">Monthly Retained Profit &amp; Cash Report</h2>
               <p className="text-[11px] text-slate-400">
-                Monthly cash flow, 60/20/20 split routing &amp; mortality claims
+                Active cash flow, 60/20/20 split routing &amp; mortality claims (VOID excluded)
               </p>
             </div>
             <div className="divide-y divide-slate-100">
@@ -1789,7 +1931,7 @@ export default async function FinancesPage({
               <div>
                 <h2 className="text-sm font-bold text-slate-900">Executive Wallet Audit Ledger</h2>
                 <p className="text-[11px] text-slate-500">
-                  Every IN/OUT movement across Operating Cash, Animal Buying Capital, Emergency Fund &amp; Owner Draw Wallet
+                  Every IN/OUT movement across Operating Cash, Animal Buying Capital, Emergency Fund &amp; Owner Draw Wallet (VOID entries excluded from balances)
                 </p>
               </div>
               <span className="text-xs font-mono text-slate-500">{allAuditRows.length} entries</span>
@@ -1802,49 +1944,66 @@ export default async function FinancesPage({
                     <th className="px-4 py-2.5 text-left font-semibold text-slate-500 uppercase">Date</th>
                     <th className="px-4 py-2.5 text-left font-semibold text-slate-500 uppercase">Wallet &amp; Type</th>
                     <th className="px-4 py-2.5 text-left font-semibold text-slate-500 uppercase">Amount</th>
-                    <th className="px-4 py-2.5 text-left font-semibold text-slate-500 uppercase">Audit Note</th>
+                    <th className="px-4 py-2.5 text-left font-semibold text-slate-500 uppercase">Audit Note / Ref</th>
                     <th className="px-4 py-2.5 text-right font-semibold text-slate-500 uppercase">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {allAuditRows.length > 0 ? (
-                    allAuditRows.slice(0, 20).map((wt: any) => {
+                    allAuditRows.slice(0, 30).map((wt: any) => {
                       const wInfo = walletById[wt.wallet_id]
                       const isIn = wt.entry_type === 'IN'
+                      const isVoid = Boolean(wt.isVoid)
                       return (
-                        <tr key={wt.id} className="hover:bg-slate-50">
+                        <tr key={wt.id} className={isVoid ? 'bg-slate-50/80 opacity-65' : 'hover:bg-slate-50'}>
                           <td className="px-4 py-2.5 font-mono text-slate-700 whitespace-nowrap">
                             {formatDateDDMMYYYY(wt.txn_date)}
                           </td>
                           <td className="px-4 py-2.5 whitespace-nowrap">
-                            <span className="font-bold text-slate-900 block">
-                              {wInfo?.name || 'Wallet'}
-                            </span>
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-bold text-slate-900">
+                                {wInfo?.name || 'Wallet'}
+                              </span>
+                              {isVoid && (
+                                <span className="px-1.5 py-0.2 text-[10px] font-bold uppercase rounded bg-amber-100 text-amber-900 border border-amber-300">
+                                  VOID
+                                </span>
+                              )}
+                            </div>
                             <span className="text-[10px] font-mono text-slate-400">
                               {wt.source_type || wt.entry_type}
                             </span>
                           </td>
                           <td
                             className={`px-4 py-2.5 font-mono font-bold whitespace-nowrap ${
-                              isIn ? 'text-emerald-700' : 'text-rose-700'
+                              isVoid
+                                ? 'line-through text-slate-400'
+                                : isIn
+                                ? 'text-emerald-700'
+                                : 'text-rose-700'
                             }`}
                           >
                             {isIn ? '+' : '-'} Rs. {Number(wt.amount || 0).toLocaleString()}
                           </td>
                           <td className="px-4 py-2.5 text-slate-500 max-w-xs truncate">
                             {wt.notes || '—'}
+                            {wt.reference_key ? ` • ${wt.reference_key}` : ''}
                           </td>
                           <td className="px-4 py-2.5 text-right whitespace-nowrap">
-                            <form action={deleteWalletAuditRowAction} className="inline-block">
-                              <input type="hidden" name="wtId" value={wt.id} />
-                              <input type="hidden" name="walletId" value={wt.wallet_id} />
-                              <button
-                                type="submit"
-                                className="px-2 py-0.5 rounded bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[11px] font-medium"
-                              >
-                                Remove
-                              </button>
-                            </form>
+                            {!isVoid ? (
+                              <form action={voidWalletAuditRowAction} className="inline-block">
+                                <input type="hidden" name="wtId" value={wt.id} />
+                                <input type="hidden" name="walletId" value={wt.wallet_id} />
+                                <button
+                                  type="submit"
+                                  className="px-2 py-0.5 rounded bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 text-[11px] font-semibold"
+                                >
+                                  Void
+                                </button>
+                              </form>
+                            ) : (
+                              <span className="text-[10px] font-mono text-slate-400">Voided</span>
+                            )}
                           </td>
                         </tr>
                       )
@@ -1875,7 +2034,7 @@ export default async function FinancesPage({
             </div>
             <h2 className="text-lg font-bold">Monthly Palai Auto-Billing Generator</h2>
             <p className="text-xs text-slate-300 max-w-xl">
-              Generate monthly boarding fees for all active client animals in one click. Automatically logs revenue and updates client receivable balances in Contacts for WhatsApp reminders.
+              Generate monthly boarding fees for all active client animals in one click. Automatically logs revenue in non-refundable 30-day blocks for WhatsApp reminders.
             </p>
           </div>
 
@@ -1917,7 +2076,7 @@ export default async function FinancesPage({
                 Palai Client Billing &amp; Statement Ledger
               </h2>
               <p className="text-xs text-slate-500">
-                Accrued boarding charges vs. client payments received, with 1-click WhatsApp reminders for overdue dues
+                Accrued boarding charges (30-day blocks) vs. client payments received, with 1-click WhatsApp reminders for overdue dues
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
@@ -1984,8 +2143,9 @@ export default async function FinancesPage({
                       </td>
                       <td className="px-5 py-3.5 text-xs font-mono text-slate-700">
                         <div>Rs. {row.monthly_fee.toLocaleString()}/mo</div>
-                        <div className="text-[10px] text-slate-400">
-                          {row.daysBoarded}d ({row.billedMonths} × 30d blocks)\n                          <div>Next block: {formatDateDDMMYYYY(row.nextBillingDate)}</div>
+                        <div className="text-[10px] text-slate-400 space-y-0.5">
+                          <div>{row.daysBoarded}d ({row.billedMonths} × 30d blocks)</div>
+                          <div>Next block: {formatDateDDMMYYYY(row.nextBillingDate)}</div>
                         </div>
                       </td>
                       <td className="px-5 py-3.5 text-xs font-mono font-bold text-slate-900">
@@ -2058,7 +2218,7 @@ export default async function FinancesPage({
           </div>
         </div>
 
-        {/* One-Click Species-Scoped Weight & Acquisition-Based Overhead Allocation (Separate Category to Prevent Profit Double-Counting) */}
+        {/* One-Click Species-Scoped Weight & Acquisition-Based Overhead Allocation */}
         <div id="breakeven-sync" className="bg-white p-6 rounded-2xl border border-amber-200 shadow-sm space-y-4 scroll-mt-6">
           <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
             <div className="space-y-1">
@@ -2160,14 +2320,14 @@ export default async function FinancesPage({
           )}
         </div>
 
-        {/* Summary Cards */}
+        {/* Summary Cards (Active Entries Only) */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
           <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-emerald-500">
-            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Income (All Sources)</p>
+            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Active Income</p>
             <p className="text-2xl font-bold text-emerald-600 mt-1">Rs. {totalIncome.toLocaleString()}</p>
           </div>
           <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-rose-500">
-            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Expenses (All Sources)</p>
+            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Active Expenses</p>
             <p className="text-2xl font-bold text-rose-600 mt-1">Rs. {totalExpense.toLocaleString()}</p>
           </div>
           <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-indigo-500">
@@ -2204,12 +2364,12 @@ export default async function FinancesPage({
                 </div>
               </div>
             ) : (
-              <p className="text-xs text-slate-400 py-4 text-center">No financial data available for ratio analysis yet.</p>
+              <p className="text-xs text-slate-400 py-4 text-center">No active financial data available for ratio analysis yet.</p>
             )}
           </div>
 
           <div className="lg:col-span-2 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
-            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">Expense Breakdown by Category</h2>
+            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">Expense Breakdown by Category (Active)</h2>
             {sortedExpenseCategories.length > 0 ? (
               <div className="space-y-3">
                 {sortedExpenseCategories.map(([category, amount]) => {
@@ -2233,7 +2393,7 @@ export default async function FinancesPage({
                 })}
               </div>
             ) : (
-              <p className="text-xs text-slate-400 py-4 text-center">No expense categories recorded yet.</p>
+              <p className="text-xs text-slate-400 py-4 text-center">No active expense categories recorded yet.</p>
             )}
           </div>
         </div>
@@ -2246,7 +2406,7 @@ export default async function FinancesPage({
                 <div>
                   <h2 className="font-bold text-slate-800 text-sm">Unified Transaction History</h2>
                   <p className="text-[11px] text-slate-400">
-                    Showing {paginatedLedger.length} of {totalFilteredCount} matching entries (Total: {unifiedList.length})
+                    Showing {paginatedLedger.length} of {totalFilteredCount} matching entries (Active: {activeLedgerItems.length} / Total: {unifiedList.length})
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-1.5">
@@ -2284,7 +2444,7 @@ export default async function FinancesPage({
                   type="text"
                   name="q"
                   defaultValue={searchQuery}
-                  placeholder="Search by category, species, tag ID, notes, or amount..."
+                  placeholder="Search by category, species, tag ID, void, notes, or amount..."
                   className="flex-1 px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs text-slate-900 focus:ring-2 focus:ring-indigo-500"
                 />
                 <button
@@ -2320,8 +2480,9 @@ export default async function FinancesPage({
                   {paginatedLedger.length > 0 ? (
                     paginatedLedger.map((txn) => {
                       const isIncome = txn.type === 'Income'
+                      const isVoid = Boolean(txn.isVoid)
                       return (
-                        <tr key={`${txn.source}-${txn.id}`} className="hover:bg-slate-50 transition-colors">
+                        <tr key={`${txn.source}-${txn.id}`} className={isVoid ? 'bg-slate-50/80 opacity-65' : 'hover:bg-slate-50 transition-colors'}>
                           <td className="px-5 py-4 whitespace-nowrap text-xs font-mono text-slate-700">
                             {formatDateDDMMYYYY(txn.date)}
                           </td>
@@ -2339,22 +2500,43 @@ export default async function FinancesPage({
                               </span>
                             )}
                           </td>
-                          <td className="px-5 py-4 whitespace-nowrap text-xs font-bold text-slate-900">{txn.category}</td>
-                          <td className={`px-5 py-4 whitespace-nowrap text-xs font-bold font-mono ${isIncome ? 'text-emerald-700' : 'text-rose-700'}`}>
+                          <td className="px-5 py-4 whitespace-nowrap text-xs font-bold text-slate-900">
+                            <div className="flex items-center gap-1.5">
+                              <span>{txn.category}</span>
+                              {isVoid && (
+                                <span className="px-1.5 py-0.2 text-[10px] font-bold uppercase rounded bg-amber-100 text-amber-900 border border-amber-300">
+                                  VOID
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td
+                            className={`px-5 py-4 whitespace-nowrap text-xs font-bold font-mono ${
+                              isVoid
+                                ? 'line-through text-slate-400'
+                                : isIncome
+                                ? 'text-emerald-700'
+                                : 'text-rose-700'
+                            }`}
+                          >
                             {isIncome ? '+' : '-'} Rs. {txn.amount.toLocaleString()}
                           </td>
                           <td className="px-5 py-4 text-xs text-slate-500 max-w-xs truncate">{txn.description || '—'}</td>
                           <td className="px-5 py-4 whitespace-nowrap text-right">
-                            <form action={deleteTransaction} className="inline-block">
-                              <input type="hidden" name="txnId" value={txn.id} />
-                              <input type="hidden" name="source" value={txn.source} />
-                              <button
-                                type="submit"
-                                className="px-2.5 py-1 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-xs font-medium transition"
-                              >
-                                Delete
-                              </button>
-                            </form>
+                            {!isVoid ? (
+                              <form action={voidTransactionAction} className="inline-block">
+                                <input type="hidden" name="txnId" value={txn.id} />
+                                <input type="hidden" name="source" value={txn.source} />
+                                <button
+                                  type="submit"
+                                  className="px-2.5 py-1 rounded-lg text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-300 text-xs font-semibold transition"
+                                >
+                                  Void
+                                </button>
+                              </form>
+                            ) : (
+                              <span className="text-[11px] font-mono text-slate-400">VOID</span>
+                            )}
                           </td>
                         </tr>
                       )
