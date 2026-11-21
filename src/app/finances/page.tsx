@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { getUserFarmAndRole } from '@/utils/rbac'
 import {
   computeWeightedAnimalsForPool,
+  daysBetweenDateStrings,
   formatDateDDMMYYYY,
 } from '@/utils/breakeven'
 
@@ -94,7 +95,7 @@ export default async function FinancesPage({
   ] = await Promise.all([
     supabase
       .from('livestock_master')
-      .select('id, tag_id, client_name, monthly_palai_fee, status')
+      .select('id, tag_id, species, client_name, monthly_palai_fee, acquisition_date, status')
       .eq('farm_id', farm.id)
       .neq('ownership', 'Self')
       .eq('status', 'Active'),
@@ -136,6 +137,49 @@ export default async function FinancesPage({
 
   const todayStr = new Date().toISOString().split('T')[0]
   const currentMonthStr = todayStr.slice(0, 7)
+
+  // Palai Client Billing & Dues Statement per active Palai animal
+  const palaiClientLedger = (palaiAnimals || []).map(a => {
+    const rate = Number(a.monthly_palai_fee) > 0 ? Number(a.monthly_palai_fee) : 5000
+    const acqStr = a.acquisition_date ? String(a.acquisition_date).split('T')[0] : todayStr
+    const daysBoarded = Math.max(1, daysBetweenDateStrings(acqStr, todayStr, 1))
+    const billedMonths = Math.max(1, Math.ceil(daysBoarded / 30))
+    const accruedBoarding = rate * billedMonths
+
+    const animalRevenueLogs = (animalFinLogs || []).filter(
+      (f: any) => f.animal_id === a.id && f.entry_type === 'Revenue'
+    )
+
+    const autoBilledRevenue = animalRevenueLogs
+      .filter((f: any) => String(f.notes || '').startsWith('Auto-Bill'))
+      .reduce((sum: number, f: any) => sum + (Number(f.amount) || 0), 0)
+
+    const totalRevenueRecorded = animalRevenueLogs.reduce(
+      (sum: number, f: any) => sum + (Number(f.amount) || 0),
+      0
+    )
+
+    const totalBilled = Math.max(accruedBoarding, autoBilledRevenue)
+    const totalPaid = Math.max(0, totalRevenueRecorded - autoBilledRevenue)
+    const balanceDue = Math.max(0, totalBilled - totalPaid)
+
+    return {
+      id: a.id,
+      tag_id: a.tag_id,
+      species: a.species || 'Goat',
+      client_name: a.client_name || 'Unnamed Client',
+      monthly_fee: rate,
+      daysBoarded,
+      billedMonths,
+      totalBilled,
+      totalPaid,
+      balanceDue,
+    }
+  })
+
+  const totalPalaiBilled = palaiClientLedger.reduce((s, r) => s + r.totalBilled, 0)
+  const totalPalaiPaid = palaiClientLedger.reduce((s, r) => s + r.totalPaid, 0)
+  const totalPalaiDue = palaiClientLedger.reduce((s, r) => s + r.balanceDue, 0)
 
   // Latest weight per animal
   const latestWeightByAnimal: Record<string, number> = {}
@@ -243,6 +287,71 @@ export default async function FinancesPage({
     })
 
   const sortedExpenseCategories = Object.entries(expenseByCategory).sort((a, b) => b[1] - a[1])
+
+  // Server Action: Log Palai Client Boarding Payment
+  const logPalaiPaymentAction = async (formData: FormData) => {
+    'use server'
+    const animalId = ((formData.get('animalId') as string) || '').trim()
+    const amount = parseFloat((formData.get('amount') as string) || '0')
+    const paymentDate = ((formData.get('payment_date') as string) || '').trim() || new Date().toISOString().split('T')[0]
+    const notes = ((formData.get('notes') as string) || '').trim() || 'Palai Client Boarding Payment'
+
+    if (!animalId || isNaN(amount) || amount <= 0) {
+      return redirect(`/finances?error=${encodeURIComponent('Enter a valid payment amount greater than 0.')}`)
+    }
+
+    const supabaseClient = await createClient()
+
+    const { data: palaiRow } = await supabaseClient
+      .from('livestock_master')
+      .select('id, tag_id, client_name')
+      .eq('id', animalId)
+      .eq('farm_id', farm.id)
+      .single()
+
+    if (!palaiRow) {
+      return redirect(`/finances?error=${encodeURIComponent('Palai animal not found.')}`)
+    }
+
+    const { error: payErr } = await supabaseClient.from('animal_financial_logs').insert([
+      {
+        farm_id: farm.id,
+        animal_id: animalId,
+        entry_type: 'Revenue',
+        category: 'Palai Boarding Fee',
+        amount,
+        transaction_date: paymentDate,
+        notes: `${notes} (${palaiRow.client_name || palaiRow.tag_id})`,
+      },
+    ])
+
+    if (payErr) {
+      return redirect(`/finances?error=${encodeURIComponent(payErr.message)}`)
+    }
+
+    if (palaiRow.client_name) {
+      const { data: contactMatch } = await supabaseClient
+        .from('contacts')
+        .select('id, opening_balance')
+        .eq('farm_id', farm.id)
+        .ilike('name', palaiRow.client_name.trim())
+        .maybeSingle()
+
+      if (contactMatch) {
+        const nextBal = Math.max(0, (Number(contactMatch.opening_balance) || 0) - amount)
+        await supabaseClient
+          .from('contacts')
+          .update({ opening_balance: nextBal })
+          .eq('id', contactMatch.id)
+      }
+    }
+
+    return redirect(
+      `/finances?msg=${encodeURIComponent(
+        `Logged Palai payment of Rs. ${amount.toLocaleString()} for ${palaiRow.tag_id} (${palaiRow.client_name || 'Client'}).`
+      )}`
+    )
+  }
 
   // Server Action: One-Click Species-Scoped Weight & Acquisition-Based Deficit Allocation
   const allocateDeficitByWeight = async (formData: FormData) => {
@@ -572,11 +681,11 @@ export default async function FinancesPage({
             <div className="flex items-center gap-2">
               <span className="h-2.5 w-2.5 rounded-full bg-emerald-500"></span>
               <span className="text-xs font-semibold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
-                Admin Ledger & Auto-Billing Engine
+                Admin Ledger &amp; Auto-Billing Engine
               </span>
             </div>
-            <h1 className="text-3xl font-bold text-slate-900 tracking-tight mt-1">Financials & Billing</h1>
-            <p className="text-sm text-slate-500">Consolidated farm-wide income, automated Palai billing & analytics</p>
+            <h1 className="text-3xl font-bold text-slate-900 tracking-tight mt-1">Financials &amp; Billing</h1>
+            <p className="text-sm text-slate-500">Consolidated farm-wide income, Palai client statements, automated billing &amp; analytics</p>
           </div>
 
           <div className="flex items-center gap-2">
@@ -654,6 +763,126 @@ export default async function FinancesPage({
               ⚡ Run Monthly Billing
             </button>
           </form>
+        </div>
+
+        {/* Palai Client Billing & Dues Ledger */}
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/70 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-base font-bold text-slate-900">Palai Client Billing &amp; Statement Ledger</h2>
+              <p className="text-xs text-slate-500">
+                Accrued boarding charges vs. client payments received, with pending dues and 1-click payment recording
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-3 text-xs font-mono">
+              <span className="px-2.5 py-1 rounded-lg bg-slate-100 text-slate-800 font-semibold">
+                Billed: Rs. {totalPalaiBilled.toLocaleString()}
+              </span>
+              <span className="px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
+                Paid: Rs. {totalPalaiPaid.toLocaleString()}
+              </span>
+              <span className={`px-2.5 py-1 rounded-lg font-bold border ${
+                totalPalaiDue > 0
+                  ? 'bg-rose-50 text-rose-700 border-rose-200'
+                  : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+              }`}>
+                Due: Rs. {totalPalaiDue.toLocaleString()}
+              </span>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-slate-100">
+              <thead className="bg-slate-50">
+                <tr>
+                  <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Client &amp; Tag</th>
+                  <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Rate / Tenure</th>
+                  <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Total Billed</th>
+                  <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Paid</th>
+                  <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Balance Due</th>
+                  <th className="px-5 py-3 text-right text-xs font-semibold text-slate-500 uppercase">Log Payment</th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-slate-100">
+                {palaiClientLedger.length > 0 ? (
+                  palaiClientLedger.map(row => (
+                    <tr key={row.id} className="hover:bg-slate-50/80 transition-colors">
+                      <td className="px-5 py-3.5">
+                        <div className="text-xs font-bold text-slate-900">{row.client_name}</div>
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <Link
+                            href={`/animals/${row.id}`}
+                            className="font-mono text-[11px] font-bold text-indigo-700 hover:underline"
+                          >
+                            {row.tag_id}
+                          </Link>
+                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-600">
+                            {row.species}
+                          </span>
+                          <Link
+                            href={`/animals/${row.id}/statement`}
+                            className="text-[10px] font-semibold text-slate-500 hover:text-slate-900 underline"
+                          >
+                            Statement
+                          </Link>
+                        </div>
+                      </td>
+                      <td className="px-5 py-3.5 text-xs font-mono text-slate-700">
+                        <div>Rs. {row.monthly_fee.toLocaleString()}/mo</div>
+                        <div className="text-[10px] text-slate-400">
+                          {row.daysBoarded}d ({row.billedMonths} mo)
+                        </div>
+                      </td>
+                      <td className="px-5 py-3.5 text-xs font-mono font-bold text-slate-900">
+                        Rs. {row.totalBilled.toLocaleString()}
+                      </td>
+                      <td className="px-5 py-3.5 text-xs font-mono font-semibold text-emerald-700">
+                        Rs. {row.totalPaid.toLocaleString()}
+                      </td>
+                      <td className="px-5 py-3.5 text-xs font-mono font-bold">
+                        {row.balanceDue > 0 ? (
+                          <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200">
+                            Rs. {row.balanceDue.toLocaleString()} Due
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                            Settled
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-5 py-3.5 text-right">
+                        <form action={logPalaiPaymentAction} className="inline-flex items-center gap-1.5">
+                          <input type="hidden" name="animalId" value={row.id} />
+                          <input type="hidden" name="payment_date" value={todayStr} />
+                          <input
+                            name="amount"
+                            type="number"
+                            min="1"
+                            step="1"
+                            required
+                            defaultValue={row.balanceDue > 0 ? row.balanceDue : row.monthly_fee}
+                            className="w-24 px-2 py-1 border border-slate-300 rounded-lg text-xs font-mono text-right text-slate-900"
+                          />
+                          <button
+                            type="submit"
+                            className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold transition"
+                          >
+                            + Pay
+                          </button>
+                        </form>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={6} className="px-6 py-8 text-center text-sm text-slate-400">
+                      No active Palai (client boarding) animals found.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
 
         {/* One-Click Species-Scoped Weight & Acquisition-Based Deficit Allocation */}

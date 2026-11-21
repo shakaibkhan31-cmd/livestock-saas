@@ -59,6 +59,7 @@ export default async function AnimalsMasterPage({
     { data: animals, error },
     { data: weightLogs },
     { data: financialLogs },
+    { data: medicalLogs },
   ] = await Promise.all([
     supabase
       .from('livestock_master')
@@ -74,6 +75,12 @@ export default async function AnimalsMasterPage({
       .from('animal_financial_logs')
       .select('animal_id, entry_type, amount')
       .eq('farm_id', farm.id),
+    supabase
+      .from('animal_medical_logs')
+      .select('id, animal_id, treatment_type, medicine_name, next_due_date')
+      .eq('farm_id', farm.id)
+      .not('next_due_date', 'is', null)
+      .order('next_due_date', { ascending: true }),
   ])
 
   const todayStr = new Date().toISOString().split('T')[0]
@@ -127,6 +134,37 @@ export default async function AnimalsMasterPage({
       },
     }
   })
+
+  const animalMapById: Record<string, { tag_id: string; species: string; status: string }> = {}
+  ;(animals || []).forEach(a => {
+    animalMapById[a.id] = { tag_id: a.tag_id, species: a.species, status: a.status }
+  })
+
+  const sevenDaysFromNow = new Date()
+  sevenDaysFromNow.setDate(sevenDaysFromNow.getDate() + 7)
+  const sevenDaysStr = sevenDaysFromNow.toISOString().split('T')[0]
+
+  const dueMedicalReminders = (medicalLogs || [])
+    .filter(m => {
+      const ani = animalMapById[m.animal_id]
+      if (!ani || ani.status !== 'Active' || !m.next_due_date) return false
+      const dueStr = String(m.next_due_date).split('T')[0]
+      return dueStr <= sevenDaysStr
+    })
+    .map(m => {
+      const dueStr = String(m.next_due_date).split('T')[0]
+      const ani = animalMapById[m.animal_id]
+      return {
+        id: m.id,
+        animal_id: m.animal_id,
+        tag_id: ani?.tag_id || 'Unknown',
+        species: ani?.species || '',
+        treatment_type: m.treatment_type,
+        medicine_name: m.medicine_name,
+        due_date: dueStr,
+        isOverdue: dueStr < todayStr,
+      }
+    })
 
   // 1. Delete Single Animal
   const deleteAction = async (formData: FormData) => {
@@ -398,6 +436,46 @@ export default async function AnimalsMasterPage({
             <p className="text-[11px] text-slate-400 mt-0.5">Initial purchase outlay (Self)</p>
           </div>
         </div>
+
+        {/* Medical & Deworming Due Reminders */}
+        {dueMedicalReminders.length > 0 && (
+          <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-base">💉</span>
+                <h2 className="text-xs font-bold uppercase tracking-wider text-amber-900">
+                  Upcoming &amp; Overdue Medical / Deworming ({dueMedicalReminders.length})
+                </h2>
+              </div>
+              <span className="text-[11px] text-amber-700 font-medium">Next 7 Days &amp; Overdue</span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {dueMedicalReminders.map(rem => (
+                <Link
+                  key={rem.id}
+                  href={`/animals/${rem.animal_id}`}
+                  className={`px-3 py-1.5 rounded-xl border text-xs flex items-center gap-2 transition ${
+                    rem.isOverdue
+                      ? 'bg-rose-50 border-rose-300 text-rose-900 hover:bg-rose-100'
+                      : 'bg-white border-amber-200 text-slate-800 hover:bg-amber-100/60'
+                  }`}
+                >
+                  <span className="font-mono font-bold">{rem.tag_id}</span>
+                  <span>
+                    {rem.treatment_type}: <strong>{rem.medicine_name}</strong>
+                  </span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-bold ${
+                      rem.isOverdue ? 'bg-rose-600 text-white' : 'bg-amber-200 text-amber-950'
+                    }`}
+                  >
+                    {rem.isOverdue ? `OVERDUE (${rem.due_date})` : `Due ${rem.due_date}`}
+                  </span>
+                </Link>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Feedback Banners */}
         {statusMsg && (
