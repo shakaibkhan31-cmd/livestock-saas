@@ -114,11 +114,13 @@ export default async function FeedManagementPage({
   const isAdmin = role === 'admin'
 
   const supabase = await createClient()
+  const todayStr = new Date().toISOString().split('T')[0]
 
   // Run independent queries in parallel to speed up page load
   const [
     { data: allFeedLogs },
     { data: activeAnimals },
+    { data: inventoryRows },
   ] = await Promise.all([
     supabase
       .from('feed_logs')
@@ -130,13 +132,19 @@ export default async function FeedManagementPage({
       .select('id, tag_id, species, ownership, client_name, acquisition_date')
       .eq('farm_id', farm.id)
       .eq('status', 'Active'),
+    supabase
+      .from('feed_inventory')
+      .select('*')
+      .eq('farm_id', farm.id)
+      .order('stock_check_date', { ascending: false }),
   ])
 
-  // Auto-learn custom feed names from previous entries + merge with defaults
+  // Auto-learn custom feed names from previous entries + inventory + defaults
   const dynamicFeedSuggestions = Array.from(
     new Set([
       ...DEFAULT_FEED_SUGGESTIONS,
       ...(allFeedLogs || []).map(l => (l.feed_type || '').trim()).filter(Boolean),
+      ...(inventoryRows || []).map(r => (r.feed_name || r.item_name || '').trim()).filter(Boolean),
     ])
   ).sort()
 
@@ -180,6 +188,15 @@ export default async function FeedManagementPage({
   const startIndex = (safePage - 1) * pageSize
   const paginatedFeedLogs = filteredLedgerLogs.slice(startIndex, startIndex + pageSize)
 
+  // Map low_stock_threshold_kg from public.feed_inventory by feed name
+  const thresholdByFeedName: Record<string, number> = {}
+  ;(inventoryRows || []).forEach(row => {
+    const nameKey = (row.feed_name || row.item_name || '').trim().toLowerCase()
+    if (nameKey && row.low_stock_threshold_kg !== null && row.low_stock_threshold_kg !== undefined) {
+      thresholdByFeedName[nameKey] = Number(row.low_stock_threshold_kg) || 50
+    }
+  })
+
   // Calculate Bulk Stock Inventory per (Species + Feed Type)
   type StockSummary = {
     key: string
@@ -190,6 +207,7 @@ export default async function FeedManagementPage({
     remainingKg: number
     totalPurchasedCost: number
     avgRatePerKg: number
+    thresholdKg: number
   }
 
   const stockMap: Record<string, StockSummary> = {}
@@ -208,6 +226,7 @@ export default async function FeedManagementPage({
         remainingKg: 0,
         totalPurchasedCost: 0,
         avgRatePerKg: 0,
+        thresholdKg: thresholdByFeedName[ft.toLowerCase()] ?? 50,
       }
     }
     const qty = Number(log.quantity_kg) || 0
@@ -231,6 +250,8 @@ export default async function FeedManagementPage({
       avgRatePerKg,
     }
   })
+
+  const lowStockCount = inventoryList.filter(i => i.remainingKg <= i.thresholdKg).length
 
   // Unallocated Cost Pool grouped by Species
   const unallocatedBySpecies: Record<string, { amount: number; billCount: number }> = {}
@@ -259,7 +280,6 @@ export default async function FeedManagementPage({
 
   const totalRemainingStockKg = inventoryList.reduce((sum, i) => sum + Math.max(i.remainingKg, 0), 0)
 
-  const todayStr = new Date().toISOString().split('T')[0]
   const effectiveSplitDate = (params.splitDate || todayStr).split('T')[0]
 
   const dateEligibleAnimals = (activeAnimals || []).filter(a => {
@@ -279,12 +299,81 @@ export default async function FeedManagementPage({
     ])
   ).filter(Boolean)
 
+  // Helper to sync current balance into public.feed_inventory using existing columns
+  const syncFeedInventorySnapshot = async (
+    supabaseClient: Awaited<ReturnType<typeof createClient>>,
+    feedName: string,
+    category: string,
+    ratePerKg: number,
+    dateStr: string,
+    noteText: string | null
+  ) => {
+    const { data: logsForName } = await supabaseClient
+      .from('feed_logs')
+      .select('quantity_kg, entry_type')
+      .eq('farm_id', farm.id)
+      .ilike('feed_type', feedName)
+
+    let purchKg = 0
+    let consKg = 0
+    ;(logsForName || []).forEach(l => {
+      const q = Number(l.quantity_kg) || 0
+      if (l.entry_type === 'Purchase' || !l.entry_type) purchKg += q
+      else consKg += q
+    })
+    const closingBalanceKg = Number((purchKg - consKg).toFixed(2))
+
+    const { data: existingInv } = await supabaseClient
+      .from('feed_inventory')
+      .select('id, low_stock_threshold_kg')
+      .eq('farm_id', farm.id)
+      .ilike('feed_name', feedName)
+      .limit(1)
+
+    if (existingInv && existingInv.length > 0) {
+      await supabaseClient
+        .from('feed_inventory')
+        .update({
+          feed_name: feedName,
+          item_name: feedName,
+          category,
+          purchase_kg: purchKg,
+          closing_kg: closingBalanceKg,
+          current_stock_kg: closingBalanceKg,
+          cost_per_kg: ratePerKg,
+          unit_cost_per_kg: ratePerKg,
+          stock_check_date: dateStr,
+          notes: noteText,
+        })
+        .eq('id', existingInv[0].id)
+        .eq('farm_id', farm.id)
+    } else {
+      await supabaseClient.from('feed_inventory').insert([
+        {
+          farm_id: farm.id,
+          feed_name: feedName,
+          item_name: feedName,
+          category,
+          opening_kg: 0,
+          purchase_kg: purchKg,
+          closing_kg: closingBalanceKg,
+          current_stock_kg: closingBalanceKg,
+          cost_per_kg: ratePerKg,
+          unit_cost_per_kg: ratePerKg,
+          low_stock_threshold_kg: 50,
+          stock_check_date: dateStr,
+          notes: noteText,
+        },
+      ])
+    }
+  }
+
   // SERVER ACTION 1: Record Bulk Purchase (Stock-In)
   const addFeedLog = async (formData: FormData) => {
     'use server'
     const target_species = (formData.get('target_species') as string) || 'Goat'
     const log_date = (formData.get('log_date') as string) || new Date().toISOString().split('T')[0]
-    const notes = formData.get('notes') as string
+    const notes = (formData.get('notes') as string) || ''
 
     const feedTypes = formData.getAll('feed_type') as string[]
     const quantities = formData.getAll('quantity_kg') as string[]
@@ -322,6 +411,20 @@ export default async function FeedManagementPage({
     if (error) {
       return redirect(`/feed?error=${encodeURIComponent(error.message)}`)
     }
+
+    await Promise.all(
+      recordsToInsert.map(rec => {
+        const ratePerKg = rec.quantity_kg > 0 ? Number((rec.total_cost / rec.quantity_kg).toFixed(2)) : 0
+        return syncFeedInventorySnapshot(
+          supabaseClient,
+          rec.feed_type,
+          target_species,
+          ratePerKg,
+          log_date,
+          notes || null
+        )
+      })
+    )
 
     return redirect(
       `/feed?species=${encodeURIComponent(target_species)}&msg=${encodeURIComponent(
@@ -422,6 +525,19 @@ export default async function FeedManagementPage({
     if (error) {
       return redirect(`/feed?error=${encodeURIComponent(error.message)}`)
     }
+
+    await Promise.all(
+      adjustmentsToInsert.map(adj =>
+        syncFeedInventorySnapshot(
+          supabaseClient,
+          adj.feed_type,
+          target_species,
+          adj.quantity_kg > 0 ? Number((adj.total_cost / adj.quantity_kg).toFixed(2)) : 0,
+          log_date,
+          adj.notes
+        )
+      )
+    )
 
     return redirect(
       `/feed?species=${encodeURIComponent(target_species)}&msg=${encodeURIComponent(
@@ -569,7 +685,7 @@ export default async function FeedManagementPage({
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
                 {farm?.farm_name || 'Livestock ERP'} • {role?.toUpperCase()}
               </span>
-              <span className="text-[11px] text-slate-400 font-medium">Feed Inventory & Cost Allocation</span>
+              <span className="text-[11px] text-slate-400 font-medium">Feed Inventory &amp; Cost Allocation</span>
             </div>
             <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">
               Feed Command Center
@@ -683,7 +799,9 @@ export default async function FeedManagementPage({
             <p className="text-2xl font-bold text-emerald-600 mt-1 font-mono">
               {totalRemainingStockKg.toFixed(1)} <span className="text-xs font-sans font-semibold text-slate-400">kg</span>
             </p>
-            <p className="text-[11px] text-slate-400 mt-0.5">Across {inventoryList.length} tracked ration item(s)</p>
+            <p className="text-[11px] text-slate-400 mt-0.5">
+              {lowStockCount > 0 ? `${lowStockCount} item(s) at/below threshold` : `Across ${inventoryList.length} tracked ration item(s)`}
+            </p>
           </div>
 
           {isAdmin && (
@@ -721,14 +839,14 @@ export default async function FeedManagementPage({
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 mb-3.5">
               <div>
                 <h2 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Live Shed Ration Stock</h2>
-                <p className="text-[11px] text-slate-500">Real-time balance per species & ration item (Purchase minus Write-off / Usage)</p>
+                <p className="text-[11px] text-slate-500">Real-time balance per species &amp; ration item (Purchase minus Write-off / Usage)</p>
               </div>
               <span className="text-[11px] font-mono text-slate-400">{inventoryList.length} items</span>
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
               {inventoryList.map((item) => {
-                const isLow = item.remainingKg <= 5
+                const isLow = item.remainingKg <= item.thresholdKg
                 return (
                   <div
                     key={item.key}
@@ -743,7 +861,7 @@ export default async function FeedManagementPage({
                       <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${
                         isLow ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'
                       }`}>
-                        {isLow ? 'Low' : 'OK'}
+                        {isLow ? `Low (≤${item.thresholdKg}kg)` : 'OK'}
                       </span>
                     </div>
                     <p className="font-bold text-xs text-slate-900 mt-1.5 truncate" title={item.feedType}>
@@ -905,7 +1023,7 @@ export default async function FeedManagementPage({
                 <thead className="bg-slate-50/80">
                   <tr>
                     <th className="px-4 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">Date</th>
-                    <th className="px-4 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">Item & Type</th>
+                    <th className="px-4 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">Item &amp; Type</th>
                     <th className="px-4 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">Qty</th>
                     <th className="px-4 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">Cost / Split</th>
                     {isAdmin && <th className="px-4 py-2.5 text-right text-[10px] font-bold text-slate-500 uppercase tracking-wider">Action</th>}
@@ -1040,7 +1158,7 @@ export default async function FeedManagementPage({
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                 <div>
                   <h2 className="text-sm font-bold text-slate-900">Record Bulk Purchase</h2>
-                  <p className="text-[11px] text-slate-500">Add ration stock-in & bill amount</p>
+                  <p className="text-[11px] text-slate-500">Add ration stock-in &amp; bill amount</p>
                 </div>
                 <button
                   type="button"
@@ -1138,7 +1256,7 @@ export default async function FeedManagementPage({
                 <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                   <div>
                     <h2 className="text-sm font-bold text-slate-900">Closing Stock Write-off</h2>
-                    <p className="text-[11px] text-slate-500">Enter actual remaining kg to auto-log stock out & cost</p>
+                    <p className="text-[11px] text-slate-500">Enter actual remaining kg to auto-log stock out &amp; cost</p>
                   </div>
                   <button
                     type="button"
