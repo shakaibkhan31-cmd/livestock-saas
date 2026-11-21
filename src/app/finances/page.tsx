@@ -7,6 +7,12 @@ import {
   daysBetweenDateStrings,
   formatDateDDMMYYYY,
 } from '@/utils/breakeven'
+import {
+  ensureDefaultWallets,
+  isOperatingCategory,
+  recalculateWalletBalance,
+  type WalletType,
+} from '@/utils/wallets'
 import FinancesExportButton, { type ExportableTxn } from './FinancesExportButton'
 
 const SPECIES_OPTIONS = [
@@ -140,8 +146,9 @@ export default async function FinancesPage({
 
   const supabase = await createClient()
 
-  // Run independent read queries in parallel to speed up page load
+  // Ensure default 3 wallets exist & load parallel data
   const [
+    wallets,
     { data: palaiAnimals },
     { data: selfAnimals },
     { data: weightLogs },
@@ -149,15 +156,16 @@ export default async function FinancesPage({
     { data: animalFinLogs },
     { data: contactsList },
   ] = await Promise.all([
+    ensureDefaultWallets(supabase, farm.id),
     supabase
       .from('livestock_master')
-      .select('id, tag_id, species, client_name, monthly_palai_fee, acquisition_date, status')
+      .select('id, tag_id, species, client_name, monthly_palai_fee, acquisition_date, status, cost_basis')
       .eq('farm_id', farm.id)
       .neq('ownership', 'Self')
       .eq('status', 'Active'),
     supabase
       .from('livestock_master')
-      .select('id, tag_id, species, acquisition_date, status')
+      .select('id, tag_id, species, acquisition_date, status, cost_basis')
       .eq('farm_id', farm.id)
       .eq('ownership', 'Self')
       .eq('status', 'Active'),
@@ -197,6 +205,26 @@ export default async function FinancesPage({
 
   const todayStr = new Date().toISOString().split('T')[0]
   const currentMonthStr = todayStr.slice(0, 7)
+
+  const walletByType: Partial<Record<WalletType, (typeof wallets)[number]>> = {}
+  wallets.forEach(w => {
+    walletByType[w.wallet_type] = w
+  })
+
+  const operatingWallet = walletByType.OPERATING_CASH
+  const capitalWallet = walletByType.ANIMAL_CAPITAL
+  const emergencyWallet = walletByType.EMERGENCY_MORTALITY
+
+  const operatingBalance = Number(operatingWallet?.current_balance || 0)
+  const capitalBalance = Number(capitalWallet?.current_balance || 0)
+  const emergencyBalance = Number(emergencyWallet?.current_balance || 0)
+
+  // 10% Emergency / Mortality Fund target from active self-owned livestock valuation
+  const totalSelfLivestockValue = (selfAnimals || []).reduce(
+    (sum: number, a: any) => sum + (Number(a.cost_basis) || 0),
+    0
+  )
+  const tenPercentEmergencyTarget = Math.round(totalSelfLivestockValue * 0.1)
 
   const contactPhoneByName: Record<string, string> = {}
   ;(contactsList || []).forEach(c => {
@@ -327,6 +355,18 @@ export default async function FinancesPage({
 
   unifiedList.sort((a, b) => b.date.localeCompare(a.date))
 
+  // Estimate 30-day Operating Cash target from last 30 days of expenses (or fallback to current monthly burn)
+  const thirtyDaysAgoDate = new Date()
+  thirtyDaysAgoDate.setDate(thirtyDaysAgoDate.getDate() - 30)
+  const thirtyDaysAgoStr = thirtyDaysAgoDate.toISOString().split('T')[0]
+  const last30DaysExpense = unifiedList
+    .filter(item => item.type === 'Expense' && item.date >= thirtyDaysAgoStr)
+    .reduce((sum, item) => sum + item.amount, 0)
+  const thirtyDayOperatingTarget =
+    Number(operatingWallet?.target_buffer_amount || 0) > 0
+      ? Number(operatingWallet?.target_buffer_amount)
+      : Math.round(last30DaysExpense)
+
   const filteredLedger = unifiedList.filter(item => {
     if (filterType === 'Income' && item.type !== 'Income') return false
     if (filterType === 'Expense' && item.type !== 'Expense') return false
@@ -394,7 +434,58 @@ export default async function FinancesPage({
 
   const sortedExpenseCategories = Object.entries(expenseByCategory).sort((a, b) => b[1] - a[1])
 
-  // Server Action: Log Palai Client Boarding Payment
+  // Server Action: Fund / Adjust a Wallet (3 Wallets Rule)
+  const fundWalletAction = async (formData: FormData) => {
+    'use server'
+    const walletType = ((formData.get('wallet_type') as string) || 'OPERATING_CASH') as WalletType
+    const entryType = ((formData.get('entry_type') as string) || 'IN') === 'OUT' ? 'OUT' : 'IN'
+    const amount = parseFloat((formData.get('amount') as string) || '0')
+    const txnDate = ((formData.get('txn_date') as string) || '').trim() || new Date().toISOString().split('T')[0]
+    const notes = ((formData.get('notes') as string) || '').trim() || 'Wallet Funding / Adjustment'
+
+    if (isNaN(amount) || amount <= 0) {
+      return redirect(`/finances?error=${encodeURIComponent('Enter a valid wallet amount greater than 0.')}`)
+    }
+
+    const supabaseClient = await createClient()
+    const farmWallets = await ensureDefaultWallets(supabaseClient, farm.id)
+    const targetWallet = farmWallets.find(w => w.wallet_type === walletType)
+
+    if (!targetWallet) {
+      return redirect(`/finances?error=${encodeURIComponent('Target wallet not found.')}`)
+    }
+
+    const sourceType =
+      walletType === 'EMERGENCY_MORTALITY' && entryType === 'OUT'
+        ? 'MORTALITY_CLAIM'
+        : 'WALLET_TRANSFER'
+
+    const { error: wtErr } = await supabaseClient.from('wallet_transactions').insert([
+      {
+        farm_id: farm.id,
+        wallet_id: targetWallet.id,
+        entry_type: entryType,
+        amount,
+        source_type: sourceType,
+        txn_date: txnDate,
+        notes,
+      },
+    ])
+
+    if (wtErr) {
+      return redirect(`/finances?error=${encodeURIComponent(wtErr.message)}`)
+    }
+
+    await recalculateWalletBalance(supabaseClient, farm.id, targetWallet.id)
+
+    return redirect(
+      `/finances?msg=${encodeURIComponent(
+        `${targetWallet.name}: ${entryType === 'IN' ? '+' : '-'}Rs. ${amount.toLocaleString()} recorded.`
+      )}`
+    )
+  }
+
+  // Server Action: Log Palai Client Boarding Payment (credits Operating Cash Wallet)
   const logPalaiPaymentAction = async (formData: FormData) => {
     'use server'
     const animalId = ((formData.get('animalId') as string) || '').trim()
@@ -435,6 +526,24 @@ export default async function FinancesPage({
       return redirect(`/finances?error=${encodeURIComponent(payErr.message)}`)
     }
 
+    // Credit Palai client payment into Wallet 1: Operating Cash
+    const farmWallets = await ensureDefaultWallets(supabaseClient, farm.id)
+    const opWallet = farmWallets.find(w => w.wallet_type === 'OPERATING_CASH')
+    if (opWallet) {
+      await supabaseClient.from('wallet_transactions').insert([
+        {
+          farm_id: farm.id,
+          wallet_id: opWallet.id,
+          entry_type: 'IN',
+          amount,
+          source_type: 'PALAI_PAYMENT',
+          txn_date: paymentDate,
+          notes: `Palai Payment: ${palaiRow.tag_id} (${palaiRow.client_name || 'Client'})`,
+        },
+      ])
+      await recalculateWalletBalance(supabaseClient, farm.id, opWallet.id)
+    }
+
     if (palaiRow.client_name) {
       const { data: contactMatch } = await supabaseClient
         .from('contacts')
@@ -454,7 +563,7 @@ export default async function FinancesPage({
 
     return redirect(
       `/finances?msg=${encodeURIComponent(
-        `Logged Palai payment of Rs. ${amount.toLocaleString()} for ${palaiRow.tag_id} (${palaiRow.client_name || 'Client'}).`
+        `Logged Palai payment of Rs. ${amount.toLocaleString()} for ${palaiRow.tag_id} (${palaiRow.client_name || 'Client'}) into Operating Cash.`
       )}`
     )
   }
@@ -718,7 +827,7 @@ export default async function FinancesPage({
     )
   }
 
-  // Server Action: Add Global Farm Transaction (with Target Species)
+  // Server Action: Add Global Farm Transaction (with Target Species & Wallet Guardrail)
   const addTransaction = async (formData: FormData) => {
     'use server'
     const rawType = ((formData.get('type') as string) || 'Expense').trim()
@@ -726,14 +835,24 @@ export default async function FinancesPage({
     const targetSpecies = ((formData.get('target_species') as string) || 'Goat').trim()
     const category = ((formData.get('category') as string) || '').trim()
     const parsedAmount = parseFloat((formData.get('amount') as string) || '0')
-    const txn_date = ((formData.get('txn_date') as string) || '').trim()
+    const txn_date = ((formData.get('txn_date') as string) || '').trim() || new Date().toISOString().split('T')[0]
     const rawDescription = ((formData.get('description') as string) || '').trim()
+    const selectedWalletType = ((formData.get('wallet_type') as string) || 'OPERATING_CASH') as WalletType
 
     if (!category) {
       return redirect(`/finances?error=${encodeURIComponent('Category is required.')}`)
     }
     if (isNaN(parsedAmount) || parsedAmount <= 0) {
       return redirect(`/finances?error=${encodeURIComponent('Please enter a valid amount greater than 0.')}`)
+    }
+
+    // 3 Wallets Guardrail: Do not mix daily operating expenses into Animal Buying Capital
+    if (type === 'Expense' && selectedWalletType === 'ANIMAL_CAPITAL' && isOperatingCategory(category)) {
+      return redirect(
+        `/finances?error=${encodeURIComponent(
+          `3 Wallets Rule: "${category}" is an operating expense. Select Operating Cash (30-Day) instead of Animal Buying Capital.`
+        )}`
+      )
     }
 
     const descriptionWithTag = rawDescription
@@ -748,13 +867,42 @@ export default async function FinancesPage({
         type,
         category,
         amount: parsedAmount,
-        txn_date: txn_date || new Date().toISOString().split('T')[0],
+        txn_date,
         description: descriptionWithTag,
         target_species: targetSpecies,
       },
     ])
 
     if (error) return redirect(`/finances?error=${encodeURIComponent(error.message)}`)
+
+    // Sync wallet ledger for selected wallet
+    const farmWallets = await ensureDefaultWallets(supabaseClient, farm.id)
+    const targetWallet = farmWallets.find(w => w.wallet_type === selectedWalletType)
+    if (targetWallet) {
+      const catLower = category.toLowerCase()
+      const sourceType =
+        type === 'Income' && (catLower.includes('milk') || catLower.includes('manure'))
+          ? 'MILK_MANURE'
+          : type === 'Income' && catLower.includes('palai')
+          ? 'PALAI_PAYMENT'
+          : type === 'Income'
+          ? 'ANIMAL_SALE'
+          : 'DAILY_EXPENSE'
+
+      await supabaseClient.from('wallet_transactions').insert([
+        {
+          farm_id: farm.id,
+          wallet_id: targetWallet.id,
+          entry_type: type === 'Income' ? 'IN' : 'OUT',
+          amount: parsedAmount,
+          source_type: sourceType,
+          txn_date,
+          notes: `${category} (${targetSpecies})${rawDescription ? ` — ${rawDescription}` : ''}`,
+        },
+      ])
+      await recalculateWalletBalance(supabaseClient, farm.id, targetWallet.id)
+    }
+
     return redirect(`/finances?msg=${encodeURIComponent(`Transaction recorded under ${targetSpecies}.`)}`)
   }
 
@@ -787,11 +935,11 @@ export default async function FinancesPage({
             <div className="flex items-center gap-2">
               <span className="h-2.5 w-2.5 rounded-full bg-emerald-500"></span>
               <span className="text-xs font-semibold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
-                Admin Ledger &amp; Auto-Billing Engine
+                Admin Ledger &amp; 3-Wallet Cash Engine
               </span>
             </div>
             <h1 className="text-3xl font-bold text-slate-900 tracking-tight mt-1">Financials &amp; Billing</h1>
-            <p className="text-sm text-slate-500">Consolidated farm-wide income, Palai client WhatsApp reminders, CSV export &amp; analytics</p>
+            <p className="text-sm text-slate-500">3 Wallets cash discipline, Palai client WhatsApp reminders, CSV export &amp; analytics</p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -824,6 +972,124 @@ export default async function FinancesPage({
             <Link href="/finances" className="text-red-500 font-bold hover:text-red-800">×</Link>
           </div>
         )}
+
+        {/* 3 Wallets Rule Section */}
+        <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-5">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div>
+              <h2 className="text-base font-bold text-slate-900">
+                3 Wallets Rule (No Cash Mixing)
+              </h2>
+              <p className="text-xs text-slate-500">
+                Keep Operating Cash (30-day feed/labour/medicine), Animal Buying Capital (60% sale pool), and Emergency / Mortality Reserve (10% of stock) separate
+              </p>
+            </div>
+
+            <form action={fundWalletAction} className="flex flex-wrap items-end gap-2 bg-slate-50 p-3 rounded-xl border border-slate-200">
+              <div>
+                <label className="block text-[10px] font-bold uppercase text-slate-600 mb-1">Wallet</label>
+                <select
+                  name="wallet_type"
+                  defaultValue="OPERATING_CASH"
+                  className="px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-900"
+                >
+                  <option value="OPERATING_CASH">1. Operating Cash</option>
+                  <option value="ANIMAL_CAPITAL">2. Animal Buying Cash</option>
+                  <option value="EMERGENCY_MORTALITY">3. Emergency / Mortality</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold uppercase text-slate-600 mb-1">Flow</label>
+                <select
+                  name="entry_type"
+                  defaultValue="IN"
+                  className="px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-900"
+                >
+                  <option value="IN">Add (+ IN)</option>
+                  <option value="OUT">Withdraw (- OUT)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold uppercase text-slate-600 mb-1">Amount (PKR)</label>
+                <input
+                  name="amount"
+                  type="number"
+                  min="1"
+                  step="1"
+                  required
+                  placeholder="10000"
+                  className="w-28 px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono font-bold text-slate-900"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold uppercase text-slate-600 mb-1">Note</label>
+                <input
+                  name="notes"
+                  type="text"
+                  placeholder="Initial funding / transfer"
+                  className="w-36 px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-slate-900"
+                />
+              </div>
+              <input type="hidden" name="txn_date" value={todayStr} />
+              <button
+                type="submit"
+                className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white font-semibold rounded-lg text-xs transition"
+              >
+                Update Wallet
+              </button>
+            </form>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Wallet 1 */}
+            <div className="p-4 rounded-xl bg-amber-50/50 border border-amber-200 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-amber-900">
+                  Wallet 1 • Operating Cash
+                </span>
+                <span className="text-[10px] font-mono text-amber-800">30-Day Ops</span>
+              </div>
+              <p className="text-2xl font-bold font-mono text-slate-900">
+                Rs. {operatingBalance.toLocaleString()}
+              </p>
+              <p className="text-[11px] text-slate-600">
+                30-Day Burn Benchmark: <strong className="font-mono">Rs. {thirtyDayOperatingTarget.toLocaleString()}</strong> • Palai payments credit here
+              </p>
+            </div>
+
+            {/* Wallet 2 */}
+            <div className="p-4 rounded-xl bg-blue-50/50 border border-blue-200 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-blue-900">
+                  Wallet 2 • Animal Buying Cash
+                </span>
+                <span className="text-[10px] font-mono text-blue-800">60% Sale Pool</span>
+              </div>
+              <p className="text-2xl font-bold font-mono text-slate-900">
+                Rs. {capitalBalance.toLocaleString()}
+              </p>
+              <p className="text-[11px] text-slate-600">
+                Dedicated strictly to buying livestock; feed &amp; labour are blocked here.
+              </p>
+            </div>
+
+            {/* Wallet 3 */}
+            <div className="p-4 rounded-xl bg-rose-50/50 border border-rose-200 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-rose-900">
+                  Wallet 3 • Emergency / Mortality
+                </span>
+                <span className="text-[10px] font-mono text-rose-800">10% Stock Rule</span>
+              </div>
+              <p className="text-2xl font-bold font-mono text-slate-900">
+                Rs. {emergencyBalance.toLocaleString()}
+              </p>
+              <p className="text-[11px] text-slate-600">
+                10% Self-Stock Target: <strong className="font-mono">Rs. {tenPercentEmergencyTarget.toLocaleString()}</strong> (of Rs. {totalSelfLivestockValue.toLocaleString()})
+              </p>
+            </div>
+          </div>
+        </div>
 
         {/* Monthly Palai Auto-Billing Engine Banner */}
         <div className="bg-gradient-to-r from-indigo-900 to-slate-900 text-white p-6 rounded-2xl shadow-md flex flex-col lg:flex-row lg:items-center justify-between gap-6">
@@ -1406,6 +1672,20 @@ export default async function FinancesPage({
               </div>
 
               <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Wallet Account *</label>
+                <select
+                  name="wallet_type"
+                  required
+                  defaultValue="OPERATING_CASH"
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-semibold text-slate-900"
+                >
+                  <option value="OPERATING_CASH">1. Operating Cash (30-Day Ops)</option>
+                  <option value="ANIMAL_CAPITAL">2. Animal Buying Cash (Capital Only)</option>
+                  <option value="EMERGENCY_MORTALITY">3. Emergency / Mortality (10% Reserve)</option>
+                </select>
+              </div>
+
+              <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1.5">Category *</label>
                 <input
                   name="category"
@@ -1418,6 +1698,7 @@ export default async function FinancesPage({
                 <datalist id="common-categories">
                   <option value="Palai Boarding Fee" />
                   <option value="Animal Sale / Qurbani" />
+                  <option value="Milk & Manure Income" />
                   <option value="Feed & Ration Purchase" />
                   <option value="Veterinary & Medicine" />
                   <option value="Transport & Mandi" />

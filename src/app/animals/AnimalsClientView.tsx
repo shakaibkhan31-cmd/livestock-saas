@@ -198,6 +198,11 @@ export default function AnimalsClientView({
     .filter(item => !isNaN(item.weight_kg) && item.weight_kg > 0)
 
   const parsedSalePrice = parseFloat(salePrice) || 0
+  const roundedSalePrice = Math.round(parsedSalePrice)
+  const splitCapital60 = Math.round(roundedSalePrice * 0.6)
+  const splitOperating20 = Math.round(roundedSalePrice * 0.2)
+  const splitProfit20 = Math.max(0, roundedSalePrice - splitCapital60 - splitOperating20)
+
   const saleBreakEvenTarget = saleAnimal?.breakEven?.breakEvenToday ?? Number(saleAnimal?.cost_basis || 0)
   const projectedNetPnL = parsedSalePrice - saleBreakEvenTarget
 
@@ -805,7 +810,7 @@ export default function AnimalsClientView({
         </div>
       )}
 
-      {/* Sale / Exit Settlement Modal */}
+      {/* Sale / Exit Settlement Modal with 60/20/20 Split */}
       {saleAnimal && (
         <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
           <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-md w-full max-h-[90vh] flex flex-col overflow-hidden">
@@ -838,6 +843,9 @@ export default function AnimalsClientView({
               className="p-4 sm:p-6 space-y-4 overflow-y-auto"
             >
               <input type="hidden" name="animalId" value={saleAnimal.id} />
+              <input type="hidden" name="split_capital_60" value={String(splitCapital60)} />
+              <input type="hidden" name="split_operating_20" value={String(splitOperating20)} />
+              <input type="hidden" name="split_profit_20" value={String(splitProfit20)} />
 
               <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between text-xs">
                 <span className="text-slate-600">Today&apos;s Break-Even Target:</span>
@@ -862,22 +870,53 @@ export default function AnimalsClientView({
               </div>
 
               {parsedSalePrice > 0 && (
-                <div
-                  className={`p-3.5 rounded-xl border text-xs flex items-center justify-between ${
-                    projectedNetPnL >= 0
-                      ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
-                      : 'bg-rose-50 border-rose-200 text-rose-900'
-                  }`}
-                >
-                  <span className="font-semibold">
-                    {projectedNetPnL >= 0 ? 'Realized Net Profit:' : 'Realized Net Loss:'}
-                  </span>
-                  <span className="font-mono font-bold text-sm">
-                    {projectedNetPnL >= 0
-                      ? `+Rs. ${projectedNetPnL.toLocaleString()}`
-                      : `-Rs. ${Math.abs(projectedNetPnL).toLocaleString()}`}
-                  </span>
-                </div>
+                <>
+                  <div
+                    className={`p-3.5 rounded-xl border text-xs flex items-center justify-between ${
+                      projectedNetPnL >= 0
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                        : 'bg-rose-50 border-rose-200 text-rose-900'
+                    }`}
+                  >
+                    <span className="font-semibold">
+                      {projectedNetPnL >= 0 ? 'Realized Net Profit:' : 'Realized Net Loss:'}
+                    </span>
+                    <span className="font-mono font-bold text-sm">
+                      {projectedNetPnL >= 0
+                        ? `+Rs. ${projectedNetPnL.toLocaleString()}`
+                        : `-Rs. ${Math.abs(projectedNetPnL).toLocaleString()}`}
+                    </span>
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-slate-800">3-Wallet Proceeds Split (60 / 20 / 20):</span>
+                      <span className="font-mono text-[11px] text-slate-500">
+                        Rs. {roundedSalePrice.toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1.5 font-mono">
+                      <div className="p-2 rounded-lg bg-blue-50 border border-blue-200">
+                        <div className="text-[10px] font-sans font-semibold text-blue-700">60% Buy Pool</div>
+                        <div className="font-bold text-blue-950 text-[11px]">
+                          Rs. {splitCapital60.toLocaleString()}
+                        </div>
+                      </div>
+                      <div className="p-2 rounded-lg bg-amber-50 border border-amber-200">
+                        <div className="text-[10px] font-sans font-semibold text-amber-700">20% Operating</div>
+                        <div className="font-bold text-amber-950 text-[11px]">
+                          Rs. {splitOperating20.toLocaleString()}
+                        </div>
+                      </div>
+                      <div className="p-2 rounded-lg bg-emerald-50 border border-emerald-200">
+                        <div className="text-[10px] font-sans font-semibold text-emerald-700">20% Profit</div>
+                        <div className="font-bold text-emerald-950 text-[11px]">
+                          Rs. {splitProfit20.toLocaleString()}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </>
               )}
 
               <div>
