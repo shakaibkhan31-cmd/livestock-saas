@@ -8,6 +8,7 @@ import {
   formatDateDDMMYYYY,
 } from '@/utils/breakeven'
 import {
+  computeWeeklyCashPulseAndRunway,
   ensureDefaultWallets,
   isOperatingCategory,
   recalculateWalletBalance,
@@ -318,6 +319,7 @@ export default async function FinancesPage({
     targetSpecies?: string
     animalId?: string
     tagId?: string
+    isAutoBill?: boolean
   }
 
   const unifiedList: UnifiedLedgerItem[] = []
@@ -339,6 +341,7 @@ export default async function FinancesPage({
 
   ;(animalFinLogs || []).forEach((f: any) => {
     const animalInfo = Array.isArray(f.livestock_master) ? f.livestock_master[0] : f.livestock_master
+    const noteStr = String(f.notes || '')
     unifiedList.push({
       id: f.id,
       source: 'animal',
@@ -346,26 +349,38 @@ export default async function FinancesPage({
       type: f.entry_type === 'Revenue' ? 'Income' : 'Expense',
       category: f.category || 'General',
       amount: Number(f.amount) || 0,
-      description: f.notes || '',
+      description: noteStr,
       targetSpecies: animalInfo?.species || 'Goat',
       animalId: f.animal_id,
       tagId: animalInfo?.tag_id || 'Animal',
+      isAutoBill: noteStr.startsWith('Auto-Bill'),
     })
   })
 
   unifiedList.sort((a, b) => b.date.localeCompare(a.date))
 
-  // Estimate 30-day Operating Cash target from last 30 days of expenses (or fallback to current monthly burn)
-  const thirtyDaysAgoDate = new Date()
-  thirtyDaysAgoDate.setDate(thirtyDaysAgoDate.getDate() - 30)
-  const thirtyDaysAgoStr = thirtyDaysAgoDate.toISOString().split('T')[0]
-  const last30DaysExpense = unifiedList
-    .filter(item => item.type === 'Expense' && item.date >= thirtyDaysAgoStr)
-    .reduce((sum, item) => sum + item.amount, 0)
-  const thirtyDayOperatingTarget =
-    Number(operatingWallet?.target_buffer_amount || 0) > 0
-      ? Number(operatingWallet?.target_buffer_amount)
-      : Math.round(last30DaysExpense)
+  // Phase 2: Weekly Cash Out vs Cash In Red Flag + 30-Day Operating Runway
+  const cashPulse = computeWeeklyCashPulseAndRunway({
+    items: unifiedList
+      .filter(item => !item.isAutoBill) // Only actual cash receipts, not unpaid auto-bills
+      .map(item => ({
+        date: item.date,
+        type: item.type,
+        category: item.category,
+        amount: item.amount,
+      })),
+    todayStr,
+    operatingBalance,
+    manualThirtyDayTarget: Number(operatingWallet?.target_buffer_amount || 0),
+  })
+
+  const thirtyDayOperatingTarget = cashPulse.thirtyDayTargetRequired
+  const runwayProgressPct =
+    thirtyDayOperatingTarget > 0
+      ? Math.min(100, Math.round((Math.max(0, operatingBalance) / thirtyDayOperatingTarget) * 100))
+      : operatingBalance > 0
+      ? 100
+      : 0
 
   const filteredLedger = unifiedList.filter(item => {
     if (filterType === 'Income' && item.type !== 'Income') return false
@@ -939,7 +954,7 @@ export default async function FinancesPage({
               </span>
             </div>
             <h1 className="text-3xl font-bold text-slate-900 tracking-tight mt-1">Financials &amp; Billing</h1>
-            <p className="text-sm text-slate-500">3 Wallets cash discipline, Palai client WhatsApp reminders, CSV export &amp; analytics</p>
+            <p className="text-sm text-slate-500">3 Wallets cash discipline, weekly red-flag monitor, 30-day runway &amp; Palai billing</p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -972,6 +987,156 @@ export default async function FinancesPage({
             <Link href="/finances" className="text-red-500 font-bold hover:text-red-800">×</Link>
           </div>
         )}
+
+        {/* Phase 2: Weekly Cash Out vs Cash In Red Flag Card + 30-Day Runway */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Weekly Cash Pulse (7-Day Rule) */}
+          <div
+            className={`lg:col-span-2 p-6 rounded-2xl border shadow-sm space-y-4 ${
+              cashPulse.isRedFlag
+                ? 'bg-rose-50/70 border-rose-300'
+                : 'bg-emerald-50/60 border-emerald-200'
+            }`}
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span
+                    className={`px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wider rounded-full border ${
+                      cashPulse.isRedFlag
+                        ? 'bg-rose-600 text-white border-rose-700'
+                        : 'bg-emerald-600 text-white border-emerald-700'
+                    }`}
+                  >
+                    {cashPulse.isRedFlag ? '🚩 Weekly Cash Red Flag' : '✅ Weekly Cash Healthy'}
+                  </span>
+                  <span className="text-xs font-mono text-slate-600">
+                    {formatDateDDMMYYYY(cashPulse.windowStartDate)} → {formatDateDDMMYYYY(cashPulse.windowEndDate)} (7d)
+                  </span>
+                </div>
+                <h2 className="text-base font-bold text-slate-900 mt-1.5">
+                  Weekly Cash Out vs. Cash In Monitor
+                </h2>
+              </div>
+
+              {cashPulse.isRedFlag && (
+                <a
+                  href="#breakeven-sync"
+                  className="px-3.5 py-2 bg-rose-700 hover:bg-rose-800 text-white font-bold rounded-xl text-xs shadow-xs transition shrink-0 text-center"
+                >
+                  ⚖️ Sync Gap to Break-Even
+                </a>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="p-3.5 rounded-xl bg-white border border-slate-200/90">
+                <p className="text-[11px] font-semibold uppercase text-slate-500">
+                  7d Cash Out (Feed + Labour + Med)
+                </p>
+                <p className="text-xl font-bold font-mono text-rose-700 mt-1">
+                  Rs. {cashPulse.coreCashOut7d.toLocaleString()}
+                </p>
+                {cashPulse.otherCashOut7d > 0 && (
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    + Rs. {cashPulse.otherCashOut7d.toLocaleString()} other ops
+                  </p>
+                )}
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-white border border-slate-200/90">
+                <p className="text-[11px] font-semibold uppercase text-slate-500">
+                  7d Cash In (Milk + Manure + Sales)
+                </p>
+                <p className="text-xl font-bold font-mono text-emerald-700 mt-1">
+                  Rs. {cashPulse.shortCycleCashIn7d.toLocaleString()}
+                </p>
+                {cashPulse.palaiCashIn7d > 0 && (
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    + Rs. {cashPulse.palaiCashIn7d.toLocaleString()} Palai receipts
+                  </p>
+                )}
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-white border border-slate-200/90">
+                <p className="text-[11px] font-semibold uppercase text-slate-500">
+                  7-Day Net Cash Gap
+                </p>
+                <p
+                  className={`text-xl font-bold font-mono mt-1 ${
+                    cashPulse.weeklyNetGap >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                  }`}
+                >
+                  {cashPulse.weeklyNetGap >= 0
+                    ? `+Rs. ${cashPulse.weeklyNetGap.toLocaleString()}`
+                    : `-Rs. ${Math.abs(cashPulse.weeklyNetGap).toLocaleString()}`}
+                </p>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  {cashPulse.isRedFlag
+                    ? 'Capital burn active — allocate onto Self stock'
+                    : 'Short-cycle inflows covering weekly burn'}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* 30-Day Operating Runway Meter */}
+          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between space-y-4">
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-amber-900 bg-amber-50 px-2.5 py-0.5 rounded-full border border-amber-200">
+                  30-Day Runway Rule
+                </span>
+                <span className="text-xs font-mono font-bold text-slate-700">
+                  {cashPulse.runwayDays !== null ? `${cashPulse.runwayDays} days` : '—'}
+                </span>
+              </div>
+              <h2 className="text-base font-bold text-slate-900 pt-1">
+                Operating Cash Buffer
+              </h2>
+              <p className="text-xs text-slate-500">
+                Wallet 1 must hold 30 days of Feed + Labour + Medicine cash
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-baseline justify-between">
+                <span className="text-2xl font-bold font-mono text-slate-900">
+                  Rs. {operatingBalance.toLocaleString()}
+                </span>
+                <span className="text-xs font-mono text-slate-500">
+                  / Rs. {thirtyDayOperatingTarget.toLocaleString()}
+                </span>
+              </div>
+
+              <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                <div
+                  className={`h-full rounded-full transition-all duration-500 ${
+                    runwayProgressPct >= 100
+                      ? 'bg-emerald-500'
+                      : runwayProgressPct >= 50
+                      ? 'bg-amber-500'
+                      : 'bg-rose-500'
+                  }`}
+                  style={{ width: `${runwayProgressPct}%` }}
+                />
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] text-slate-500 pt-1">
+                <span>
+                  Avg Burn: <strong className="font-mono text-slate-800">Rs. {cashPulse.avgDailyOperatingBurn.toLocaleString()}/day</strong>
+                </span>
+                {cashPulse.operatingShortfall > 0 ? (
+                  <span className="font-mono font-semibold text-rose-700">
+                    Top-up: Rs. {cashPulse.operatingShortfall.toLocaleString()}
+                  </span>
+                ) : (
+                  <span className="font-semibold text-emerald-700">30d Target Met</span>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
 
         {/* 3 Wallets Rule Section */}
         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-5">
@@ -1288,7 +1453,7 @@ export default async function FinancesPage({
         </div>
 
         {/* One-Click Species-Scoped Weight & Acquisition-Based Deficit Allocation */}
-        <div className="bg-white p-6 rounded-2xl border border-amber-200 shadow-sm space-y-4">
+        <div id="breakeven-sync" className="bg-white p-6 rounded-2xl border border-amber-200 shadow-sm space-y-4 scroll-mt-6">
           <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
             <div className="space-y-1">
               <div className="flex flex-wrap items-center gap-2">
