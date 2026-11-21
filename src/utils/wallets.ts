@@ -43,6 +43,184 @@ export interface WeeklyCashPulseSummary {
   operatingShortfall: number
 }
 
+export interface StaggeredBatchDefinition {
+  key: 'BATCH_A_JAN_JUL' | 'BATCH_B_MAR_SEP' | 'BATCH_C_MAY_NOV'
+  label: string
+  buyWindow: string
+  sellWindow: string
+  buyMonths: number[] // 1-12
+  sellMonths: number[] // 1-12
+}
+
+export const STAGGERED_BATCH_DEFINITIONS: StaggeredBatchDefinition[] = [
+  {
+    key: 'BATCH_A_JAN_JUL',
+    label: 'Batch A (Jan–Jul)',
+    buyWindow: 'Jan – Feb',
+    sellWindow: 'Jul – Aug',
+    buyMonths: [1, 2],
+    sellMonths: [7, 8],
+  },
+  {
+    key: 'BATCH_B_MAR_SEP',
+    label: 'Batch B (Mar–Sep)',
+    buyWindow: 'Mar – Apr',
+    sellWindow: 'Sep – Oct',
+    buyMonths: [3, 4],
+    sellMonths: [9, 10],
+  },
+  {
+    key: 'BATCH_C_MAY_NOV',
+    label: 'Batch C (May–Nov)',
+    buyWindow: 'May – Jun',
+    sellWindow: 'Nov – Dec',
+    buyMonths: [5, 6],
+    sellMonths: [11, 12],
+  },
+]
+
+export const CASH_CYCLE_ROLES = [
+  'Meat / Fattening',
+  'Daily Milk Producer',
+  'Breeding / Kid Crop',
+] as const
+
+export interface StaggeredBatchStatus {
+  key: StaggeredBatchDefinition['key']
+  label: string
+  buyWindow: string
+  sellWindow: string
+  phaseNow: 'BUY_WINDOW' | 'SELL_WINDOW' | 'GROWOUT'
+  animalCount: number
+  totalCostBasis: number
+  tags: string[]
+}
+
+export interface ShortCycleMixSummary {
+  milkIncome30d: number
+  manureIncome30d: number
+  kidAndQuickSale30d: number
+  palaiIncome30d: number
+  totalShortCycle30d: number
+  milkProducersCount: number
+  kidCropCount: number
+  fatteningCount: number
+  unassignedBatchCount: number
+}
+
+export function inferStaggeredBatchFromDate(acquisitionDate?: string | null): string {
+  if (!acquisitionDate) return 'Batch A (Jan–Jul)'
+  const parts = String(acquisitionDate).split('T')[0].split('-')
+  const month = parseInt(parts[1] || '1', 10)
+  if (month === 1 || month === 2 || month === 7 || month === 8) {
+    return 'Batch A (Jan–Jul)'
+  }
+  if (month === 3 || month === 4 || month === 9 || month === 10) {
+    return 'Batch B (Mar–Sep)'
+  }
+  return 'Batch C (May–Nov)'
+}
+
+export function computeStaggeredBatchesAndShortCycle({
+  selfAnimals,
+  items,
+  todayStr,
+}: {
+  selfAnimals: Array<{
+    id: string
+    tag_id: string
+    acquisition_date?: string | null
+    cost_basis?: number | null
+    batch_label?: string | null
+    cash_cycle_role?: string | null
+  }>
+  items: WeeklyCashPulseInputItem[]
+  todayStr: string
+}): {
+  batches: StaggeredBatchStatus[]
+  shortCycleMix: ShortCycleMixSummary
+} {
+  const currentMonth = parseInt(todayStr.split('-')[1] || '1', 10)
+  const thirtyDaysStartDate = shiftDateString(todayStr, -29)
+
+  const batches: StaggeredBatchStatus[] = STAGGERED_BATCH_DEFINITIONS.map(def => {
+    const phaseNow: StaggeredBatchStatus['phaseNow'] = def.buyMonths.includes(currentMonth)
+      ? 'BUY_WINDOW'
+      : def.sellMonths.includes(currentMonth)
+      ? 'SELL_WINDOW'
+      : 'GROWOUT'
+
+    const matching = selfAnimals.filter(a => {
+      const assigned = (a.batch_label || '').trim()
+      const effectiveLabel = assigned || inferStaggeredBatchFromDate(a.acquisition_date)
+      return effectiveLabel === def.label
+    })
+
+    return {
+      key: def.key,
+      label: def.label,
+      buyWindow: def.buyWindow,
+      sellWindow: def.sellWindow,
+      phaseNow,
+      animalCount: matching.length,
+      totalCostBasis: matching.reduce((s, a) => s + (Number(a.cost_basis) || 0), 0),
+      tags: matching.map(a => a.tag_id),
+    }
+  })
+
+  let milkIncome30d = 0
+  let manureIncome30d = 0
+  let kidAndQuickSale30d = 0
+  let palaiIncome30d = 0
+
+  for (const item of items) {
+    if (item.type !== 'Income') continue
+    if (item.date < thirtyDaysStartDate || item.date > todayStr) continue
+    const amt = Math.max(0, Number(item.amount) || 0)
+    const c = (item.category || '').toLowerCase()
+
+    if (c.includes('milk')) {
+      milkIncome30d += amt
+    } else if (c.includes('manure') || c.includes('khad')) {
+      manureIncome30d += amt
+    } else if (c.includes('palai')) {
+      palaiIncome30d += amt
+    } else if (c.includes('kid') || c.includes('sale') || c.includes('qurbani')) {
+      kidAndQuickSale30d += amt
+    }
+  }
+
+  let milkProducersCount = 0
+  let kidCropCount = 0
+  let fatteningCount = 0
+  let unassignedBatchCount = 0
+
+  for (const a of selfAnimals) {
+    if (!(a.batch_label || '').trim()) {
+      unassignedBatchCount++
+    }
+    const role = (a.cash_cycle_role || 'Meat / Fattening').toLowerCase()
+    if (role.includes('milk')) milkProducersCount++
+    else if (role.includes('kid') || role.includes('breed')) kidCropCount++
+    else fatteningCount++
+  }
+
+  return {
+    batches,
+    shortCycleMix: {
+      milkIncome30d,
+      manureIncome30d,
+      kidAndQuickSale30d,
+      palaiIncome30d,
+      totalShortCycle30d: milkIncome30d + manureIncome30d + kidAndQuickSale30d + palaiIncome30d,
+      milkProducersCount,
+      kidCropCount,
+      fatteningCount,
+      unassignedBatchCount,
+    },
+  }
+}
+
 export function computeSaleProceedsSplit(salePrice: number): SaleSplitBreakdown {
   const safePrice = Math.max(0, Number(salePrice) || 0)
   const capital60 = Math.round(safePrice * 0.6)
@@ -89,6 +267,7 @@ export function isCoreWeeklyInflowCategory(category?: string | null): boolean {
   return (
     c.includes('milk') ||
     c.includes('manure') ||
+    c.includes('kid') ||
     c.includes('sale') ||
     c.includes('qurbani')
   )
@@ -112,8 +291,8 @@ export function computeWeeklyCashPulseAndRunway({
   operatingBalance: number
   manualThirtyDayTarget?: number
 }): WeeklyCashPulseSummary {
-  const windowStartDate = shiftDateString(todayStr, -6) // Inclusive 7-day window
-  const thirtyDaysStartDate = shiftDateString(todayStr, -29) // Inclusive 30-day window
+  const windowStartDate = shiftDateString(todayStr, -6)
+  const thirtyDaysStartDate = shiftDateString(todayStr, -29)
 
   let coreCashOut7d = 0
   let otherCashOut7d = 0
@@ -127,7 +306,6 @@ export function computeWeeklyCashPulseAndRunway({
     if (amt <= 0) continue
 
     const catLower = (item.category || '').toLowerCase()
-    // Exclude non-cash synthetic deficit split entries from actual cash outflow
     const isSyntheticSplit = catLower.includes('deficit share') || catLower.includes('overhead')
 
     if (item.date >= thirtyDaysStartDate && item.date <= todayStr) {

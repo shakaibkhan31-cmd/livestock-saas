@@ -8,8 +8,12 @@ import {
   formatDateDDMMYYYY,
 } from '@/utils/breakeven'
 import {
+  CASH_CYCLE_ROLES,
+  STAGGERED_BATCH_DEFINITIONS,
+  computeStaggeredBatchesAndShortCycle,
   computeWeeklyCashPulseAndRunway,
   ensureDefaultWallets,
+  inferStaggeredBatchFromDate,
   isOperatingCategory,
   recalculateWalletBalance,
   type WalletType,
@@ -166,7 +170,7 @@ export default async function FinancesPage({
       .eq('status', 'Active'),
     supabase
       .from('livestock_master')
-      .select('id, tag_id, species, acquisition_date, status, cost_basis')
+      .select('id, tag_id, species, acquisition_date, status, cost_basis, batch_label, cash_cycle_role')
       .eq('farm_id', farm.id)
       .eq('ownership', 'Self')
       .eq('status', 'Active'),
@@ -359,19 +363,28 @@ export default async function FinancesPage({
 
   unifiedList.sort((a, b) => b.date.localeCompare(a.date))
 
+  const cashItemsForAnalytics = unifiedList
+    .filter(item => !item.isAutoBill)
+    .map(item => ({
+      date: item.date,
+      type: item.type,
+      category: item.category,
+      amount: item.amount,
+    }))
+
   // Phase 2: Weekly Cash Out vs Cash In Red Flag + 30-Day Operating Runway
   const cashPulse = computeWeeklyCashPulseAndRunway({
-    items: unifiedList
-      .filter(item => !item.isAutoBill) // Only actual cash receipts, not unpaid auto-bills
-      .map(item => ({
-        date: item.date,
-        type: item.type,
-        category: item.category,
-        amount: item.amount,
-      })),
+    items: cashItemsForAnalytics,
     todayStr,
     operatingBalance,
     manualThirtyDayTarget: Number(operatingWallet?.target_buffer_amount || 0),
+  })
+
+  // Phase 3: Staggered Batches (Jan-Jul / Mar-Sep / May-Nov) + Short-Cycle Cash Mix
+  const { batches: staggeredBatches, shortCycleMix } = computeStaggeredBatchesAndShortCycle({
+    selfAnimals: selfAnimals || [],
+    items: cashItemsForAnalytics,
+    todayStr,
   })
 
   const thirtyDayOperatingTarget = cashPulse.thirtyDayTargetRequired
@@ -448,6 +461,38 @@ export default async function FinancesPage({
     })
 
   const sortedExpenseCategories = Object.entries(expenseByCategory).sort((a, b) => b[1] - a[1])
+
+  // Server Action: Assign Batch & Short-Cycle Role on an Animal
+  const assignBatchAndCycleAction = async (formData: FormData) => {
+    'use server'
+    const animalId = ((formData.get('animalId') as string) || '').trim()
+    const batchLabel = ((formData.get('batch_label') as string) || '').trim()
+    const cashCycleRole = ((formData.get('cash_cycle_role') as string) || 'Meat / Fattening').trim()
+
+    if (!animalId || !batchLabel) {
+      return redirect(`/finances?error=${encodeURIComponent('Select an animal and batch cycle.')}`)
+    }
+
+    const supabaseClient = await createClient()
+    const { error: updErr } = await supabaseClient
+      .from('livestock_master')
+      .update({
+        batch_label: batchLabel,
+        cash_cycle_role: cashCycleRole,
+      })
+      .eq('id', animalId)
+      .eq('farm_id', farm.id)
+
+    if (updErr) {
+      return redirect(`/finances?error=${encodeURIComponent(updErr.message)}`)
+    }
+
+    return redirect(
+      `/finances?msg=${encodeURIComponent(
+        `Updated animal rotation to ${batchLabel} (${cashCycleRole}).`
+      )}`
+    )
+  }
 
   // Server Action: Fund / Adjust a Wallet (3 Wallets Rule)
   const fundWalletAction = async (formData: FormData) => {
@@ -954,7 +999,7 @@ export default async function FinancesPage({
               </span>
             </div>
             <h1 className="text-3xl font-bold text-slate-900 tracking-tight mt-1">Financials &amp; Billing</h1>
-            <p className="text-sm text-slate-500">3 Wallets cash discipline, weekly red-flag monitor, 30-day runway &amp; Palai billing</p>
+            <p className="text-sm text-slate-500">3 Wallets discipline, weekly red flags, 30-day runway, staggered batches &amp; Palai billing</p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -1134,6 +1179,172 @@ export default async function FinancesPage({
                   <span className="font-semibold text-emerald-700">30d Target Met</span>
                 )}
               </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Phase 3: Staggered Batches (Jan-Jul / Mar-Sep / May-Nov) + Short-Cycle Cash Mix */}
+        <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-5">
+          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-indigo-50 text-indigo-800 border border-indigo-200">
+                  Staggered Batches &amp; Short-Cycle Cash
+                </span>
+                {shortCycleMix.unassignedBatchCount > 0 && (
+                  <span className="text-[11px] font-medium text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                    {shortCycleMix.unassignedBatchCount} Self animal(s) auto-grouped by acquisition date
+                  </span>
+                )}
+              </div>
+              <h2 className="text-base font-bold text-slate-900 mt-1">
+                6-Month Staggered Batch Rotation (Jan–Jul • Mar–Sep • May–Nov)
+              </h2>
+              <p className="text-xs text-slate-500">
+                Never hold all stock on one single Qurbani timeline—rotate 3 overlapping batches alongside daily Milk, Manure &amp; Kid cash streams
+              </p>
+            </div>
+
+            {(selfAnimals || []).length > 0 && (
+              <form
+                action={assignBatchAndCycleAction}
+                className="flex flex-wrap items-end gap-2 bg-slate-50 p-3 rounded-xl border border-slate-200"
+              >
+                <div>
+                  <label className="block text-[10px] font-bold uppercase text-slate-600 mb-1">Self Animal</label>
+                  <select
+                    name="animalId"
+                    required
+                    className="px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono font-bold text-slate-900"
+                  >
+                    {(selfAnimals || []).map((a: any) => (
+                      <option key={a.id} value={a.id}>
+                        {a.tag_id} ({a.species})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold uppercase text-slate-600 mb-1">Batch Window</label>
+                  <select
+                    name="batch_label"
+                    defaultValue={STAGGERED_BATCH_DEFINITIONS[0].label}
+                    className="px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-900"
+                  >
+                    {STAGGERED_BATCH_DEFINITIONS.map(b => (
+                      <option key={b.key} value={b.label}>{b.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold uppercase text-slate-600 mb-1">Cash Cycle Role</label>
+                  <select
+                    name="cash_cycle_role"
+                    defaultValue={CASH_CYCLE_ROLES[0]}
+                    className="px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-900"
+                  >
+                    {CASH_CYCLE_ROLES.map(r => (
+                      <option key={r} value={r}>{r}</option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  type="submit"
+                  className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg text-xs transition"
+                >
+                  Assign Cycle
+                </button>
+              </form>
+            )}
+          </div>
+
+          {/* 3 Overlapping Batches */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {staggeredBatches.map(batch => {
+              const phaseBadge =
+                batch.phaseNow === 'BUY_WINDOW'
+                  ? 'bg-blue-100 text-blue-800 border-blue-300'
+                  : batch.phaseNow === 'SELL_WINDOW'
+                  ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                  : 'bg-slate-100 text-slate-700 border-slate-300'
+
+              const phaseLabel =
+                batch.phaseNow === 'BUY_WINDOW'
+                  ? 'BUY WINDOW'
+                  : batch.phaseNow === 'SELL_WINDOW'
+                  ? 'SELL / HARVEST'
+                  : 'GROWOUT PHASE'
+
+              return (
+                <div
+                  key={batch.key}
+                  className="p-4 rounded-xl bg-slate-50/80 border border-slate-200 space-y-2"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-slate-900">{batch.label}</span>
+                    <span className={`px-2 py-0.5 text-[10px] font-bold rounded-full border ${phaseBadge}`}>
+                      {phaseLabel}
+                    </span>
+                  </div>
+                  <div className="flex items-baseline justify-between">
+                    <span className="text-xl font-bold font-mono text-slate-900">
+                      {batch.animalCount} <span className="text-xs font-sans font-normal text-slate-500">head</span>
+                    </span>
+                    <span className="text-xs font-mono font-semibold text-slate-700">
+                      Rs. {batch.totalCostBasis.toLocaleString()}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-500">
+                    Buy: <strong>{batch.buyWindow}</strong> • Sell: <strong>{batch.sellWindow}</strong>
+                  </p>
+                  <div className="flex flex-wrap gap-1 pt-1">
+                    {batch.tags.length > 0 ? (
+                      batch.tags.map(tag => (
+                        <span
+                          key={tag}
+                          className="px-2 py-0.5 text-[10px] font-mono font-bold rounded bg-white border border-slate-200 text-slate-800"
+                        >
+                          {tag}
+                        </span>
+                      ))
+                    ) : (
+                      <span className="text-[11px] text-slate-400 italic">No animals assigned yet</span>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+
+          {/* Short-Cycle Cash Engine Summary (30d) */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-slate-100">
+            <div className="p-3 rounded-xl bg-emerald-50/60 border border-emerald-200">
+              <p className="text-[10px] font-bold uppercase text-emerald-900">30d Milk Cash</p>
+              <p className="text-base font-bold font-mono text-emerald-700 mt-0.5">
+                Rs. {shortCycleMix.milkIncome30d.toLocaleString()}
+              </p>
+              <p className="text-[10px] text-slate-500">{shortCycleMix.milkProducersCount} dairy animal(s)</p>
+            </div>
+            <div className="p-3 rounded-xl bg-amber-50/60 border border-amber-200">
+              <p className="text-[10px] font-bold uppercase text-amber-900">30d Manure Cash</p>
+              <p className="text-base font-bold font-mono text-amber-800 mt-0.5">
+                Rs. {shortCycleMix.manureIncome30d.toLocaleString()}
+              </p>
+              <p className="text-[10px] text-slate-500">Weekly khad / compost</p>
+            </div>
+            <div className="p-3 rounded-xl bg-indigo-50/60 border border-indigo-200">
+              <p className="text-[10px] font-bold uppercase text-indigo-900">30d Kid &amp; Quick Sales</p>
+              <p className="text-base font-bold font-mono text-indigo-800 mt-0.5">
+                Rs. {shortCycleMix.kidAndQuickSale30d.toLocaleString()}
+              </p>
+              <p className="text-[10px] text-slate-500">{shortCycleMix.kidCropCount} breeding / kid stock</p>
+            </div>
+            <div className="p-3 rounded-xl bg-slate-100/80 border border-slate-200">
+              <p className="text-[10px] font-bold uppercase text-slate-700">30d Short-Cycle Total</p>
+              <p className="text-base font-bold font-mono text-slate-900 mt-0.5">
+                Rs. {shortCycleMix.totalShortCycle30d.toLocaleString()}
+              </p>
+              <p className="text-[10px] text-slate-500">Feeds daily operating cash</p>
             </div>
           </div>
         </div>
@@ -1804,7 +2015,7 @@ export default async function FinancesPage({
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 h-fit space-y-5">
             <div>
               <h2 className="text-base font-bold text-slate-900">Add General Farm Entry</h2>
-              <p className="text-xs text-slate-500 mt-0.5">Record farm-level overheads, rent, labor, or general sales</p>
+              <p className="text-xs text-slate-500 mt-0.5">Record farm-level overheads, rent, labor, or short-cycle sales</p>
             </div>
 
             <form action={addTransaction} className="space-y-4">
@@ -1857,13 +2068,15 @@ export default async function FinancesPage({
                   type="text"
                   list="common-categories"
                   required
-                  placeholder="e.g. Shed Rent, Labor, Utilities"
+                  placeholder="e.g. Milk Income, Manure Sale, Labor"
                   className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm text-slate-900"
                 />
                 <datalist id="common-categories">
+                  <option value="Milk Income (Short-Cycle)" />
+                  <option value="Manure Sale (Short-Cycle)" />
+                  <option value="Kid Crop Sale (Short-Cycle)" />
                   <option value="Palai Boarding Fee" />
                   <option value="Animal Sale / Qurbani" />
-                  <option value="Milk & Manure Income" />
                   <option value="Feed & Ration Purchase" />
                   <option value="Veterinary & Medicine" />
                   <option value="Transport & Mandi" />
@@ -1901,7 +2114,7 @@ export default async function FinancesPage({
                 <input
                   name="description"
                   type="text"
-                  placeholder="e.g. Monthly shed electricity bill"
+                  placeholder="e.g. Weekly milk & khad cash collection"
                   className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm text-slate-900"
                 />
               </div>
