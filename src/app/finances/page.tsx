@@ -615,8 +615,11 @@ export default async function FinancesPage({
 
   const totalIncome = activeLedgerItems.filter(t => t.type === 'Income').reduce((acc, t) => acc + t.amount, 0)
   const totalExpense = activeLedgerItems.filter(t => t.type === 'Expense').reduce((acc, t) => acc + t.amount, 0)
+  const unallocatedExpense = activeLedgerItems
+    .filter(t => t.type === 'Expense' && t.category !== 'Farm Overhead / Deficit Share')
+    .reduce((acc, t) => acc + t.amount, 0)
   const netBalance = totalIncome - totalExpense
-  const unrecoveredDeficit = netBalance < 0 ? Math.abs(netBalance) : 0
+  const unrecoveredDeficit = Math.max(0, unallocatedExpense - totalIncome)
 
   // Preview for default Goat species using shared breakeven pool helper
   const defaultGoatSelfAnimals = (selfAnimals || []).filter(a => (a.species || 'Goat') === 'Goat')
@@ -2234,7 +2237,7 @@ export default async function FinancesPage({
                 Optional Deficit / Overhead Share Allocation (Tagged Separately from Direct Cost)
               </h2>
               <p className="text-xs text-slate-500 max-w-2xl">
-                Unrecovered deficit: <strong className="font-mono text-rose-700">Rs. {unrecoveredDeficit.toLocaleString()}</strong>. Logged under <code className="text-slate-700">Farm Overhead / Deficit Share</code> so direct purchase &amp; care costs stay clearly separated from shared overhead.
+                Unrecovered deficit (excludes allocated overhead): <strong className="font-mono text-rose-700">Rs. {unrecoveredDeficit.toLocaleString()}</strong>. Logged under <code className="text-slate-700">Farm Overhead / Deficit Share</code> so direct purchase &amp; care costs stay clearly separated from shared overhead.
               </p>
             </div>
 
