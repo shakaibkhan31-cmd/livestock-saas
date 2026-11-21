@@ -14,12 +14,10 @@ function normalizeDateToISO(rawDate?: string): string {
   const val = (rawDate || '').trim()
   if (!val) return fallback
 
-  // Already YYYY-MM-DD
   if (/^\d{4}-\d{2}-\d{2}$/.test(val)) {
     return val
   }
 
-  // DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
   const fullMatch = val.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/)
   if (fullMatch) {
     const day = fullMatch[1].padStart(2, '0')
@@ -28,7 +26,6 @@ function normalizeDateToISO(rawDate?: string): string {
     return `${year}-${month}-${day}`
   }
 
-  // DD-MM-YY or DD/MM/YY (e.g., 17-01-25 -> 2025-01-17)
   const shortMatch = val.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2})$/)
   if (shortMatch) {
     const day = shortMatch[1].padStart(2, '0')
@@ -221,6 +218,115 @@ export default async function AnimalsMasterPage({
     return redirect(`/animals?msg=${encodeURIComponent(`Successfully imported ${inserts.length} animal(s) from CSV.`)}`)
   }
 
+  // 4. Bulk Weight Log Action
+  const bulkWeightLogAction = async (formData: FormData) => {
+    'use server'
+    const rawEntries = (formData.get('weightEntries') as string) || '[]'
+    const recorded_date = normalizeDateToISO((formData.get('recorded_date') as string) || '')
+    const notes = ((formData.get('notes') as string) || '').trim() || 'Weekly Shed Weigh-In'
+
+    let entries: Array<{ animal_id: string; weight_kg: number }> = []
+    try {
+      entries = JSON.parse(rawEntries)
+    } catch {
+      entries = []
+    }
+
+    const valid = entries.filter(e => e.animal_id && Number(e.weight_kg) > 0)
+    if (valid.length === 0) {
+      return redirect(`/animals?error=${encodeURIComponent('Enter at least one valid animal weight.')}`)
+    }
+
+    const supabaseClient = await createClient()
+    const inserts = valid.map(e => ({
+      farm_id: farm.id,
+      animal_id: e.animal_id,
+      weight_kg: Number(e.weight_kg),
+      recorded_date,
+      notes,
+    }))
+
+    const { error: wErr } = await supabaseClient.from('animal_weight_logs').insert(inserts)
+    if (wErr) return redirect(`/animals?error=${encodeURIComponent('Bulk weigh-in failed: ' + wErr.message)}`)
+
+    return redirect(`/animals?msg=${encodeURIComponent(`Logged weights for ${inserts.length} animal(s) on ${recorded_date}.`)}`)
+  }
+
+  // 5. Record Sale & Realized P&L Action
+  const recordSaleAction = async (formData: FormData) => {
+    'use server'
+    const animalId = (formData.get('animalId') as string) || ''
+    const salePrice = parseFloat((formData.get('sale_price') as string) || '0')
+    const saleDate = normalizeDateToISO((formData.get('sale_date') as string) || '')
+    const notes = ((formData.get('notes') as string) || '').trim()
+
+    if (!animalId || isNaN(salePrice) || salePrice <= 0) {
+      return redirect(`/animals?error=${encodeURIComponent('Please enter a valid sale price greater than 0.')}`)
+    }
+
+    const supabaseClient = await createClient()
+
+    const { data: animalRow } = await supabaseClient
+      .from('livestock_master')
+      .select('id, tag_id, cost_basis')
+      .eq('id', animalId)
+      .eq('farm_id', farm.id)
+      .single()
+
+    if (!animalRow) {
+      return redirect(`/animals?error=${encodeURIComponent('Animal not found.')}`)
+    }
+
+    const { data: existingFinLogs } = await supabaseClient
+      .from('animal_financial_logs')
+      .select('entry_type, amount')
+      .eq('animal_id', animalId)
+      .eq('farm_id', farm.id)
+
+    const loggedExpenses = (existingFinLogs || [])
+      .filter(f => f.entry_type === 'Expense')
+      .reduce((sum, f) => sum + (Number(f.amount) || 0), 0)
+
+    const totalCostOutflow = (Number(animalRow.cost_basis) || 0) + loggedExpenses
+    const realizedPnL = salePrice - totalCostOutflow
+    const pnlTag =
+      realizedPnL >= 0
+        ? `Realized Profit: +Rs. ${realizedPnL.toLocaleString()}`
+        : `Realized Loss: -Rs. ${Math.abs(realizedPnL).toLocaleString()}`
+
+    const { error: finErr } = await supabaseClient.from('animal_financial_logs').insert([
+      {
+        farm_id: farm.id,
+        animal_id: animalId,
+        entry_type: 'Revenue',
+        category: 'Sale / Qurbani',
+        amount: salePrice,
+        transaction_date: saleDate,
+        notes: notes ? `${notes} (${pnlTag})` : pnlTag,
+      },
+    ])
+
+    if (finErr) {
+      return redirect(`/animals?error=${encodeURIComponent('Failed to log sale revenue: ' + finErr.message)}`)
+    }
+
+    const { error: statusErr } = await supabaseClient
+      .from('livestock_master')
+      .update({ status: 'Sold' })
+      .eq('id', animalId)
+      .eq('farm_id', farm.id)
+
+    if (statusErr) {
+      return redirect(`/animals?error=${encodeURIComponent('Revenue logged, but status update failed: ' + statusErr.message)}`)
+    }
+
+    return redirect(
+      `/animals?msg=${encodeURIComponent(
+        `${animalRow.tag_id} marked Sold for Rs. ${salePrice.toLocaleString()} (${pnlTag}).`
+      )}`
+    )
+  }
+
   const totalCount = enrichedAnimals.length
   const selfAnimals = enrichedAnimals.filter(a => a.ownership === 'Self')
   const palaiAnimals = enrichedAnimals.filter(a => a.ownership !== 'Self')
@@ -312,12 +418,14 @@ export default async function AnimalsMasterPage({
           </div>
         )}
 
-        {/* Client View with Search, Filters, CSV Import/Export, Multi-Select & Self Break-Even */}
+        {/* Client View */}
         <AnimalsClientView
           animals={enrichedAnimals}
           deleteAction={deleteAction}
           bulkUpdateAction={bulkUpdateAction}
           bulkImportAction={bulkImportAction}
+          bulkWeightLogAction={bulkWeightLogAction}
+          recordSaleAction={recordSaleAction}
         />
       </div>
     </div>

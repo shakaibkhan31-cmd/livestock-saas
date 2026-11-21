@@ -27,6 +27,8 @@ interface AnimalsClientViewProps {
   deleteAction: (formData: FormData) => Promise<void>
   bulkUpdateAction: (formData: FormData) => Promise<void>
   bulkImportAction: (formData: FormData) => Promise<void>
+  bulkWeightLogAction: (formData: FormData) => Promise<void>
+  recordSaleAction: (formData: FormData) => Promise<void>
 }
 
 export function getSpeciesEmoji(species?: string | null): string {
@@ -46,14 +48,39 @@ export default function AnimalsClientView({
   deleteAction,
   bulkUpdateAction,
   bulkImportAction,
+  bulkWeightLogAction,
+  recordSaleAction,
 }: AnimalsClientViewProps) {
   const [searchQuery, setSearchQuery] = useState('')
   const [filterOwnership, setFilterOwnership] = useState('All')
+  const [filterSpecies, setFilterSpecies] = useState('All')
   const [selectedIds, setSelectedIds] = useState<string[]>([])
+
+  // CSV Import Modal State
   const [showImportModal, setShowImportModal] = useState(false)
   const [parsedRows, setParsedRows] = useState<Array<Record<string, string>>>([])
   const [csvError, setCsvError] = useState('')
   const [isImporting, setIsImporting] = useState(false)
+
+  // Bulk Weight Modal State
+  const [showWeightModal, setShowWeightModal] = useState(false)
+  const [weightDate, setWeightDate] = useState(() => new Date().toISOString().split('T')[0])
+  const [weightNotes, setWeightNotes] = useState('Weekly Shed Weigh-In')
+  const [weightInputs, setWeightInputs] = useState<Record<string, string>>({})
+  const [isSavingWeights, setIsSavingWeights] = useState(false)
+
+  // Sale / Settlement Modal State
+  const [saleAnimal, setSaleAnimal] = useState<AnimalItem | null>(null)
+  const [salePrice, setSalePrice] = useState('')
+  const [saleDate, setSaleDate] = useState(() => new Date().toISOString().split('T')[0])
+  const [saleNotes, setSaleNotes] = useState('')
+  const [isRecordingSale, setIsRecordingSale] = useState(false)
+
+  const speciesOptions = Array.from(
+    new Set(animals.map(a => (a.species || '').trim()).filter(Boolean))
+  ).sort()
+
+  const activeAnimals = animals.filter(a => a.status === 'Active')
 
   const filteredAnimals = animals.filter(animal => {
     const q = searchQuery.trim().toLowerCase()
@@ -65,7 +92,8 @@ export default function AnimalsClientView({
       (animal.client_name && animal.client_name.toLowerCase().includes(q))
 
     const matchesOwnership = filterOwnership === 'All' || animal.ownership === filterOwnership
-    return matchesSearch && matchesOwnership
+    const matchesSpecies = filterSpecies === 'All' || animal.species === filterSpecies
+    return matchesSearch && matchesOwnership && matchesSpecies
   })
 
   const toggleSelect = (id: string) => {
@@ -139,6 +167,7 @@ export default function AnimalsClientView({
       'Sex',
       'Status',
       'Cost Basis (PKR)',
+      'Latest Weight (KG)',
       'Break-Even Today (PKR)',
       'Break-Even Per KG (PKR)',
     ]
@@ -151,6 +180,7 @@ export default function AnimalsClientView({
       a.sex,
       a.status,
       a.cost_basis || 0,
+      a.breakEven?.latestWeight ?? '',
       a.ownership === 'Self' && a.breakEven ? a.breakEven.breakEvenToday : '',
       a.ownership === 'Self' && a.breakEven && a.breakEven.perKgToday !== null ? a.breakEven.perKgToday : '',
     ])
@@ -162,6 +192,14 @@ export default function AnimalsClientView({
     link.click()
     document.body.removeChild(link)
   }
+
+  const validWeightEntries = Object.entries(weightInputs)
+    .map(([animal_id, val]) => ({ animal_id, weight_kg: parseFloat(val) }))
+    .filter(item => !isNaN(item.weight_kg) && item.weight_kg > 0)
+
+  const parsedSalePrice = parseFloat(salePrice) || 0
+  const saleBreakEvenTarget = saleAnimal?.breakEven?.breakEvenToday ?? Number(saleAnimal?.cost_basis || 0)
+  const projectedNetPnL = parsedSalePrice - saleBreakEvenTarget
 
   return (
     <div className="space-y-4">
@@ -222,68 +260,119 @@ export default function AnimalsClientView({
 
       {/* Main Card */}
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-        {/* Search, Filter & Bulk CSV Toolbar */}
-        <div className="p-4 sm:p-6 border-b border-slate-100 flex flex-col lg:flex-row items-center justify-between gap-4 bg-slate-50/50">
-          <div className="w-full lg:w-80">
-            <input
-              type="text"
-              placeholder="Search by Tag ID, Species, Breed, Client..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full px-4 py-2 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-600 transition"
-            />
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto justify-between lg:justify-end">
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => setFilterOwnership('All')}
-                className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${
-                  filterOwnership === 'All' ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
-                }`}
-              >
-                All Stock
-              </button>
-              <button
-                type="button"
-                onClick={() => setFilterOwnership('Self')}
-                className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${
-                  filterOwnership === 'Self' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
-                }`}
-              >
-                Self Owned
-              </button>
-              <button
-                type="button"
-                onClick={() => setFilterOwnership('Client')}
-                className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${
-                  filterOwnership === 'Client' ? 'bg-purple-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
-                }`}
-              >
-                Palai (Client)
-              </button>
+        {/* Search, Filter & Bulk Tools Toolbar */}
+        <div className="p-4 sm:p-6 border-b border-slate-100 space-y-3 bg-slate-50/50">
+          <div className="flex flex-col lg:flex-row items-center justify-between gap-4">
+            <div className="w-full lg:w-80">
+              <input
+                type="text"
+                placeholder="Search by Tag ID, Species, Breed, Client..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full px-4 py-2 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-600 transition"
+              />
             </div>
 
-            <div className="h-5 w-px bg-slate-200 hidden sm:block mx-1"></div>
+            <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto justify-between lg:justify-end">
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setFilterOwnership('All')}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${
+                    filterOwnership === 'All' ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
+                  }`}
+                >
+                  All Stock
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFilterOwnership('Self')}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${
+                    filterOwnership === 'Self' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
+                  }`}
+                >
+                  Self Owned
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFilterOwnership('Client')}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${
+                    filterOwnership === 'Client' ? 'bg-purple-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
+                  }`}
+                >
+                  Palai (Client)
+                </button>
+              </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setShowImportModal(true)}
-                className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition"
-              >
-                ↑ Bulk CSV Import
-              </button>
-              <button
-                type="button"
-                onClick={exportFilteredCsv}
-                className="px-3 py-1.5 text-xs font-medium rounded-lg bg-white text-slate-700 border border-slate-200 hover:bg-slate-100 transition"
-              >
-                ↓ Export CSV
-              </button>
+              <div className="h-5 w-px bg-slate-200 hidden sm:block mx-1"></div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowWeightModal(true)}
+                  className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-50 text-amber-800 border border-amber-300 hover:bg-amber-100 transition"
+                >
+                  ⚖️ Bulk Weigh-In
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowImportModal(true)}
+                  className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition"
+                >
+                  ↑ Bulk CSV Import
+                </button>
+                <button
+                  type="button"
+                  onClick={exportFilteredCsv}
+                  className="px-3 py-1.5 text-xs font-medium rounded-lg bg-white text-slate-700 border border-slate-200 hover:bg-slate-100 transition"
+                >
+                  ↓ Export CSV
+                </button>
+              </div>
             </div>
           </div>
+
+          {/* Species Filter Pills */}
+          {speciesOptions.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-slate-200/70">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mr-1">
+                Species:
+              </span>
+              <button
+                type="button"
+                onClick={() => setFilterSpecies('All')}
+                className={`px-2.5 py-1 text-xs font-medium rounded-lg transition ${
+                  filterSpecies === 'All'
+                    ? 'bg-emerald-600 text-white shadow-xs'
+                    : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                All ({animals.length})
+              </button>
+              {speciesOptions.map(sp => {
+                const count = animals.filter(a => a.species === sp).length
+                const active = filterSpecies === sp
+                return (
+                  <button
+                    key={sp}
+                    type="button"
+                    onClick={() => setFilterSpecies(sp)}
+                    className={`px-2.5 py-1 text-xs font-medium rounded-lg transition inline-flex items-center gap-1 ${
+                      active
+                        ? 'bg-emerald-600 text-white shadow-xs'
+                        : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    <span>{getSpeciesEmoji(sp)}</span>
+                    <span>{sp}</span>
+                    <span className={`text-[10px] ${active ? 'text-emerald-100' : 'text-slate-400'}`}>
+                      ({count})
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          )}
         </div>
 
         {/* Table */}
@@ -373,7 +462,7 @@ export default function AnimalsClientView({
                             <div>
                               {animal.breakEven.perKgToday !== null && animal.breakEven.latestWeight ? (
                                 <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-mono font-bold bg-emerald-100 text-emerald-900 border border-emerald-300">
-                                  Rs. {animal.breakEven.perKgToday.toLocaleString()}/kg
+                                  Rs. {animal.breakEven.perKgToday.toLocaleString()}/kg ({animal.breakEven.latestWeight}kg)
                                 </span>
                               ) : (
                                 <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-medium bg-slate-100 text-slate-500 border border-slate-200">
@@ -387,17 +476,38 @@ export default function AnimalsClientView({
                         )}
                       </td>
                       <td className="px-5 py-4 whitespace-nowrap">
-                        <span className="inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                        <span className={`inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-full border ${
+                          animal.status === 'Sold'
+                            ? 'bg-amber-50 text-amber-800 border-amber-300'
+                            : animal.status === 'Active'
+                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                            : 'bg-slate-100 text-slate-700 border-slate-200'
+                        }`}>
                           {animal.status}
                         </span>
                       </td>
                       <td className="px-5 py-4 whitespace-nowrap text-sm font-semibold text-slate-900">
                         Rs. {Number(animal.cost_basis || 0).toLocaleString()}
                       </td>
-                      <td className="px-5 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2">
+                      <td className="px-5 py-4 whitespace-nowrap text-right text-sm font-medium space-x-1.5">
+                        {isSelf && animal.status === 'Active' && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSaleAnimal(animal)
+                              setSalePrice(
+                                animal.breakEven ? String(animal.breakEven.breakEvenToday) : ''
+                              )
+                              setSaleNotes('')
+                            }}
+                            className="inline-flex items-center px-2.5 py-1.5 rounded-lg text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 transition text-xs font-semibold"
+                          >
+                            💰 Sell
+                          </button>
+                        )}
                         <Link
                           href={`/animals/${animal.id}/edit`}
-                          className="inline-flex items-center px-3 py-1.5 rounded-lg text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 transition text-xs font-medium"
+                          className="inline-flex items-center px-2.5 py-1.5 rounded-lg text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 transition text-xs font-medium"
                         >
                           Edit
                         </Link>
@@ -405,7 +515,7 @@ export default function AnimalsClientView({
                           <input type="hidden" name="animalId" value={animal.id} />
                           <button
                             type="submit"
-                            className="inline-flex items-center px-3 py-1.5 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 transition text-xs font-medium"
+                            className="inline-flex items-center px-2.5 py-1.5 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 transition text-xs font-medium"
                           >
                             Delete
                           </button>
@@ -425,6 +535,255 @@ export default function AnimalsClientView({
           </table>
         </div>
       </div>
+
+      {/* Bulk Weight Logging Modal */}
+      {showWeightModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-2xl w-full overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-900 text-white">
+              <div>
+                <h3 className="text-base font-bold">⚖️ Bulk Shed Weigh-In</h3>
+                <p className="text-xs text-slate-300">Enter current weights (KG) for one or more active animals</p>
+              </div>
+              <button
+                type="button"
+                disabled={isSavingWeights}
+                onClick={() => setShowWeightModal(false)}
+                className="text-slate-300 hover:text-white font-bold text-lg"
+              >
+                ×
+              </button>
+            </div>
+
+            <form
+              action={async (formData) => {
+                setIsSavingWeights(true)
+                try {
+                  await bulkWeightLogAction(formData)
+                } finally {
+                  setIsSavingWeights(false)
+                }
+              }}
+              className="p-6 space-y-4"
+            >
+              <input type="hidden" name="weightEntries" value={JSON.stringify(validWeightEntries)} />
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Weigh-In Date *</label>
+                  <input
+                    name="recorded_date"
+                    type="date"
+                    required
+                    value={weightDate}
+                    onChange={(e) => setWeightDate(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Batch Notes</label>
+                  <input
+                    name="notes"
+                    type="text"
+                    value={weightNotes}
+                    onChange={(e) => setWeightNotes(e.target.value)}
+                    placeholder="e.g., Weekly Shed Weigh-In"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
+                  />
+                </div>
+              </div>
+
+              <div className="max-h-72 overflow-y-auto border border-slate-200 rounded-xl divide-y divide-slate-100">
+                {activeAnimals.length > 0 ? (
+                  activeAnimals.map(a => (
+                    <div key={a.id} className="px-4 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50">
+                      <div className="flex items-center gap-2.5">
+                        <span className="text-base">{getSpeciesEmoji(a.species)}</span>
+                        <div>
+                          <span className="font-mono font-bold text-xs text-slate-900">{a.tag_id}</span>
+                          <span className="text-xs text-slate-500 ml-2">
+                            {a.species} {a.breed_name ? `(${a.breed_name})` : ''}
+                          </span>
+                          {a.breakEven?.latestWeight && (
+                            <p className="text-[11px] text-slate-400">
+                              Last recorded: {a.breakEven.latestWeight} kg
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="0"
+                          placeholder="kg"
+                          value={weightInputs[a.id] || ''}
+                          onChange={(e) =>
+                            setWeightInputs(prev => ({
+                              ...prev,
+                              [a.id]: e.target.value,
+                            }))
+                          }
+                          className="w-24 px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-right text-slate-900 focus:ring-2 focus:ring-green-600"
+                        />
+                        <span className="text-xs text-slate-400">kg</span>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <p className="p-6 text-center text-xs text-slate-400">No active animals available.</p>
+                )}
+              </div>
+
+              <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+                <span className="text-xs text-slate-500">
+                  <strong>{validWeightEntries.length}</strong> animal weight(s) ready to log
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={isSavingWeights}
+                    onClick={() => setShowWeightModal(false)}
+                    className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-medium hover:bg-slate-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={validWeightEntries.length === 0 || isSavingWeights}
+                    className="px-5 py-2 rounded-xl bg-green-600 text-white text-xs font-semibold hover:bg-green-700 disabled:opacity-40 transition"
+                  >
+                    {isSavingWeights
+                      ? 'Saving Weights...'
+                      : `Save ${validWeightEntries.length} Weight(s)`}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Sale / Exit Settlement Modal */}
+      {saleAnimal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-md w-full overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-emerald-950 text-white">
+              <div>
+                <h3 className="text-base font-bold">💰 Record Animal Sale &amp; Realized P&amp;L</h3>
+                <p className="text-xs text-emerald-200 font-mono">
+                  {getSpeciesEmoji(saleAnimal.species)} {saleAnimal.tag_id} • {saleAnimal.species}
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={isRecordingSale}
+                onClick={() => setSaleAnimal(null)}
+                className="text-emerald-200 hover:text-white font-bold text-lg"
+              >
+                ×
+              </button>
+            </div>
+
+            <form
+              action={async (formData) => {
+                setIsRecordingSale(true)
+                try {
+                  await recordSaleAction(formData)
+                } finally {
+                  setIsRecordingSale(false)
+                }
+              }}
+              className="p-6 space-y-4"
+            >
+              <input type="hidden" name="animalId" value={saleAnimal.id} />
+
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between text-xs">
+                <span className="text-slate-600">Today&apos;s Break-Even Target:</span>
+                <span className="font-mono font-bold text-slate-900">
+                  Rs. {saleBreakEvenTarget.toLocaleString()}
+                </span>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Final Sale Price (PKR) *</label>
+                <input
+                  name="sale_price"
+                  type="number"
+                  step="1"
+                  min="1"
+                  required
+                  value={salePrice}
+                  onChange={(e) => setSalePrice(e.target.value)}
+                  placeholder="e.g., 45000"
+                  className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-sm font-mono font-bold text-slate-900 focus:ring-2 focus:ring-emerald-600"
+                />
+              </div>
+
+              {parsedSalePrice > 0 && (
+                <div
+                  className={`p-3.5 rounded-xl border text-xs flex items-center justify-between ${
+                    projectedNetPnL >= 0
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                      : 'bg-rose-50 border-rose-200 text-rose-900'
+                  }`}
+                >
+                  <span className="font-semibold">
+                    {projectedNetPnL >= 0 ? 'Realized Net Profit:' : 'Realized Net Loss:'}
+                  </span>
+                  <span className="font-mono font-bold text-sm">
+                    {projectedNetPnL >= 0
+                      ? `+Rs. ${projectedNetPnL.toLocaleString()}`
+                      : `-Rs. ${Math.abs(projectedNetPnL).toLocaleString()}`}
+                  </span>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Sale Date *</label>
+                <input
+                  name="sale_date"
+                  type="date"
+                  required
+                  value={saleDate}
+                  onChange={(e) => setSaleDate(e.target.value)}
+                  className="w-full px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Buyer / Mandi Notes</label>
+                <input
+                  name="notes"
+                  type="text"
+                  value={saleNotes}
+                  onChange={(e) => setSaleNotes(e.target.value)}
+                  placeholder="e.g., Sold to Qurbani buyer / Sohrab Goth Mandi"
+                  className="w-full px-3.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={isRecordingSale}
+                  onClick={() => setSaleAnimal(null)}
+                  className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-medium hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={parsedSalePrice <= 0 || isRecordingSale}
+                  className="px-5 py-2 rounded-xl bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 disabled:opacity-40 transition"
+                >
+                  {isRecordingSale ? 'Recording Sale...' : 'Confirm Sale & Close'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Bulk CSV Import Modal */}
       {showImportModal && (

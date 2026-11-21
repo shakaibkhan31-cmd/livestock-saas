@@ -1,291 +1,304 @@
-'use client'
-
-import { useEffect, useState } from 'react'
-import { useParams } from 'next/navigation'
+import { createClient } from '@/utils/supabase/server'
+import { redirect } from 'next/navigation'
 import Link from 'next/link'
-import { createClient } from '@/utils/supabase/client'
+import {
+  calculateAdgKgPerDay,
+  calculateAnimalBreakEven,
+  daysBetweenDateStrings,
+  formatDateDDMMYYYY,
+} from '@/utils/breakeven'
 
-function formatDateDDMMYYYY(dateInput?: string | null): string {
-  if (!dateInput) return 'N/A'
-  const datePart = String(dateInput).split('T')[0]
-  const parts = datePart.split('-')
-  if (parts.length === 3) {
-    const [year, month, day] = parts
-    return `${day}/${month}/${year}`
-  }
-  const d = new Date(dateInput)
-  if (isNaN(d.getTime())) return 'N/A'
-  const day = String(d.getDate()).padStart(2, '0')
-  const month = String(d.getMonth() + 1).padStart(2, '0')
-  const year = d.getFullYear()
-  return `${day}/${month}/${year}`
-}
+export default async function AnimalStatementPage({
+  params,
+}: {
+  params: Promise<{ id: string }>
+}) {
+  const { id } = await params
+  const supabase = await createClient()
 
-export default function AnimalStatementPage() {
-  const params = useParams()
-  const id = params?.id as string
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return redirect('/login')
 
-  const [loading, setLoading] = useState(true)
-  const [farm, setFarm] = useState<{ farm_name: string } | null>(null)
-  const [animal, setAnimal] = useState<any>(null)
-  const [weightLogs, setWeightLogs] = useState<any[]>([])
-  const [financialLogs, setFinancialLogs] = useState<any[]>([])
-  const [medicalLogs, setMedicalLogs] = useState<any[]>([])
+  const { data: farm } = await supabase
+    .from('farms')
+    .select('id, farm_name')
+    .eq('owner_id', user.id)
+    .single()
 
-  useEffect(() => {
-    async function fetchData() {
-      if (!id) return
-      const supabase = createClient()
+  if (!farm) return redirect('/onboarding')
 
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) {
-        window.location.href = '/login'
-        return
-      }
+  const { data: animal } = await supabase
+    .from('livestock_master')
+    .select('*')
+    .eq('id', id)
+    .eq('farm_id', farm.id)
+    .single()
 
-      const { data: farmData } = await supabase
-        .from('farms')
-        .select('id, farm_name')
-        .eq('owner_id', user.id)
-        .single()
+  if (!animal) return redirect('/animals')
 
-      if (!farmData) {
-        window.location.href = '/onboarding'
-        return
-      }
-      setFarm(farmData)
+  const [
+    { data: weightLogs },
+    { data: financialLogs },
+    { data: medicalLogs },
+  ] = await Promise.all([
+    supabase
+      .from('animal_weight_logs')
+      .select('*')
+      .eq('animal_id', id)
+      .order('recorded_date', { ascending: false }),
+    supabase
+      .from('animal_financial_logs')
+      .select('*')
+      .eq('animal_id', id)
+      .order('transaction_date', { ascending: false }),
+    supabase
+      .from('animal_medical_logs')
+      .select('*')
+      .eq('animal_id', id)
+      .order('administered_date', { ascending: false }),
+  ])
 
-      const { data: animalData } = await supabase
-        .from('livestock_master')
-        .select('*')
-        .eq('id', id)
-        .eq('farm_id', farmData.id)
-        .single()
+  const todayStr = new Date().toISOString().split('T')[0]
+  const isSelfOwned = animal.ownership === 'Self'
+  const purchaseCost = Number(animal.cost_basis || 0)
 
-      if (!animalData) {
-        window.location.href = '/animals'
-        return
-      }
-      setAnimal(animalData)
+  const allExpenses = (financialLogs || []).filter(f => f.entry_type === 'Expense')
+  const overheadExpenses = allExpenses
+    .filter(f => f.category === 'Farm Overhead / Deficit Share')
+    .reduce((sum, f) => sum + (Number(f.amount) || 0), 0)
+  const directExpenses = allExpenses
+    .filter(f => f.category !== 'Farm Overhead / Deficit Share')
+    .reduce((sum, f) => sum + (Number(f.amount) || 0), 0)
 
-      const { data: weights } = await supabase
-        .from('animal_weight_logs')
-        .select('*')
-        .eq('animal_id', id)
-        .order('recorded_date', { ascending: false })
-      setWeightLogs(weights || [])
-
-      const { data: financials } = await supabase
-        .from('animal_financial_logs')
-        .select('*')
-        .eq('animal_id', id)
-        .order('transaction_date', { ascending: false })
-      setFinancialLogs(financials || [])
-
-      const { data: medicals } = await supabase
-        .from('animal_medical_logs')
-        .select('*')
-        .eq('animal_id', id)
-        .order('administered_date', { ascending: false })
-      setMedicalLogs(medicals || [])
-
-      setLoading(false)
-    }
-
-    fetchData()
-  }, [id])
-
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-white flex items-center justify-center text-slate-500 text-sm font-mono">
-        Loading Official Statement...
-      </div>
-    )
-  }
-
-  const latestWeight = weightLogs.length > 0 ? Number(weightLogs[0].weight_kg) : null
-  const initialWeight = weightLogs.length > 0 ? Number(weightLogs[weightLogs.length - 1].weight_kg) : null
-  const netGain = latestWeight !== null && initialWeight !== null ? (latestWeight - initialWeight).toFixed(1) : null
-
-  const isSelfOwned = animal?.ownership === 'Self'
-
-  const purchaseCost = Number(animal?.cost_basis || 0)
-  const loggedExpenses = financialLogs
-    .filter(f => f.entry_type === 'Expense')
-    .reduce((sum, f) => sum + Number(f.amount || 0), 0)
-  const loggedRevenue = financialLogs
+  const totalLoggedExpenses = overheadExpenses + directExpenses
+  const totalRevenue = (financialLogs || [])
     .filter(f => f.entry_type === 'Revenue')
-    .reduce((sum, f) => sum + Number(f.amount || 0), 0)
+    .reduce((sum, f) => sum + (Number(f.amount) || 0), 0)
 
-  const totalCostOutflow = (isSelfOwned ? purchaseCost : 0) + loggedExpenses
-  const netPnL = loggedRevenue - totalCostOutflow
+  const totalCostOutflow = (isSelfOwned ? purchaseCost : 0) + totalLoggedExpenses
+  const netPnL = totalRevenue - totalCostOutflow
+
+  const latestWeight = weightLogs && weightLogs.length > 0 ? Number(weightLogs[0].weight_kg) : null
+  const adgKgPerDay = calculateAdgKgPerDay(weightLogs)
+  const acqDateStr = animal.acquisition_date ? String(animal.acquisition_date).split('T')[0] : null
+  const activeDays = acqDateStr ? daysBetweenDateStrings(acqDateStr, todayStr, 1) : 30
+
+  const breakEven = calculateAnimalBreakEven({
+    purchaseCost: isSelfOwned ? purchaseCost : 0,
+    loggedExpenses: totalLoggedExpenses,
+    activeDays,
+    latestWeight,
+    adgKgPerDay,
+  })
 
   return (
-    <div className="min-h-screen bg-white text-slate-900 p-8 max-w-4xl mx-auto space-y-6">
-      <div className="flex items-center justify-between border-b pb-4 print:hidden">
-        <Link href={`/animals/${id}`} className="text-sm font-semibold text-indigo-600 hover:underline">
-          &larr; Back to Live Profile
-        </Link>
-        <button
-          onClick={() => window.print()}
-          className="px-4 py-2 bg-slate-900 text-white rounded-xl text-sm font-bold shadow hover:bg-slate-800 transition"
-        >
-          🖨️ Print / Save as PDF
-        </button>
-      </div>
+    <div className="min-h-screen bg-white text-slate-900 py-8 px-6 sm:px-12">
+      <div className="max-w-4xl mx-auto space-y-6">
+        {/* Top Action Bar (Hidden when printing) */}
+        <div className="flex items-center justify-between border-b border-slate-200 pb-4 print:hidden">
+          <Link
+            href={`/animals/${animal.id}`}
+            className="text-xs font-semibold text-slate-600 hover:text-slate-900"
+          >
+            ← Back to Animal Profile
+          </Link>
+          <span className="text-xs text-slate-400">
+            Press <strong>Ctrl + P</strong> (or Cmd + P) to Print / Save PDF
+          </span>
+        </div>
 
-      <div className="text-center border-b-2 border-slate-900 pb-6 space-y-1">
-        <h1 className="text-3xl font-extrabold uppercase tracking-wider">{farm?.farm_name}</h1>
-        <p className="text-sm text-slate-500 uppercase tracking-widest font-semibold">Official Animal Statement & Audit Report</p>
-        <p className="text-xs font-mono text-slate-400">Generated on: {new Date().toLocaleDateString()}</p>
-      </div>
-
-      <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-200 text-sm">
-        <div>
-          <p className="text-slate-500">Tag ID: <strong className="text-slate-900 font-mono text-base">{animal?.tag_id}</strong></p>
-          <p className="text-slate-500">Species / Breed: <strong className="text-slate-900">{animal?.species} {animal?.breed_name ? `• ${animal.breed_name}` : ''}</strong></p>
-          <p className="text-slate-500">Sex: <strong className="text-slate-900">{animal?.sex}</strong></p>
-        </div>
-        <div>
-          <p className="text-slate-500">Ownership: <strong className="text-slate-900">{isSelfOwned ? 'Farm Owned' : `Palai Client (${animal?.client_name})`}</strong></p>
-          <p className="text-slate-500">Onboarding Date: <strong className="text-slate-900 font-mono">{formatDateDDMMYYYY(animal?.acquisition_date)}</strong></p>
-          <p className="text-slate-500">Status: <strong className="text-emerald-700">{animal?.status}</strong></p>
-        </div>
-      </div>
-
-      {/* Summary Cards: Conditional P&L display based on ownership */}
-      <div className={`grid gap-4 text-center ${isSelfOwned ? 'grid-cols-3' : 'grid-cols-2'}`}>
-        <div className="p-4 bg-slate-100 rounded-xl border border-slate-200">
-          <p className="text-xs text-slate-500 uppercase font-semibold">Latest Weight</p>
-          <p className="text-xl font-bold font-mono text-slate-900 mt-1">{latestWeight !== null ? `${latestWeight} kg` : 'N/A'}</p>
-        </div>
-        <div className="p-4 bg-slate-100 rounded-xl border border-slate-200">
-          <p className="text-xs text-slate-500 uppercase font-semibold">Net Weight Gain</p>
-          <p className="text-xl font-bold font-mono text-emerald-700 mt-1">{netGain !== null ? `${netGain} kg` : 'N/A'}</p>
-        </div>
-        
-        {isSelfOwned && (
-          <div className="p-4 bg-slate-100 rounded-xl border border-slate-200">
-            <p className="text-xs text-slate-500 uppercase font-semibold">Net P&L (Profit/Loss)</p>
-            <p className={`text-xl font-bold font-mono mt-1 ${netPnL >= 0 ? 'text-emerald-700' : 'text-rose-600'}`}>
-              Rs. {netPnL.toLocaleString()}
+        {/* Statement Header */}
+        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 border-b-2 border-slate-900 pb-5">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-widest text-emerald-700">{farm.farm_name}</p>
+            <h1 className="text-2xl font-bold text-slate-900 mt-1">
+              Livestock Ledger &amp; Break-Even Statement
+            </h1>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Generated on {formatDateDDMMYYYY(todayStr)} • Active Tenure: {activeDays} days
             </p>
           </div>
-        )}
-      </div>
+          <div className="text-left sm:text-right font-mono">
+            <p className="text-xl font-bold text-slate-900">{animal.tag_id}</p>
+            <p className="text-xs text-slate-600">
+              {animal.species} {animal.breed_name ? `(${animal.breed_name})` : ''} • {animal.sex}
+            </p>
+            <p className="text-xs font-semibold text-slate-700 mt-0.5">
+              {isSelfOwned ? 'Ownership: Farm-Owned (Self)' : `Palai Client: ${animal.client_name || 'N/A'}`}
+            </p>
+          </div>
+        </div>
 
-      {/* Financial Ledger */}
-      <div className="space-y-2">
-        <h3 className="font-bold text-base text-slate-900">
-          {isSelfOwned ? 'Financial Ledger' : 'Boarding Fee & Payments History'}
-        </h3>
-        <table className="min-w-full divide-y divide-slate-200 border text-xs">
-          <thead className="bg-slate-100">
-            <tr>
-              <th className="px-3 py-2 text-left font-semibold text-slate-700">Date</th>
-              <th className="px-3 py-2 text-left font-semibold text-slate-700">Type</th>
-              <th className="px-3 py-2 text-left font-semibold text-slate-700">Category</th>
-              <th className="px-3 py-2 text-left font-semibold text-slate-700">Amount (PKR)</th>
-              <th className="px-3 py-2 text-left font-semibold text-slate-700">Notes</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-200">
-            {isSelfOwned && purchaseCost > 0 && (
+        {/* Financial & Break-Even Summary Grid */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50">
+            <p className="text-[10px] font-bold uppercase text-slate-500">Purchase Cost Basis</p>
+            <p className="text-base font-bold font-mono text-slate-900 mt-1">
+              Rs. {(isSelfOwned ? purchaseCost : 0).toLocaleString()}
+            </p>
+          </div>
+
+          <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50">
+            <p className="text-[10px] font-bold uppercase text-slate-500">Direct + Overhead Costs</p>
+            <p className="text-base font-bold font-mono text-rose-700 mt-1">
+              Rs. {totalLoggedExpenses.toLocaleString()}
+            </p>
+            <p className="text-[10px] text-slate-500">
+              Direct: Rs. {directExpenses.toLocaleString()} • Overhead: Rs. {overheadExpenses.toLocaleString()}
+            </p>
+          </div>
+
+          {isSelfOwned ? (
+            <div className="p-3.5 rounded-xl border border-amber-300 bg-amber-50">
+              <p className="text-[10px] font-bold uppercase text-amber-900">Break-Even Target (3% Comm.)</p>
+              <p className="text-base font-bold font-mono text-slate-900 mt-1">
+                Rs. {breakEven.breakEvenToday.toLocaleString()}
+              </p>
+              <p className="text-[10px] text-amber-800 font-mono">
+                {breakEven.perKgToday !== null && latestWeight
+                  ? `Rs. ${breakEven.perKgToday.toLocaleString()}/kg (@ ${latestWeight} kg)`
+                  : `Burn: Rs. ${breakEven.dailyBurnRate.toLocaleString()}/day`}
+              </p>
+            </div>
+          ) : (
+            <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50">
+              <p className="text-[10px] font-bold uppercase text-slate-500">Latest Weight</p>
+              <p className="text-base font-bold font-mono text-slate-900 mt-1">
+                {latestWeight !== null ? `${latestWeight} kg` : 'N/A'}
+              </p>
+            </div>
+          )}
+
+          <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50">
+            <p className="text-[10px] font-bold uppercase text-slate-500">
+              {animal.status === 'Sold' ? 'Realized Net P&L' : 'Current Net Position'}
+            </p>
+            <p className={`text-base font-bold font-mono mt-1 ${netPnL >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+              {netPnL >= 0 ? `+Rs. ${netPnL.toLocaleString()}` : `-Rs. ${Math.abs(netPnL).toLocaleString()}`}
+            </p>
+            <p className="text-[10px] text-slate-500">Revenue: Rs. {totalRevenue.toLocaleString()}</p>
+          </div>
+        </div>
+
+        {/* Itemized Financial Ledger */}
+        <div className="space-y-2">
+          <h2 className="text-xs font-bold uppercase tracking-wider text-slate-600">
+            Itemized Cost &amp; Revenue Ledger
+          </h2>
+          <table className="w-full border border-slate-200 text-xs">
+            <thead className="bg-slate-100 border-b border-slate-200">
               <tr>
-                <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(animal?.acquisition_date)}</td>
-                <td className="px-3 py-2 font-semibold text-rose-600">Expense</td>
-                <td className="px-3 py-2">Cost Basis / Purchase</td>
-                <td className="px-3 py-2 font-mono font-bold">- Rs. {purchaseCost.toLocaleString()}</td>
-                <td className="px-3 py-2">Initial Acquisition</td>
+                <th className="px-3 py-2 text-left font-semibold">Date</th>
+                <th className="px-3 py-2 text-left font-semibold">Type</th>
+                <th className="px-3 py-2 text-left font-semibold">Category</th>
+                <th className="px-3 py-2 text-left font-semibold">Details</th>
+                <th className="px-3 py-2 text-right font-semibold">Amount (PKR)</th>
               </tr>
-            )}
-            {financialLogs
-              .filter(f => isSelfOwned || f.entry_type === 'Revenue')
-              .map(f => (
+            </thead>
+            <tbody className="divide-y divide-slate-200">
+              {isSelfOwned && purchaseCost > 0 && (
+                <tr>
+                  <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(animal.acquisition_date)}</td>
+                  <td className="px-3 py-2">Cost Basis</td>
+                  <td className="px-3 py-2 font-semibold">Initial Purchase Price</td>
+                  <td className="px-3 py-2 text-slate-500">Onboarding cost basis</td>
+                  <td className="px-3 py-2 text-right font-mono font-semibold text-rose-700">
+                    -Rs. {purchaseCost.toLocaleString()}
+                  </td>
+                </tr>
+              )}
+              {(financialLogs || []).map(f => (
                 <tr key={f.id}>
                   <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(f.transaction_date)}</td>
-                  <td className={`px-3 py-2 font-semibold ${f.entry_type === 'Revenue' ? 'text-emerald-700' : 'text-rose-600'}`}>{f.entry_type}</td>
-                  <td className="px-3 py-2">{f.category}</td>
-                  <td className={`px-3 py-2 font-mono font-bold ${f.entry_type === 'Revenue' ? 'text-emerald-700' : 'text-rose-600'}`}>
-                    {f.entry_type === 'Revenue' ? '+' : '-'} Rs. {Number(f.amount).toLocaleString()}
+                  <td className="px-3 py-2">{f.entry_type}</td>
+                  <td className="px-3 py-2 font-semibold">{f.category}</td>
+                  <td className="px-3 py-2 text-slate-500">{f.notes || '—'}</td>
+                  <td
+                    className={`px-3 py-2 text-right font-mono font-semibold ${
+                      f.entry_type === 'Revenue' ? 'text-emerald-700' : 'text-rose-700'
+                    }`}
+                  >
+                    {f.entry_type === 'Revenue' ? '+' : '-'}Rs. {Number(f.amount).toLocaleString()}
                   </td>
-                  <td className="px-3 py-2">{f.notes || '—'}</td>
                 </tr>
               ))}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Medical, Deworming & Vaccination History */}
-      <div className="space-y-2 pt-4">
-        <h3 className="font-bold text-base text-slate-900">Medical, Deworming & Vaccination History</h3>
-        <table className="min-w-full divide-y divide-slate-200 border text-xs">
-          <thead className="bg-slate-100">
-            <tr>
-              <th className="px-3 py-2 text-left font-semibold text-slate-700">Date Given</th>
-              <th className="px-3 py-2 text-left font-semibold text-slate-700">Protocol Type</th>
-              <th className="px-3 py-2 text-left font-semibold text-slate-700">Medicine / Vaccine</th>
-              <th className="px-3 py-2 text-left font-semibold text-slate-700">Dosage</th>
-              <th className="px-3 py-2 text-left font-semibold text-slate-700">Next Due</th>
-              <th className="px-3 py-2 text-left font-semibold text-slate-700">Notes</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-200">
-            {medicalLogs.length > 0 ? (
-              medicalLogs.map(med => (
-                <tr key={med.id}>
-                  <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(med.administered_date)}</td>
-                  <td className="px-3 py-2 font-semibold text-blue-700">{med.treatment_type}</td>
-                  <td className="px-3 py-2 font-semibold text-slate-900">{med.medicine_name}</td>
-                  <td className="px-3 py-2">{med.dosage || '—'}</td>
-                  <td className="px-3 py-2 font-mono">{med.next_due_date ? formatDateDDMMYYYY(med.next_due_date) : '—'}</td>
-                  <td className="px-3 py-2">{med.notes || '—'}</td>
+              {(!financialLogs || financialLogs.length === 0) && (!isSelfOwned || purchaseCost <= 0) && (
+                <tr>
+                  <td colSpan={5} className="px-3 py-4 text-center text-slate-400">
+                    No financial entries recorded.
+                  </td>
                 </tr>
-              ))
-            ) : (
-              <tr>
-                <td colSpan={6} className="px-3 py-4 text-center text-slate-400">
-                  No medical, deworming, or vaccination records logged yet.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+              )}
+            </tbody>
+          </table>
+        </div>
 
-      {/* Weight Progression History */}
-      <div className="space-y-2 pt-4">
-        <h3 className="font-bold text-base text-slate-900">Weight Progression History</h3>
-        <table className="min-w-full divide-y divide-slate-200 border text-xs">
-          <thead className="bg-slate-100">
-            <tr>
-              <th className="px-3 py-2 text-left font-semibold text-slate-700">Date</th>
-              <th className="px-3 py-2 text-left font-semibold text-slate-700">Weight (KG)</th>
-              <th className="px-3 py-2 text-left font-semibold text-slate-700">Notes</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-200">
-            {weightLogs.length > 0 ? (
-              weightLogs.map(w => (
-                <tr key={w.id}>
-                  <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(w.recorded_date)}</td>
-                  <td className="px-3 py-2 font-mono font-bold text-slate-900">{w.weight_kg} kg</td>
-                  <td className="px-3 py-2">{w.notes || '—'}</td>
+        {/* Weight & Medical Summary */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="space-y-2">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-600">Weight History</h2>
+            <table className="w-full border border-slate-200 text-xs">
+              <thead className="bg-slate-100 border-b border-slate-200">
+                <tr>
+                  <th className="px-3 py-2 text-left font-semibold">Date</th>
+                  <th className="px-3 py-2 text-left font-semibold">Weight</th>
+                  <th className="px-3 py-2 text-left font-semibold">Notes</th>
                 </tr>
-              ))
-            ) : (
-              <tr>
-                <td colSpan={3} className="px-3 py-4 text-center text-slate-400">
-                  No weight logs recorded yet.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+              </thead>
+              <tbody className="divide-y divide-slate-200">
+                {weightLogs && weightLogs.length > 0 ? (
+                  weightLogs.map(w => (
+                    <tr key={w.id}>
+                      <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(w.recorded_date)}</td>
+                      <td className="px-3 py-2 font-mono font-bold">{w.weight_kg} kg</td>
+                      <td className="px-3 py-2 text-slate-500">{w.notes || '—'}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={3} className="px-3 py-4 text-center text-slate-400">
+                      No weight logs recorded.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
 
-      <div className="pt-8 text-center text-xs text-slate-400 border-t mt-12">
-        <p>{farm?.farm_name} • Certified Livestock Management ERP Statement</p>
+          <div className="space-y-2">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-600">Medical &amp; Vaccination Log</h2>
+            <table className="w-full border border-slate-200 text-xs">
+              <thead className="bg-slate-100 border-b border-slate-200">
+                <tr>
+                  <th className="px-3 py-2 text-left font-semibold">Date</th>
+                  <th className="px-3 py-2 text-left font-semibold">Protocol</th>
+                  <th className="px-3 py-2 text-left font-semibold">Next Due</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-200">
+                {medicalLogs && medicalLogs.length > 0 ? (
+                  medicalLogs.map(m => (
+                    <tr key={m.id}>
+                      <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(m.administered_date)}</td>
+                      <td className="px-3 py-2">
+                        <strong>{m.treatment_type}:</strong> {m.medicine_name}
+                      </td>
+                      <td className="px-3 py-2 font-mono">
+                        {m.next_due_date ? formatDateDDMMYYYY(m.next_due_date) : '—'}
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={3} className="px-3 py-4 text-center text-slate-400">
+                      No medical records logged.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </div>
   )
