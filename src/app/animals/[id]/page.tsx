@@ -7,6 +7,12 @@ import {
   daysBetweenDateStrings,
   formatDateDDMMYYYY,
 } from '@/utils/breakeven'
+import {
+  applyMortalityEmergencyClaim,
+  applySaleProceedsSplitToWallets,
+  computeSaleProceedsSplit,
+  ensureDefaultWallets,
+} from '@/utils/wallets'
 
 export default async function AnimalDetailPage({
   params,
@@ -14,6 +20,7 @@ export default async function AnimalDetailPage({
 }: {
   params: Promise<{ id: string }>
   searchParams: Promise<{
+    msg?: string
     error?: string
     editLogId?: string
     commPct?: string
@@ -23,6 +30,7 @@ export default async function AnimalDetailPage({
 }) {
   const { id } = await params
   const resolvedSearchParams = await searchParams
+  const statusMessage = resolvedSearchParams.msg
   const errorMessage = resolvedSearchParams.error
   const editLogId = resolvedSearchParams.editLogId
 
@@ -53,26 +61,125 @@ export default async function AnimalDetailPage({
 
   if (!animal) return redirect('/animals')
 
-  // Fetch weight logs
-  const { data: weightLogs } = await supabase
-    .from('animal_weight_logs')
-    .select('*')
-    .eq('animal_id', id)
-    .order('recorded_date', { ascending: false })
+  // Fetch weight logs, financial logs, medical logs, and wallets
+  const [
+    { data: weightLogs },
+    { data: financialLogs },
+    { data: medicalLogs },
+    wallets,
+  ] = await Promise.all([
+    supabase
+      .from('animal_weight_logs')
+      .select('*')
+      .eq('animal_id', id)
+      .order('recorded_date', { ascending: false }),
+    supabase
+      .from('animal_financial_logs')
+      .select('*')
+      .eq('animal_id', id)
+      .order('transaction_date', { ascending: false }),
+    supabase
+      .from('animal_medical_logs')
+      .select('*')
+      .eq('animal_id', id)
+      .order('administered_date', { ascending: false }),
+    ensureDefaultWallets(supabase, farm.id),
+  ])
 
-  // Fetch financial logs
-  const { data: financialLogs } = await supabase
-    .from('animal_financial_logs')
-    .select('*')
-    .eq('animal_id', id)
-    .order('transaction_date', { ascending: false })
+  const emergencyWallet = wallets.find(w => w.wallet_type === 'EMERGENCY_MORTALITY')
+  const emergencyBalance = Math.max(0, Number(emergencyWallet?.current_balance || 0))
 
-  // Fetch medical & vaccination logs
-  const { data: medicalLogs } = await supabase
-    .from('animal_medical_logs')
-    .select('*')
-    .eq('animal_id', id)
-    .order('administered_date', { ascending: false })
+  // Server Action: Update Status (Active / Sold / Deceased) with Phase 4 Wallet Rules
+  const updateAnimalStatus = async (formData: FormData) => {
+    'use server'
+    const newStatus = ((formData.get('status') as string) || 'Active').trim()
+    const statusDate =
+      ((formData.get('status_date') as string) || '').trim() ||
+      new Date().toISOString().split('T')[0]
+    const salePriceRaw = ((formData.get('sale_price') as string) || '').trim()
+    const salePrice = salePriceRaw ? parseFloat(salePriceRaw) : 0
+    const statusNotes = ((formData.get('status_notes') as string) || '').trim()
+
+    if (newStatus === 'Sold' && (isNaN(salePrice) || salePrice <= 0)) {
+      return redirect(
+        `/animals/${id}?error=${encodeURIComponent(
+          'Please enter a valid Sale Price (PKR) when marking an animal as Sold.'
+        )}`
+      )
+    }
+
+    const supabaseClient = await createClient()
+
+    const { error: updErr } = await supabaseClient
+      .from('livestock_master')
+      .update({
+        status: newStatus,
+        status_date: newStatus === 'Active' ? null : statusDate,
+        sale_price: newStatus === 'Sold' ? salePrice : null,
+      })
+      .eq('id', id)
+      .eq('farm_id', farm.id)
+
+    if (updErr) {
+      return redirect(`/animals/${id}?error=${encodeURIComponent(updErr.message)}`)
+    }
+
+    const ownedByFarm = animal.ownership === 'Self'
+    const costBasisValue = Number(animal.cost_basis || 0)
+
+    // Phase 4A: Sold -> Record Revenue + Apply 60/20/20 Split
+    if (newStatus === 'Sold' && salePrice > 0) {
+      await supabaseClient.from('animal_financial_logs').insert([
+        {
+          animal_id: id,
+          farm_id: farm.id,
+          entry_type: 'Revenue',
+          category: 'Sale / Qurbani',
+          amount: salePrice,
+          transaction_date: statusDate,
+          notes: statusNotes || `Sold (${animal.tag_id})`,
+        },
+      ])
+
+      if (ownedByFarm) {
+        const splitRes = await applySaleProceedsSplitToWallets({
+          supabase: supabaseClient,
+          farmId: farm.id,
+          animalId: id,
+          tagId: animal.tag_id,
+          salePrice,
+          txnDate: statusDate,
+        })
+
+        return redirect(
+          `/animals/${id}?msg=${encodeURIComponent(
+            `Marked Sold for Rs. ${salePrice.toLocaleString()}. 60/20/20 Split Applied -> Rs. ${splitRes.breakdown.capital60.toLocaleString()} Animal Buying Cash, Rs. ${splitRes.breakdown.operating20.toLocaleString()} Operating Cash, Rs. ${splitRes.breakdown.profit20.toLocaleString()} Retained Profit.`
+          )}`
+        )
+      }
+    }
+
+    // Phase 4B: Deceased -> Trigger 10% Emergency / Mortality Fund Claim
+    if (newStatus === 'Deceased' && ownedByFarm) {
+      const claimRes = await applyMortalityEmergencyClaim({
+        supabase: supabaseClient,
+        farmId: farm.id,
+        animalId: id,
+        tagId: animal.tag_id,
+        costBasis: costBasisValue,
+        txnDate: statusDate,
+        causeNotes: statusNotes,
+      })
+
+      return redirect(
+        `/animals/${id}?msg=${encodeURIComponent(
+          `Marked Deceased. Mortality Claim: Rs. ${claimRes.absorbedFromEmergency.toLocaleString()} absorbed from 10% Emergency Fund (Uncovered loss: Rs. ${claimRes.uncoveredCapitalLoss.toLocaleString()}).`
+        )}`
+      )
+    }
+
+    return redirect(`/animals/${id}?msg=${encodeURIComponent(`Status updated to ${newStatus}.`)}`)
+  }
 
   // 1. Server Action: Add Weight Log
   const addWeightLog = async (formData: FormData) => {
@@ -265,6 +372,14 @@ export default async function AnimalDetailPage({
     agentFeeCost,
   })
 
+  // Phase 4: 60/20/20 Sale Proceeds Split Preview / Executed Split
+  const targetMarginSalePrice = Math.round(breakEvenToday * 1.25)
+  const splitPreview = computeSaleProceedsSplit(targetMarginSalePrice)
+  const executedSaleSplit =
+    animal.status === 'Sold' && Number(animal.sale_price) > 0
+      ? computeSaleProceedsSplit(Number(animal.sale_price))
+      : null
+
   // Upcoming / Overdue Medical Alerts (within next 7 days or past due)
   const sevenDaysFromNow = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
   const dueAlerts = (medicalLogs || []).filter(m => m.next_due_date && m.next_due_date <= sevenDaysFromNow)
@@ -324,7 +439,7 @@ export default async function AnimalDetailPage({
   return (
     <div className="min-h-screen bg-slate-50 py-10 px-4 sm:px-6 lg:px-8">
       <div className="max-w-5xl mx-auto space-y-6">
-        
+
         {/* Top Navigation & Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div className="flex items-center gap-4">
@@ -338,7 +453,15 @@ export default async function AnimalDetailPage({
             <div>
               <div className="flex items-center gap-2">
                 <h1 className="text-2xl font-bold text-slate-900 font-mono">{animal.tag_id}</h1>
-                <span className="px-2.5 py-0.5 text-xs font-medium rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                <span
+                  className={`px-2.5 py-0.5 text-xs font-medium rounded-full border ${
+                    animal.status === 'Active'
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                      : animal.status === 'Sold'
+                      ? 'bg-blue-50 text-blue-700 border-blue-200'
+                      : 'bg-rose-50 text-rose-700 border-rose-200'
+                  }`}
+                >
                   {animal.status}
                 </span>
               </div>
@@ -370,6 +493,14 @@ export default async function AnimalDetailPage({
             </Link>
           </div>
         </div>
+
+        {/* Success Banner */}
+        {statusMessage && (
+          <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm rounded-xl flex items-center justify-between">
+            <span><strong>Updated:</strong> {decodeURIComponent(statusMessage)}</span>
+            <Link href={`/animals/${id}`} className="text-emerald-700 font-bold">×</Link>
+          </div>
+        )}
 
         {/* Medical / Deworming Due Alert Banner */}
         {dueAlerts.length > 0 && (
@@ -530,19 +661,104 @@ export default async function AnimalDetailPage({
                   </span>
                 )}
               </div>
+
+              {/* Phase 4: 60/20/20 Sale Split & Mortality 10% Emergency Claim Action Bar */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 pt-1">
+                <div className="p-4 rounded-xl bg-slate-900 text-white space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-amber-300">
+                      {executedSaleSplit
+                        ? `Executed 60/20/20 Split (Rs. ${executedSaleSplit.salePrice.toLocaleString()})`
+                        : `60/20/20 Rule Preview (@ Rs. ${targetMarginSalePrice.toLocaleString()})`}
+                    </span>
+                    <span className="text-[10px] text-slate-400">Auto-routed on Sold</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div className="p-2 rounded-lg bg-white/10">
+                      <p className="text-[10px] text-blue-300">60% Buying Cash</p>
+                      <p className="font-mono font-bold">
+                        Rs. {(executedSaleSplit || splitPreview).capital60.toLocaleString()}
+                      </p>
+                    </div>
+                    <div className="p-2 rounded-lg bg-white/10">
+                      <p className="text-[10px] text-amber-300">20% Operating</p>
+                      <p className="font-mono font-bold">
+                        Rs. {(executedSaleSplit || splitPreview).operating20.toLocaleString()}
+                      </p>
+                    </div>
+                    <div className="p-2 rounded-lg bg-white/10">
+                      <p className="text-[10px] text-emerald-300">20% Profit</p>
+                      <p className="font-mono font-bold">
+                        Rs. {(executedSaleSplit || splitPreview).profit20.toLocaleString()}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <form action={updateAnimalStatus} className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-800">
+                      Status Exit: 60/20/20 Split or Mortality Claim
+                    </span>
+                    <span className="text-[11px] font-mono text-slate-600">
+                      10% Fund: <strong>Rs. {emergencyBalance.toLocaleString()}</strong>
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <select
+                      name="status"
+                      defaultValue={animal.status || 'Active'}
+                      className="px-2 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-900"
+                    >
+                      <option value="Active">Active</option>
+                      <option value="Sold">Sold (60/20/20)</option>
+                      <option value="Deceased">Deceased (10% Claim)</option>
+                    </select>
+                    <input
+                      name="sale_price"
+                      type="number"
+                      min="0"
+                      step="1"
+                      defaultValue={animal.sale_price || ''}
+                      placeholder="Sale PKR"
+                      className="px-2 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900"
+                    />
+                    <input
+                      name="status_date"
+                      type="date"
+                      defaultValue={animal.status_date ? String(animal.status_date).split('T')[0] : todayStr}
+                      className="px-2 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-slate-900"
+                    />
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      name="status_notes"
+                      type="text"
+                      placeholder="Buyer or mortality cause note..."
+                      className="flex-1 px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-slate-900"
+                    />
+                    <button
+                      type="submit"
+                      className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold shrink-0 transition"
+                    >
+                      Apply Exit Rule
+                    </button>
+                  </div>
+                </form>
+              </div>
             </div>
           </div>
         )}
 
         {/* Grid Layout: Left Profile + QR + Timeline | Right Weight + Medical + Financial */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          
+
           {/* Left Column */}
           <div className="space-y-6">
             {/* Ownership & Financial Card */}
             <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
               <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Financial & Ownership</h3>
-              
+
               <div>
                 <p className="text-xs text-slate-500">Ownership Structure</p>
                 <p className="text-sm font-semibold text-slate-900 mt-0.5">
@@ -640,7 +856,7 @@ export default async function AnimalDetailPage({
 
           {/* Right Column: Weight, Medical/Vaccination & Financial Ledgers */}
           <div className="lg:col-span-2 space-y-6">
-            
+
             {/* Growth Summary Mini-Bar */}
             {latestWeight !== null && (
               <div className="grid grid-cols-3 gap-4">

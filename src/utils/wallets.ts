@@ -19,6 +19,24 @@ export interface SaleSplitBreakdown {
   profit20: number
 }
 
+export interface SaleSplitExecutionResult {
+  applied: boolean
+  alreadyProcessed: boolean
+  breakdown: SaleSplitBreakdown
+  newCapitalBalance: number
+  newOperatingBalance: number
+}
+
+export interface MortalityClaimExecutionResult {
+  applied: boolean
+  alreadyProcessed: boolean
+  animalCostBasis: number
+  emergencyAvailableBefore: number
+  absorbedFromEmergency: number
+  uncoveredCapitalLoss: number
+  newEmergencyBalance: number
+}
+
 export interface WeeklyCashPulseInputItem {
   date: string
   type: 'Income' | 'Expense'
@@ -48,8 +66,8 @@ export interface StaggeredBatchDefinition {
   label: string
   buyWindow: string
   sellWindow: string
-  buyMonths: number[] // 1-12
-  sellMonths: number[] // 1-12
+  buyMonths: number[]
+  sellMonths: number[]
 }
 
 export const STAGGERED_BATCH_DEFINITIONS: StaggeredBatchDefinition[] = [
@@ -442,4 +460,218 @@ export async function recalculateWalletBalance(
     .eq('farm_id', farmId)
 
   return balance
+}
+
+/**
+ * Phase 4A: 60/20/20 Sale Proceeds Split
+ * - 60% -> Wallet 2 (ANIMAL_CAPITAL) to buy replacement livestock
+ * - 20% -> Wallet 1 (OPERATING_CASH) to fund 30-day feed/labour/medicine buffer
+ * - 20% -> Retained Net Profit (logged in animal_financial_logs / summary without mixing into buying capital)
+ */
+export async function applySaleProceedsSplitToWallets({
+  supabase,
+  farmId,
+  animalId,
+  tagId,
+  salePrice,
+  txnDate,
+}: {
+  supabase: SupabaseClient
+  farmId: string
+  animalId: string
+  tagId: string
+  salePrice: number
+  txnDate: string
+}): Promise<SaleSplitExecutionResult> {
+  const breakdown = computeSaleProceedsSplit(salePrice)
+  const wallets = await ensureDefaultWallets(supabase, farmId)
+  const capitalWallet = wallets.find(w => w.wallet_type === 'ANIMAL_CAPITAL')
+  const operatingWallet = wallets.find(w => w.wallet_type === 'OPERATING_CASH')
+
+  if (breakdown.salePrice <= 0 || !capitalWallet || !operatingWallet) {
+    return {
+      applied: false,
+      alreadyProcessed: false,
+      breakdown,
+      newCapitalBalance: Number(capitalWallet?.current_balance || 0),
+      newOperatingBalance: Number(operatingWallet?.current_balance || 0),
+    }
+  }
+
+  const capRef = `SALE_SPLIT_60_${animalId}`
+  const opRef = `SALE_SPLIT_20_${animalId}`
+
+  const { data: existingCap } = await supabase
+    .from('wallet_transactions')
+    .select('id')
+    .eq('farm_id', farmId)
+    .eq('reference_key', capRef)
+    .maybeSingle()
+
+  if (existingCap) {
+    return {
+      applied: false,
+      alreadyProcessed: true,
+      breakdown,
+      newCapitalBalance: Number(capitalWallet.current_balance || 0),
+      newOperatingBalance: Number(operatingWallet.current_balance || 0),
+    }
+  }
+
+  const rowsToInsert: Array<Record<string, any>> = []
+
+  if (breakdown.capital60 > 0) {
+    rowsToInsert.push({
+      farm_id: farmId,
+      wallet_id: capitalWallet.id,
+      animal_id: animalId,
+      reference_key: capRef,
+      entry_type: 'IN',
+      amount: breakdown.capital60,
+      source_type: 'ANIMAL_SALE_60_CAPITAL',
+      txn_date: txnDate,
+      notes: `60% Capital Reinvestment from Sale of ${tagId} (Total Sale: Rs. ${breakdown.salePrice.toLocaleString()} | 20% Profit Retained: Rs. ${breakdown.profit20.toLocaleString()})`,
+    })
+  }
+
+  if (breakdown.operating20 > 0) {
+    rowsToInsert.push({
+      farm_id: farmId,
+      wallet_id: operatingWallet.id,
+      animal_id: animalId,
+      reference_key: opRef,
+      entry_type: 'IN',
+      amount: breakdown.operating20,
+      source_type: 'ANIMAL_SALE_20_OPERATING',
+      txn_date: txnDate,
+      notes: `20% Operating Runway Share from Sale of ${tagId} (Total Sale: Rs. ${breakdown.salePrice.toLocaleString()})`,
+    })
+  }
+
+  if (rowsToInsert.length > 0) {
+    await supabase.from('wallet_transactions').insert(rowsToInsert)
+  }
+
+  const [newCapitalBalance, newOperatingBalance] = await Promise.all([
+    recalculateWalletBalance(supabase, farmId, capitalWallet.id),
+    recalculateWalletBalance(supabase, farmId, operatingWallet.id),
+  ])
+
+  return {
+    applied: true,
+    alreadyProcessed: false,
+    breakdown,
+    newCapitalBalance,
+    newOperatingBalance,
+  }
+}
+
+/**
+ * Phase 4B: Mortality 10% Emergency Fund Claim Flow
+ * - Absorbs animal purchase cost_basis from Wallet 3 (EMERGENCY_MORTALITY) up to available reserve
+ * - Logs mortality loss entry on animal_financial_logs and flags any uncovered capital shortfall
+ */
+export async function applyMortalityEmergencyClaim({
+  supabase,
+  farmId,
+  animalId,
+  tagId,
+  costBasis,
+  txnDate,
+  causeNotes,
+}: {
+  supabase: SupabaseClient
+  farmId: string
+  animalId: string
+  tagId: string
+  costBasis: number
+  txnDate: string
+  causeNotes?: string
+}): Promise<MortalityClaimExecutionResult> {
+  const safeCost = Math.max(0, Math.round(Number(costBasis) || 0))
+  const wallets = await ensureDefaultWallets(supabase, farmId)
+  const emergencyWallet = wallets.find(w => w.wallet_type === 'EMERGENCY_MORTALITY')
+
+  const availableBefore = Math.max(0, Math.round(Number(emergencyWallet?.current_balance || 0)))
+
+  if (!emergencyWallet) {
+    return {
+      applied: false,
+      alreadyProcessed: false,
+      animalCostBasis: safeCost,
+      emergencyAvailableBefore: availableBefore,
+      absorbedFromEmergency: 0,
+      uncoveredCapitalLoss: safeCost,
+      newEmergencyBalance: availableBefore,
+    }
+  }
+
+  const claimRef = `MORTALITY_CLAIM_${animalId}`
+  const { data: existingClaim } = await supabase
+    .from('wallet_transactions')
+    .select('id')
+    .eq('farm_id', farmId)
+    .eq('reference_key', claimRef)
+    .maybeSingle()
+
+  if (existingClaim) {
+    return {
+      applied: false,
+      alreadyProcessed: true,
+      animalCostBasis: safeCost,
+      emergencyAvailableBefore: availableBefore,
+      absorbedFromEmergency: 0,
+      uncoveredCapitalLoss: 0,
+      newEmergencyBalance: availableBefore,
+    }
+  }
+
+  const absorbedFromEmergency = Math.min(safeCost, availableBefore)
+  const uncoveredCapitalLoss = Math.max(0, safeCost - absorbedFromEmergency)
+  const reasonSuffix = causeNotes ? ` • Cause: ${causeNotes}` : ''
+
+  if (absorbedFromEmergency > 0) {
+    await supabase.from('wallet_transactions').insert([
+      {
+        farm_id: farmId,
+        wallet_id: emergencyWallet.id,
+        animal_id: animalId,
+        reference_key: claimRef,
+        entry_type: 'OUT',
+        amount: absorbedFromEmergency,
+        source_type: 'MORTALITY_CLAIM',
+        txn_date: txnDate,
+        notes: `Mortality Claim for ${tagId}: Absorbed Rs. ${absorbedFromEmergency.toLocaleString()} of Rs. ${safeCost.toLocaleString()} cost basis${
+          uncoveredCapitalLoss > 0 ? ` (Uncovered Loss: Rs. ${uncoveredCapitalLoss.toLocaleString()})` : ''
+        }${reasonSuffix}`,
+      },
+    ])
+  }
+
+  // Record mortality write-off in animal_financial_logs for full P&L audit trail
+  if (safeCost > 0) {
+    await supabase.from('animal_financial_logs').insert([
+      {
+        farm_id: farmId,
+        animal_id: animalId,
+        entry_type: 'Expense',
+        category: 'Mortality Loss Write-Off',
+        amount: safeCost,
+        transaction_date: txnDate,
+        notes: `Deceased Mortality Write-Off (${tagId}): Rs. ${absorbedFromEmergency.toLocaleString()} covered by 10% Emergency Reserve, Rs. ${uncoveredCapitalLoss.toLocaleString()} uncovered${reasonSuffix}`,
+      },
+    ])
+  }
+
+  const newEmergencyBalance = await recalculateWalletBalance(supabase, farmId, emergencyWallet.id)
+
+  return {
+    applied: true,
+    alreadyProcessed: false,
+    animalCostBasis: safeCost,
+    emergencyAvailableBefore: availableBefore,
+    absorbedFromEmergency,
+    uncoveredCapitalLoss,
+    newEmergencyBalance,
+  }
 }
