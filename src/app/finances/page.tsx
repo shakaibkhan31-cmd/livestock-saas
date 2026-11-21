@@ -13,8 +13,6 @@ import {
   computeStaggeredBatchesAndShortCycle,
   computeWeeklyCashPulseAndRunway,
   ensureDefaultWallets,
-  inferStaggeredBatchFromDate,
-  isOperatingCategory,
   recalculateWalletBalance,
   type WalletType,
 } from '@/utils/wallets'
@@ -121,6 +119,16 @@ function buildFinancesUrl({
   return qs ? `/finances?${qs}` : '/finances'
 }
 
+function formatMonthLabel(ym: string): string {
+  const [y, m] = ym.split('-')
+  const monthNames = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ]
+  const idx = Math.max(0, Math.min(11, (parseInt(m || '1', 10) || 1) - 1))
+  return `${monthNames[idx]} ${y || ''}`.trim()
+}
+
 export default async function FinancesPage({
   searchParams,
 }: {
@@ -160,6 +168,7 @@ export default async function FinancesPage({
     { data: globalTxns },
     { data: animalFinLogs },
     { data: contactsList },
+    { data: walletAuditRows },
   ] = await Promise.all([
     ensureDefaultWallets(supabase, farm.id),
     supabase
@@ -206,14 +215,33 @@ export default async function FinancesPage({
       .from('contacts')
       .select('id, name, phone')
       .eq('farm_id', farm.id),
+    supabase
+      .from('wallet_transactions')
+      .select(`
+        id,
+        wallet_id,
+        animal_id,
+        entry_type,
+        amount,
+        source_type,
+        txn_date,
+        notes,
+        created_at
+      `)
+      .eq('farm_id', farm.id)
+      .order('txn_date', { ascending: false })
+      .order('created_at', { ascending: false })
+      .limit(40),
   ])
 
   const todayStr = new Date().toISOString().split('T')[0]
   const currentMonthStr = todayStr.slice(0, 7)
 
   const walletByType: Partial<Record<WalletType, (typeof wallets)[number]>> = {}
+  const walletById: Record<string, (typeof wallets)[number]> = {}
   wallets.forEach(w => {
     walletByType[w.wallet_type] = w
+    walletById[w.id] = w
   })
 
   const operatingWallet = walletByType.OPERATING_CASH
@@ -230,6 +258,21 @@ export default async function FinancesPage({
     0
   )
   const tenPercentEmergencyTarget = Math.round(totalSelfLivestockValue * 0.1)
+
+  // Phase 4 Metrics: 60/20/20 Sale Split Totals & Mortality Claims from wallet_transactions
+  const allAuditRows = (walletAuditRows || []) as Array<any>
+  const sale60Total = allAuditRows
+    .filter(r => r.source_type === 'ANIMAL_SALE_60_CAPITAL' && r.entry_type === 'IN')
+    .reduce((s, r) => s + (Number(r.amount) || 0), 0)
+  const sale20OpTotal = allAuditRows
+    .filter(r => r.source_type === 'ANIMAL_SALE_20_OPERATING' && r.entry_type === 'IN')
+    .reduce((s, r) => s + (Number(r.amount) || 0), 0)
+  // 20% retained profit derived from 60% capital split (60% -> 20% means profit20 = capital60 / 3)
+  const implied20RetainedProfit = Math.round(sale60Total / 3)
+
+  const mortalityClaimedTotal = allAuditRows
+    .filter(r => r.source_type === 'MORTALITY_CLAIM' && r.entry_type === 'OUT')
+    .reduce((s, r) => s + (Number(r.amount) || 0), 0)
 
   const contactPhoneByName: Record<string, string> = {}
   ;(contactsList || []).forEach(c => {
@@ -387,6 +430,66 @@ export default async function FinancesPage({
     todayStr,
   })
 
+  // Phase 5: Monthly Retained Profit & Capital Growth Report
+  type MonthlyReportRow = {
+    month: string
+    label: string
+    cashIn: number
+    cashOut: number
+    netCashFlow: number
+    capitalIn60: number
+    operatingIn20: number
+    retainedProfit20: number
+    mortalityClaimed: number
+  }
+
+  const monthlyMap: Record<string, MonthlyReportRow> = {}
+  const ensureMonthRow = (ym: string) => {
+    if (!monthlyMap[ym]) {
+      monthlyMap[ym] = {
+        month: ym,
+        label: formatMonthLabel(ym),
+        cashIn: 0,
+        cashOut: 0,
+        netCashFlow: 0,
+        capitalIn60: 0,
+        operatingIn20: 0,
+        retainedProfit20: 0,
+        mortalityClaimed: 0,
+      }
+    }
+    return monthlyMap[ym]
+  }
+
+  cashItemsForAnalytics.forEach(item => {
+    const ym = (item.date || todayStr).slice(0, 7)
+    const row = ensureMonthRow(ym)
+    if (item.type === 'Income') row.cashIn += item.amount
+    else row.cashOut += item.amount
+  })
+
+  allAuditRows.forEach(r => {
+    const ym = String(r.txn_date || todayStr).slice(0, 7)
+    const row = ensureMonthRow(ym)
+    const amt = Number(r.amount) || 0
+    if (r.source_type === 'ANIMAL_SALE_60_CAPITAL' && r.entry_type === 'IN') {
+      row.capitalIn60 += amt
+      row.retainedProfit20 += Math.round(amt / 3)
+    } else if (r.source_type === 'ANIMAL_SALE_20_OPERATING' && r.entry_type === 'IN') {
+      row.operatingIn20 += amt
+    } else if (r.source_type === 'MORTALITY_CLAIM' && r.entry_type === 'OUT') {
+      row.mortalityClaimed += amt
+    }
+  })
+
+  const monthlyReportRows = Object.values(monthlyMap)
+    .map(r => ({
+      ...r,
+      netCashFlow: r.cashIn - r.cashOut,
+    }))
+    .sort((a, b) => b.month.localeCompare(a.month))
+    .slice(0, 6)
+
   const thirtyDayOperatingTarget = cashPulse.thirtyDayTargetRequired
   const runwayProgressPct =
     thirtyDayOperatingTarget > 0
@@ -543,6 +646,31 @@ export default async function FinancesPage({
         `${targetWallet.name}: ${entryType === 'IN' ? '+' : '-'}Rs. ${amount.toLocaleString()} recorded.`
       )}`
     )
+  }
+
+  // Phase 5 Server Action: Delete Wallet Audit Transaction & Recalculate Wallet Balance
+  const deleteWalletAuditRowAction = async (formData: FormData) => {
+    'use server'
+    const wtId = ((formData.get('wtId') as string) || '').trim()
+    const walletId = ((formData.get('walletId') as string) || '').trim()
+    if (!wtId || !walletId) {
+      return redirect(`/finances?error=${encodeURIComponent('Invalid wallet transaction ID.')}`)
+    }
+
+    const supabaseClient = await createClient()
+    const { error: delErr } = await supabaseClient
+      .from('wallet_transactions')
+      .delete()
+      .eq('id', wtId)
+      .eq('farm_id', farm.id)
+
+    if (delErr) {
+      return redirect(`/finances?error=${encodeURIComponent(delErr.message)}`)
+    }
+
+    await recalculateWalletBalance(supabaseClient, farm.id, walletId)
+
+    return redirect(`/finances?msg=${encodeURIComponent('Wallet audit entry removed and balance recalculated.')}`)
   }
 
   // Server Action: Log Palai Client Boarding Payment (credits Operating Cash Wallet)
@@ -907,7 +1035,19 @@ export default async function FinancesPage({
     }
 
     // 3 Wallets Guardrail: Do not mix daily operating expenses into Animal Buying Capital
-    if (type === 'Expense' && selectedWalletType === 'ANIMAL_CAPITAL' && isOperatingCategory(category)) {
+    const catLower = category.toLowerCase()
+    const isOpsExpense =
+      catLower.includes('feed') ||
+      catLower.includes('ration') ||
+      catLower.includes('labour') ||
+      catLower.includes('labor') ||
+      catLower.includes('medicine') ||
+      catLower.includes('vet') ||
+      catLower.includes('electricity') ||
+      catLower.includes('rent') ||
+      catLower.includes('utility')
+
+    if (type === 'Expense' && selectedWalletType === 'ANIMAL_CAPITAL' && isOpsExpense) {
       return redirect(
         `/finances?error=${encodeURIComponent(
           `3 Wallets Rule: "${category}" is an operating expense. Select Operating Cash (30-Day) instead of Animal Buying Capital.`
@@ -939,7 +1079,6 @@ export default async function FinancesPage({
     const farmWallets = await ensureDefaultWallets(supabaseClient, farm.id)
     const targetWallet = farmWallets.find(w => w.wallet_type === selectedWalletType)
     if (targetWallet) {
-      const catLower = category.toLowerCase()
       const sourceType =
         type === 'Income' && (catLower.includes('milk') || catLower.includes('manure'))
           ? 'MILK_MANURE'
@@ -988,7 +1127,7 @@ export default async function FinancesPage({
   return (
     <div className="min-h-screen bg-slate-50 py-10 px-4 sm:px-6 lg:px-8">
       <div className="max-w-7xl mx-auto space-y-8">
-        
+
         {/* Top Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
@@ -999,7 +1138,7 @@ export default async function FinancesPage({
               </span>
             </div>
             <h1 className="text-3xl font-bold text-slate-900 tracking-tight mt-1">Financials &amp; Billing</h1>
-            <p className="text-sm text-slate-500">3 Wallets discipline, weekly red flags, 30-day runway, staggered batches &amp; Palai billing</p>
+            <p className="text-sm text-slate-500">3 Wallets discipline, 60/20/20 sale split, mortality claims, executive audit &amp; Palai billing</p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -1349,15 +1488,15 @@ export default async function FinancesPage({
           </div>
         </div>
 
-        {/* 3 Wallets Rule Section */}
+        {/* 3 Wallets Rule + Phase 4 60/20/20 & Mortality Claim Summary */}
         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-5">
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
             <div>
               <h2 className="text-base font-bold text-slate-900">
-                3 Wallets Rule (No Cash Mixing)
+                3 Wallets Rule + 60/20/20 Sale Split &amp; Mortality Protection
               </h2>
               <p className="text-xs text-slate-500">
-                Keep Operating Cash (30-day feed/labour/medicine), Animal Buying Capital (60% sale pool), and Emergency / Mortality Reserve (10% of stock) separate
+                Operating Cash (30-day ops), Animal Buying Capital (60% sale pool), and Emergency / Mortality Reserve (10% of stock)
               </p>
             </div>
 
@@ -1429,7 +1568,7 @@ export default async function FinancesPage({
                 Rs. {operatingBalance.toLocaleString()}
               </p>
               <p className="text-[11px] text-slate-600">
-                30-Day Burn Benchmark: <strong className="font-mono">Rs. {thirtyDayOperatingTarget.toLocaleString()}</strong> • Palai payments credit here
+                20% Sale Ops Inflow: <strong className="font-mono text-emerald-700">+Rs. {sale20OpTotal.toLocaleString()}</strong> • 30d Target: <strong className="font-mono">Rs. {thirtyDayOperatingTarget.toLocaleString()}</strong>
               </p>
             </div>
 
@@ -1445,7 +1584,7 @@ export default async function FinancesPage({
                 Rs. {capitalBalance.toLocaleString()}
               </p>
               <p className="text-[11px] text-slate-600">
-                Dedicated strictly to buying livestock; feed &amp; labour are blocked here.
+                60% Sale Capital: <strong className="font-mono text-blue-800">+Rs. {sale60Total.toLocaleString()}</strong> • Est. 20% Retained Profit: <strong className="font-mono text-emerald-700">Rs. {implied20RetainedProfit.toLocaleString()}</strong>
               </p>
             </div>
 
@@ -1461,8 +1600,142 @@ export default async function FinancesPage({
                 Rs. {emergencyBalance.toLocaleString()}
               </p>
               <p className="text-[11px] text-slate-600">
-                10% Self-Stock Target: <strong className="font-mono">Rs. {tenPercentEmergencyTarget.toLocaleString()}</strong> (of Rs. {totalSelfLivestockValue.toLocaleString()})
+                10% Target: <strong className="font-mono">Rs. {tenPercentEmergencyTarget.toLocaleString()}</strong> • Mortality Claims Paid: <strong className="font-mono text-rose-700">Rs. {mortalityClaimedTotal.toLocaleString()}</strong>
               </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Phase 5: Monthly Retained Profit, Capital Growth & Executive Wallet Audit Ledger */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Monthly Retained Profit & Cash Report */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-100 bg-slate-900 text-white">
+              <h2 className="text-sm font-bold">Monthly Retained Profit &amp; Cash Report</h2>
+              <p className="text-[11px] text-slate-400">
+                Monthly cash flow, 60/20/20 split routing &amp; mortality claims
+              </p>
+            </div>
+            <div className="divide-y divide-slate-100">
+              {monthlyReportRows.length > 0 ? (
+                monthlyReportRows.map(mRow => (
+                  <div key={mRow.month} className="p-4 space-y-1.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-slate-900">{mRow.label}</span>
+                      <span
+                        className={`font-mono font-bold ${
+                          mRow.netCashFlow >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                        }`}
+                      >
+                        Net: {mRow.netCashFlow >= 0 ? `+Rs. ${mRow.netCashFlow.toLocaleString()}` : `-Rs. ${Math.abs(mRow.netCashFlow).toLocaleString()}`}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-[11px] text-slate-500 font-mono">
+                      <span>In: Rs. {mRow.cashIn.toLocaleString()}</span>
+                      <span>Out: Rs. {mRow.cashOut.toLocaleString()}</span>
+                    </div>
+                    {(mRow.capitalIn60 > 0 || mRow.retainedProfit20 > 0 || mRow.mortalityClaimed > 0) && (
+                      <div className="flex flex-wrap gap-2 pt-1 text-[10px] font-mono">
+                        {mRow.capitalIn60 > 0 && (
+                          <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-800 border border-blue-200">
+                            60% Cap: +Rs. {mRow.capitalIn60.toLocaleString()}
+                          </span>
+                        )}
+                        {mRow.retainedProfit20 > 0 && (
+                          <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200">
+                            20% Profit: Rs. {mRow.retainedProfit20.toLocaleString()}
+                          </span>
+                        )}
+                        {mRow.mortalityClaimed > 0 && (
+                          <span className="px-2 py-0.5 rounded bg-rose-50 text-rose-800 border border-rose-200">
+                            Mortality Claim: -Rs. {mRow.mortalityClaimed.toLocaleString()}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))
+              ) : (
+                <p className="p-6 text-xs text-slate-400 text-center">No monthly cash flow records yet.</p>
+              )}
+            </div>
+          </div>
+
+          {/* Executive Wallet Audit Ledger */}
+          <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/70 flex items-center justify-between">
+              <div>
+                <h2 className="text-sm font-bold text-slate-900">Executive Wallet Audit Ledger</h2>
+                <p className="text-[11px] text-slate-500">
+                  Every IN/OUT movement across Operating Cash, Animal Buying Capital, and 10% Emergency Fund
+                </p>
+              </div>
+              <span className="text-xs font-mono text-slate-500">{allAuditRows.length} entries</span>
+            </div>
+
+            <div className="overflow-x-auto max-h-96 overflow-y-auto">
+              <table className="min-w-full divide-y divide-slate-100 text-xs">
+                <thead className="bg-slate-50 sticky top-0">
+                  <tr>
+                    <th className="px-4 py-2.5 text-left font-semibold text-slate-500 uppercase">Date</th>
+                    <th className="px-4 py-2.5 text-left font-semibold text-slate-500 uppercase">Wallet &amp; Type</th>
+                    <th className="px-4 py-2.5 text-left font-semibold text-slate-500 uppercase">Amount</th>
+                    <th className="px-4 py-2.5 text-left font-semibold text-slate-500 uppercase">Audit Note</th>
+                    <th className="px-4 py-2.5 text-right font-semibold text-slate-500 uppercase">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {allAuditRows.length > 0 ? (
+                    allAuditRows.slice(0, 20).map((wt: any) => {
+                      const wInfo = walletById[wt.wallet_id]
+                      const isIn = wt.entry_type === 'IN'
+                      return (
+                        <tr key={wt.id} className="hover:bg-slate-50">
+                          <td className="px-4 py-2.5 font-mono text-slate-700 whitespace-nowrap">
+                            {formatDateDDMMYYYY(wt.txn_date)}
+                          </td>
+                          <td className="px-4 py-2.5 whitespace-nowrap">
+                            <span className="font-bold text-slate-900 block">
+                              {wInfo?.name || 'Wallet'}
+                            </span>
+                            <span className="text-[10px] font-mono text-slate-400">
+                              {wt.source_type || wt.entry_type}
+                            </span>
+                          </td>
+                          <td
+                            className={`px-4 py-2.5 font-mono font-bold whitespace-nowrap ${
+                              isIn ? 'text-emerald-700' : 'text-rose-700'
+                            }`}
+                          >
+                            {isIn ? '+' : '-'} Rs. {Number(wt.amount || 0).toLocaleString()}
+                          </td>
+                          <td className="px-4 py-2.5 text-slate-500 max-w-xs truncate">
+                            {wt.notes || '—'}
+                          </td>
+                          <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                            <form action={deleteWalletAuditRowAction} className="inline-block">
+                              <input type="hidden" name="wtId" value={wt.id} />
+                              <input type="hidden" name="walletId" value={wt.wallet_id} />
+                              <button
+                                type="submit"
+                                className="px-2 py-0.5 rounded bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[11px] font-medium"
+                              >
+                                Remove
+                              </button>
+                            </form>
+                          </td>
+                        </tr>
+                      )
+                    })
+                  ) : (
+                    <tr>
+                      <td colSpan={5} className="px-6 py-8 text-center text-slate-400">
+                        No wallet audit transactions recorded yet.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
