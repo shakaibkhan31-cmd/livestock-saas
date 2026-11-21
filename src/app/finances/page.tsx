@@ -159,7 +159,7 @@ export default async function FinancesPage({
 
   const supabase = await createClient()
 
-  // Ensure default 3 wallets exist & load parallel data
+  // Ensure default 4 wallets exist & load parallel data
   const [
     wallets,
     { data: palaiAnimals },
@@ -247,17 +247,25 @@ export default async function FinancesPage({
   const operatingWallet = walletByType.OPERATING_CASH
   const capitalWallet = walletByType.ANIMAL_CAPITAL
   const emergencyWallet = walletByType.EMERGENCY_MORTALITY
+  const ownerProfitWallet = walletByType.OWNER_PROFIT
 
   const operatingBalance = Number(operatingWallet?.current_balance || 0)
   const capitalBalance = Number(capitalWallet?.current_balance || 0)
   const emergencyBalance = Number(emergencyWallet?.current_balance || 0)
+  const ownerProfitBalance = Number(ownerProfitWallet?.current_balance || 0)
 
-  // 10% Emergency / Mortality Fund target from active self-owned livestock valuation
+  // Dynamic 10% Emergency / Mortality Fund target from active self-owned livestock cost basis
   const totalSelfLivestockValue = (selfAnimals || []).reduce(
     (sum: number, a: any) => sum + (Number(a.cost_basis) || 0),
     0
   )
   const tenPercentEmergencyTarget = Math.round(totalSelfLivestockValue * 0.1)
+  const emergencyProgressPct =
+    tenPercentEmergencyTarget > 0
+      ? Math.min(100, Math.round((Math.max(0, emergencyBalance) / tenPercentEmergencyTarget) * 100))
+      : emergencyBalance > 0
+      ? 100
+      : 0
 
   // Phase 4 Metrics: 60/20/20 Sale Split Totals & Mortality Claims from wallet_transactions
   const allAuditRows = (walletAuditRows || []) as Array<any>
@@ -267,8 +275,10 @@ export default async function FinancesPage({
   const sale20OpTotal = allAuditRows
     .filter(r => r.source_type === 'ANIMAL_SALE_20_OPERATING' && r.entry_type === 'IN')
     .reduce((s, r) => s + (Number(r.amount) || 0), 0)
-  // 20% retained profit derived from 60% capital split (60% -> 20% means profit20 = capital60 / 3)
-  const implied20RetainedProfit = Math.round(sale60Total / 3)
+  const sale20OwnerTotal = allAuditRows
+    .filter(r => r.source_type === 'ANIMAL_SALE_20_OWNER_PROFIT' && r.entry_type === 'IN')
+    .reduce((s, r) => s + (Number(r.amount) || 0), 0)
+  const implied20RetainedProfit = sale20OwnerTotal > 0 ? sale20OwnerTotal : Math.round(sale60Total / 3)
 
   const mortalityClaimedTotal = allAuditRows
     .filter(r => r.source_type === 'MORTALITY_CLAIM' && r.entry_type === 'OUT')
@@ -474,9 +484,10 @@ export default async function FinancesPage({
     const amt = Number(r.amount) || 0
     if (r.source_type === 'ANIMAL_SALE_60_CAPITAL' && r.entry_type === 'IN') {
       row.capitalIn60 += amt
-      row.retainedProfit20 += Math.round(amt / 3)
     } else if (r.source_type === 'ANIMAL_SALE_20_OPERATING' && r.entry_type === 'IN') {
       row.operatingIn20 += amt
+    } else if (r.source_type === 'ANIMAL_SALE_20_OWNER_PROFIT' && r.entry_type === 'IN') {
+      row.retainedProfit20 += amt
     } else if (r.source_type === 'MORTALITY_CLAIM' && r.entry_type === 'OUT') {
       row.mortalityClaimed += amt
     }
@@ -597,7 +608,7 @@ export default async function FinancesPage({
     )
   }
 
-  // Server Action: Fund / Adjust a Wallet (3 Wallets Rule)
+  // Server Action: Fund / Adjust a Wallet (4 Wallets Discipline)
   const fundWalletAction = async (formData: FormData) => {
     'use server'
     const walletType = ((formData.get('wallet_type') as string) || 'OPERATING_CASH') as WalletType
@@ -621,6 +632,8 @@ export default async function FinancesPage({
     const sourceType =
       walletType === 'EMERGENCY_MORTALITY' && entryType === 'OUT'
         ? 'MORTALITY_CLAIM'
+        : walletType === 'OWNER_PROFIT' && entryType === 'OUT'
+        ? 'OWNER_DRAW'
         : 'WALLET_TRANSFER'
 
     const { error: wtErr } = await supabaseClient.from('wallet_transactions').insert([
@@ -756,12 +769,12 @@ export default async function FinancesPage({
     )
   }
 
-  // Server Action: One-Click Species-Scoped Weight & Acquisition-Based Deficit Allocation
+  // Server Action: One-Click Species-Scoped Weight & Acquisition-Based Overhead Allocation
   const allocateDeficitByWeight = async (formData: FormData) => {
     'use server'
     const targetSpecies = ((formData.get('allocate_species') as string) || 'Goat').trim()
     const allocationDate = ((formData.get('allocation_date') as string) || '').trim() || new Date().toISOString().split('T')[0]
-    const periodLabel = ((formData.get('period_label') as string) || '').trim() || `${targetSpecies} Deficit Split`
+    const periodLabel = ((formData.get('period_label') as string) || '').trim() || `${targetSpecies} Overhead Split`
     const customAmountRaw = ((formData.get('custom_amount') as string) || '').trim()
     const parsedCustomAmount = customAmountRaw ? parseFloat(customAmountRaw) : NaN
 
@@ -867,7 +880,7 @@ export default async function FinancesPage({
     }
 
     const sumEffectiveWeight = weightedAnimals.reduce((sum, a) => sum + a.effectiveWeight, 0)
-    const allocationTag = `Farm Deficit Split [${targetSpecies}] (${periodLabel} @ ${allocationDate})`
+    const allocationTag = `Farm Overhead Share [${targetSpecies}] (${periodLabel} @ ${allocationDate})`
 
     const insertsToApply: Array<{
       animal_id: string
@@ -917,7 +930,7 @@ export default async function FinancesPage({
     if (insertsToApply.length === 0) {
       return redirect(
         `/finances?msg=${encodeURIComponent(
-          `Deficit for ${targetSpecies} (${periodLabel} @ ${allocationDate}) was already allocated.`
+          `Overhead share for ${targetSpecies} (${periodLabel} @ ${allocationDate}) was already allocated.`
         )}`
       )
     }
@@ -932,7 +945,7 @@ export default async function FinancesPage({
 
     return redirect(
       `/finances?msg=${encodeURIComponent(
-        `Allocated Rs. ${poolToAllocate.toLocaleString()} (${targetSpecies}) across ${insertsToApply.length} Self animal(s) in animal_financial_logs.`
+        `Allocated Rs. ${poolToAllocate.toLocaleString()} (${targetSpecies}) overhead share across ${insertsToApply.length} Self animal(s).`
       )}`
     )
   }
@@ -1034,7 +1047,7 @@ export default async function FinancesPage({
       return redirect(`/finances?error=${encodeURIComponent('Please enter a valid amount greater than 0.')}`)
     }
 
-    // 3 Wallets Guardrail: Do not mix daily operating expenses into Animal Buying Capital
+    // Wallets Guardrail: Do not mix daily operating expenses into Animal Buying Capital
     const catLower = category.toLowerCase()
     const isOpsExpense =
       catLower.includes('feed') ||
@@ -1050,7 +1063,7 @@ export default async function FinancesPage({
     if (type === 'Expense' && selectedWalletType === 'ANIMAL_CAPITAL' && isOpsExpense) {
       return redirect(
         `/finances?error=${encodeURIComponent(
-          `3 Wallets Rule: "${category}" is an operating expense. Select Operating Cash (30-Day) instead of Animal Buying Capital.`
+          `Wallets Rule: "${category}" is an operating expense. Select Operating Cash (30-Day) instead of Animal Buying Capital.`
         )}`
       )
     }
@@ -1134,11 +1147,11 @@ export default async function FinancesPage({
             <div className="flex items-center gap-2">
               <span className="h-2.5 w-2.5 rounded-full bg-emerald-500"></span>
               <span className="text-xs font-semibold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
-                Admin Ledger &amp; 3-Wallet Cash Engine
+                Admin Ledger &amp; 4-Wallet Cash Engine
               </span>
             </div>
             <h1 className="text-3xl font-bold text-slate-900 tracking-tight mt-1">Financials &amp; Billing</h1>
-            <p className="text-sm text-slate-500">3 Wallets discipline, 60/20/20 sale split, mortality claims, executive audit &amp; Palai billing</p>
+            <p className="text-sm text-slate-500">4 Wallets discipline, 60/20/20 sale split, owner draw wallet, mortality claims &amp; Palai billing</p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -1208,7 +1221,7 @@ export default async function FinancesPage({
                   href="#breakeven-sync"
                   className="px-3.5 py-2 bg-rose-700 hover:bg-rose-800 text-white font-bold rounded-xl text-xs shadow-xs transition shrink-0 text-center"
                 >
-                  ⚖️ Sync Gap to Break-Even
+                  ⚖️ Review Overhead Sync
                 </a>
               )}
             </div>
@@ -1257,7 +1270,7 @@ export default async function FinancesPage({
                 </p>
                 <p className="text-[11px] text-slate-500 mt-0.5">
                   {cashPulse.isRedFlag
-                    ? 'Capital burn active — allocate onto Self stock'
+                    ? 'Weekly burn ahead of short-cycle cash'
                     : 'Short-cycle inflows covering weekly burn'}
                 </p>
               </div>
@@ -1488,15 +1501,15 @@ export default async function FinancesPage({
           </div>
         </div>
 
-        {/* 3 Wallets Rule + Phase 4 60/20/20 & Mortality Claim Summary */}
+        {/* 4 Wallets Rule + Phase 4 60/20/20 Sale Split & Mortality Protection */}
         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-5">
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
             <div>
               <h2 className="text-base font-bold text-slate-900">
-                3 Wallets Rule + 60/20/20 Sale Split &amp; Mortality Protection
+                4 Wallets Rule + 60/20/20 Sale Split &amp; Mortality Protection
               </h2>
               <p className="text-xs text-slate-500">
-                Operating Cash (30-day ops), Animal Buying Capital (60% sale pool), and Emergency / Mortality Reserve (10% of stock)
+                Operating Cash (30-day ops), Animal Buying Capital (60% sale pool), Emergency/Mortality (10% active self-stock cost), and Owner Draw Wallet (20% profit)
               </p>
             </div>
 
@@ -1511,6 +1524,7 @@ export default async function FinancesPage({
                   <option value="OPERATING_CASH">1. Operating Cash</option>
                   <option value="ANIMAL_CAPITAL">2. Animal Buying Cash</option>
                   <option value="EMERGENCY_MORTALITY">3. Emergency / Mortality</option>
+                  <option value="OWNER_PROFIT">4. Owner Draw (20%)</option>
                 </select>
               </div>
               <div>
@@ -1521,7 +1535,7 @@ export default async function FinancesPage({
                   className="px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-900"
                 >
                   <option value="IN">Add (+ IN)</option>
-                  <option value="OUT">Withdraw (- OUT)</option>
+                  <option value="OUT">Withdraw / Draw (- OUT)</option>
                 </select>
               </div>
               <div>
@@ -1541,7 +1555,7 @@ export default async function FinancesPage({
                 <input
                   name="notes"
                   type="text"
-                  placeholder="Initial funding / transfer"
+                  placeholder="Funding / owner draw note"
                   className="w-36 px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-slate-900"
                 />
               </div>
@@ -1555,7 +1569,7 @@ export default async function FinancesPage({
             </form>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
             {/* Wallet 1 */}
             <div className="p-4 rounded-xl bg-amber-50/50 border border-amber-200 space-y-1.5">
               <div className="flex items-center justify-between">
@@ -1568,7 +1582,7 @@ export default async function FinancesPage({
                 Rs. {operatingBalance.toLocaleString()}
               </p>
               <p className="text-[11px] text-slate-600">
-                20% Sale Ops Inflow: <strong className="font-mono text-emerald-700">+Rs. {sale20OpTotal.toLocaleString()}</strong> • 30d Target: <strong className="font-mono">Rs. {thirtyDayOperatingTarget.toLocaleString()}</strong>
+                20% Sale Ops: <strong className="font-mono text-emerald-700">+Rs. {sale20OpTotal.toLocaleString()}</strong> • 30d Target: <strong className="font-mono">Rs. {thirtyDayOperatingTarget.toLocaleString()}</strong>
               </p>
             </div>
 
@@ -1584,23 +1598,45 @@ export default async function FinancesPage({
                 Rs. {capitalBalance.toLocaleString()}
               </p>
               <p className="text-[11px] text-slate-600">
-                60% Sale Capital: <strong className="font-mono text-blue-800">+Rs. {sale60Total.toLocaleString()}</strong> • Est. 20% Retained Profit: <strong className="font-mono text-emerald-700">Rs. {implied20RetainedProfit.toLocaleString()}</strong>
+                60% Sale Capital: <strong className="font-mono text-blue-800">+Rs. {sale60Total.toLocaleString()}</strong> • Feed &amp; labour blocked
               </p>
             </div>
 
-            {/* Wallet 3 */}
-            <div className="p-4 rounded-xl bg-rose-50/50 border border-rose-200 space-y-1.5">
+            {/* Wallet 3: Dynamic 10% Target + Progress Bar */}
+            <div className="p-4 rounded-xl bg-rose-50/50 border border-rose-200 space-y-2">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-rose-900">
                   Wallet 3 • Emergency / Mortality
                 </span>
-                <span className="text-[10px] font-mono text-rose-800">10% Stock Rule</span>
+                <span className="text-[10px] font-mono font-bold text-rose-800">{emergencyProgressPct}%</span>
+              </div>
+              <p className="text-sm font-bold font-mono text-slate-900">
+                Emergency: Rs. {emergencyBalance.toLocaleString()} / Rs. {tenPercentEmergencyTarget.toLocaleString()} Target
+              </p>
+              <div className="w-full h-2 bg-rose-100 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-rose-600 rounded-full transition-all duration-500"
+                  style={{ width: `${emergencyProgressPct}%` }}
+                />
+              </div>
+              <p className="text-[11px] text-slate-600">
+                10% of Active Self Stock (Rs. {totalSelfLivestockValue.toLocaleString()}) • Claims: <strong className="font-mono text-rose-700">Rs. {mortalityClaimedTotal.toLocaleString()}</strong>
+              </p>
+            </div>
+
+            {/* Wallet 4: Owner Draw / Retained Profit (20%) */}
+            <div className="p-4 rounded-xl bg-emerald-50/50 border border-emerald-200 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-900">
+                  Wallet 4 • Owner Draw Wallet
+                </span>
+                <span className="text-[10px] font-mono text-emerald-800">20% Profit</span>
               </div>
               <p className="text-2xl font-bold font-mono text-slate-900">
-                Rs. {emergencyBalance.toLocaleString()}
+                Rs. {ownerProfitBalance.toLocaleString()}
               </p>
               <p className="text-[11px] text-slate-600">
-                10% Target: <strong className="font-mono">Rs. {tenPercentEmergencyTarget.toLocaleString()}</strong> • Mortality Claims Paid: <strong className="font-mono text-rose-700">Rs. {mortalityClaimedTotal.toLocaleString()}</strong>
+                20% Sale Profit Split: <strong className="font-mono text-emerald-700">+Rs. {implied20RetainedProfit.toLocaleString()}</strong> • Personal draws strictly from here
               </p>
             </div>
           </div>
@@ -1643,7 +1679,7 @@ export default async function FinancesPage({
                         )}
                         {mRow.retainedProfit20 > 0 && (
                           <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200">
-                            20% Profit: Rs. {mRow.retainedProfit20.toLocaleString()}
+                            20% Owner Profit: +Rs. {mRow.retainedProfit20.toLocaleString()}
                           </span>
                         )}
                         {mRow.mortalityClaimed > 0 && (
@@ -1667,7 +1703,7 @@ export default async function FinancesPage({
               <div>
                 <h2 className="text-sm font-bold text-slate-900">Executive Wallet Audit Ledger</h2>
                 <p className="text-[11px] text-slate-500">
-                  Every IN/OUT movement across Operating Cash, Animal Buying Capital, and 10% Emergency Fund
+                  Every IN/OUT movement across Operating Cash, Animal Buying Capital, Emergency Fund &amp; Owner Draw Wallet
                 </p>
               </div>
               <span className="text-xs font-mono text-slate-500">{allAuditRows.length} entries</span>
@@ -1936,23 +1972,23 @@ export default async function FinancesPage({
           </div>
         </div>
 
-        {/* One-Click Species-Scoped Weight & Acquisition-Based Deficit Allocation */}
+        {/* One-Click Species-Scoped Weight & Acquisition-Based Overhead Allocation (Separate Category to Prevent Profit Double-Counting) */}
         <div id="breakeven-sync" className="bg-white p-6 rounded-2xl border border-amber-200 shadow-sm space-y-4 scroll-mt-6">
           <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
             <div className="space-y-1">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-amber-100 text-amber-900 border border-amber-300">
-                  Farm-Owned Break-Even Sync
+                  Separate Overhead Pool (Audit-Safe)
                 </span>
                 <span className="text-xs font-mono text-slate-500">
                   Goat Self Preview: <strong>{previewWeightedAnimals.length}</strong> animals • Total Weightage: <strong>{previewTotalWeight.toFixed(1)}</strong>
                 </span>
               </div>
               <h2 className="text-base font-bold text-slate-900">
-                One-Click Species-Scoped Deficit Allocation (to Animal Financial Logs)
+                Optional Deficit / Overhead Share Allocation (Tagged Separately from Direct Cost)
               </h2>
               <p className="text-xs text-slate-500 max-w-2xl">
-                Allocates unrecovered deficit (<strong className="font-mono text-rose-700">Rs. {unrecoveredDeficit.toLocaleString()}</strong>) to matching active <code className="text-slate-700">Self</code> animals by weight &amp; acquisition date—using species average weight or tenure days instead of a 1 kg fallback.
+                Unrecovered deficit: <strong className="font-mono text-rose-700">Rs. {unrecoveredDeficit.toLocaleString()}</strong>. Logged under <code className="text-slate-700">Farm Overhead / Deficit Share</code> so direct purchase &amp; care costs stay clearly separated from shared overhead.
               </p>
             </div>
 
@@ -1986,7 +2022,7 @@ export default async function FinancesPage({
                 <input
                   name="period_label"
                   type="text"
-                  defaultValue="Jul-Nov 2026 Deficit"
+                  defaultValue="Jul-Nov 2026 Overhead"
                   className="w-36 px-2.5 py-1.5 bg-white border border-amber-300 rounded-lg text-xs text-slate-900"
                 />
               </div>
@@ -2005,7 +2041,7 @@ export default async function FinancesPage({
                 disabled={(selfAnimals || []).length === 0}
                 className="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:bg-slate-300 text-white font-bold rounded-lg text-xs shadow-xs transition"
               >
-                ⚖️ Allocate by Weight
+                ⚖️ Allocate Overhead Share
               </button>
             </form>
           </div>
@@ -2331,6 +2367,7 @@ export default async function FinancesPage({
                   <option value="OPERATING_CASH">1. Operating Cash (30-Day Ops)</option>
                   <option value="ANIMAL_CAPITAL">2. Animal Buying Cash (Capital Only)</option>
                   <option value="EMERGENCY_MORTALITY">3. Emergency / Mortality (10% Reserve)</option>
+                  <option value="OWNER_PROFIT">4. Owner Draw Wallet (20% Profit)</option>
                 </select>
               </div>
 

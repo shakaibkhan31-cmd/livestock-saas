@@ -1,6 +1,10 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 
-export type WalletType = 'OPERATING_CASH' | 'ANIMAL_CAPITAL' | 'EMERGENCY_MORTALITY'
+export type WalletType =
+  | 'OPERATING_CASH'
+  | 'ANIMAL_CAPITAL'
+  | 'EMERGENCY_MORTALITY'
+  | 'OWNER_PROFIT'
 
 export interface FarmWalletRecord {
   id: string
@@ -25,6 +29,7 @@ export interface SaleSplitExecutionResult {
   breakdown: SaleSplitBreakdown
   newCapitalBalance: number
   newOperatingBalance: number
+  newOwnerProfitBalance: number
 }
 
 export interface MortalityClaimExecutionResult {
@@ -47,13 +52,13 @@ export interface WeeklyCashPulseInputItem {
 export interface WeeklyCashPulseSummary {
   windowStartDate: string
   windowEndDate: string
-  coreCashOut7d: number // Feed + Labour + Medicine
+  coreCashOut7d: number
   otherCashOut7d: number
   totalCashOut7d: number
-  shortCycleCashIn7d: number // Milk + Manure + Animal Sales
+  shortCycleCashIn7d: number
   palaiCashIn7d: number
   totalCashIn7d: number
-  weeklyNetGap: number // shortCycleCashIn7d - coreCashOut7d
+  weeklyNetGap: number
   isRedFlag: boolean
   runwayDays: number | null
   avgDailyOperatingBurn: number
@@ -410,7 +415,7 @@ export async function ensureDefaultWallets(
     {
       farm_id: farmId,
       wallet_type: 'ANIMAL_CAPITAL',
-      name: 'Animal Buying Cash (Capital)',
+      name: 'Animal Buying Cash (60%)',
       account_label: 'Dedicated Purchase Pool',
       current_balance: 0,
       target_buffer_amount: 0,
@@ -419,7 +424,15 @@ export async function ensureDefaultWallets(
       farm_id: farmId,
       wallet_type: 'EMERGENCY_MORTALITY',
       name: 'Emergency / Mortality Fund (10%)',
-      account_label: '10% Livestock Value Reserve',
+      account_label: '10% Active Self Stock Value',
+      current_balance: 0,
+      target_buffer_amount: 0,
+    },
+    {
+      farm_id: farmId,
+      wallet_type: 'OWNER_PROFIT',
+      name: 'Owner Draw / Retained Profit (20%)',
+      account_label: 'Owner Draw & Personal Split',
       current_balance: 0,
       target_buffer_amount: 0,
     },
@@ -437,6 +450,10 @@ export async function ensureDefaultWallets(
   return (data || []) as FarmWalletRecord[]
 }
 
+/**
+ * Computes balance directly from SUM(wallet_transactions) and syncs farm_wallets.
+ * Postgres trigger `trg_sync_wallet_balance` also keeps current_balance synced automatically.
+ */
 export async function recalculateWalletBalance(
   supabase: SupabaseClient,
   farmId: string,
@@ -463,10 +480,10 @@ export async function recalculateWalletBalance(
 }
 
 /**
- * Phase 4A: 60/20/20 Sale Proceeds Split
- * - 60% -> Wallet 2 (ANIMAL_CAPITAL) to buy replacement livestock
- * - 20% -> Wallet 1 (OPERATING_CASH) to fund 30-day feed/labour/medicine buffer
- * - 20% -> Retained Net Profit (logged in animal_financial_logs / summary without mixing into buying capital)
+ * 60/20/20 Sale Proceeds Split across 3 dedicated wallets:
+ * - 60% -> ANIMAL_CAPITAL
+ * - 20% -> OPERATING_CASH
+ * - 20% -> OWNER_PROFIT (Owner Draw / Retained Profit wallet)
  */
 export async function applySaleProceedsSplitToWallets({
   supabase,
@@ -487,19 +504,22 @@ export async function applySaleProceedsSplitToWallets({
   const wallets = await ensureDefaultWallets(supabase, farmId)
   const capitalWallet = wallets.find(w => w.wallet_type === 'ANIMAL_CAPITAL')
   const operatingWallet = wallets.find(w => w.wallet_type === 'OPERATING_CASH')
+  const ownerProfitWallet = wallets.find(w => w.wallet_type === 'OWNER_PROFIT')
 
-  if (breakdown.salePrice <= 0 || !capitalWallet || !operatingWallet) {
+  if (breakdown.salePrice <= 0 || !capitalWallet || !operatingWallet || !ownerProfitWallet) {
     return {
       applied: false,
       alreadyProcessed: false,
       breakdown,
       newCapitalBalance: Number(capitalWallet?.current_balance || 0),
       newOperatingBalance: Number(operatingWallet?.current_balance || 0),
+      newOwnerProfitBalance: Number(ownerProfitWallet?.current_balance || 0),
     }
   }
 
   const capRef = `SALE_SPLIT_60_${animalId}`
-  const opRef = `SALE_SPLIT_20_${animalId}`
+  const opRef = `SALE_SPLIT_20_OPS_${animalId}`
+  const profRef = `SALE_SPLIT_20_OWNER_${animalId}`
 
   const { data: existingCap } = await supabase
     .from('wallet_transactions')
@@ -515,6 +535,7 @@ export async function applySaleProceedsSplitToWallets({
       breakdown,
       newCapitalBalance: Number(capitalWallet.current_balance || 0),
       newOperatingBalance: Number(operatingWallet.current_balance || 0),
+      newOwnerProfitBalance: Number(ownerProfitWallet.current_balance || 0),
     }
   }
 
@@ -530,7 +551,7 @@ export async function applySaleProceedsSplitToWallets({
       amount: breakdown.capital60,
       source_type: 'ANIMAL_SALE_60_CAPITAL',
       txn_date: txnDate,
-      notes: `60% Capital Reinvestment from Sale of ${tagId} (Total Sale: Rs. ${breakdown.salePrice.toLocaleString()} | 20% Profit Retained: Rs. ${breakdown.profit20.toLocaleString()})`,
+      notes: `60% Animal Buying Capital from Sale of ${tagId} (Sale: Rs. ${breakdown.salePrice.toLocaleString()})`,
     })
   }
 
@@ -544,7 +565,21 @@ export async function applySaleProceedsSplitToWallets({
       amount: breakdown.operating20,
       source_type: 'ANIMAL_SALE_20_OPERATING',
       txn_date: txnDate,
-      notes: `20% Operating Runway Share from Sale of ${tagId} (Total Sale: Rs. ${breakdown.salePrice.toLocaleString()})`,
+      notes: `20% Operating Cash from Sale of ${tagId} (Sale: Rs. ${breakdown.salePrice.toLocaleString()})`,
+    })
+  }
+
+  if (breakdown.profit20 > 0) {
+    rowsToInsert.push({
+      farm_id: farmId,
+      wallet_id: ownerProfitWallet.id,
+      animal_id: animalId,
+      reference_key: profRef,
+      entry_type: 'IN',
+      amount: breakdown.profit20,
+      source_type: 'ANIMAL_SALE_20_OWNER_PROFIT',
+      txn_date: txnDate,
+      notes: `20% Owner Draw / Retained Profit from Sale of ${tagId} (Sale: Rs. ${breakdown.salePrice.toLocaleString()})`,
     })
   }
 
@@ -552,9 +587,10 @@ export async function applySaleProceedsSplitToWallets({
     await supabase.from('wallet_transactions').insert(rowsToInsert)
   }
 
-  const [newCapitalBalance, newOperatingBalance] = await Promise.all([
+  const [newCapitalBalance, newOperatingBalance, newOwnerProfitBalance] = await Promise.all([
     recalculateWalletBalance(supabase, farmId, capitalWallet.id),
     recalculateWalletBalance(supabase, farmId, operatingWallet.id),
+    recalculateWalletBalance(supabase, farmId, ownerProfitWallet.id),
   ])
 
   return {
@@ -563,13 +599,12 @@ export async function applySaleProceedsSplitToWallets({
     breakdown,
     newCapitalBalance,
     newOperatingBalance,
+    newOwnerProfitBalance,
   }
 }
 
 /**
- * Phase 4B: Mortality 10% Emergency Fund Claim Flow
- * - Absorbs animal purchase cost_basis from Wallet 3 (EMERGENCY_MORTALITY) up to available reserve
- * - Logs mortality loss entry on animal_financial_logs and flags any uncovered capital shortfall
+ * Mortality 10% Emergency Fund Claim Flow
  */
 export async function applyMortalityEmergencyClaim({
   supabase,
@@ -648,7 +683,6 @@ export async function applyMortalityEmergencyClaim({
     ])
   }
 
-  // Record mortality write-off in animal_financial_logs for full P&L audit trail
   if (safeCost > 0) {
     await supabase.from('animal_financial_logs').insert([
       {
