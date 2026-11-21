@@ -18,6 +18,16 @@ import {
 } from '@/utils/wallets'
 import FinancesExportButton, { type ExportableTxn } from './FinancesExportButton'
 
+
+function getPakistanDateString(): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Karachi',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date())
+}
+
 const SPECIES_OPTIONS = [
   'Goat',
   'Sheep',
@@ -231,10 +241,9 @@ export default async function FinancesPage({
       .eq('farm_id', farm.id)
       .order('txn_date', { ascending: false })
       .order('created_at', { ascending: false })
-      .limit(40),
   ])
 
-  const todayStr = new Date().toISOString().split('T')[0]
+  const todayStr = getPakistanDateString()
   const currentMonthStr = todayStr.slice(0, 7)
 
   const walletByType: Partial<Record<WalletType, (typeof wallets)[number]>> = {}
@@ -278,7 +287,7 @@ export default async function FinancesPage({
   const sale20OwnerTotal = allAuditRows
     .filter(r => r.source_type === 'ANIMAL_SALE_20_OWNER_PROFIT' && r.entry_type === 'IN')
     .reduce((s, r) => s + (Number(r.amount) || 0), 0)
-  const implied20RetainedProfit = sale20OwnerTotal > 0 ? sale20OwnerTotal : Math.round(sale60Total / 3)
+  const implied20RetainedProfit = sale20OwnerTotal
 
   const mortalityClaimedTotal = allAuditRows
     .filter(r => r.source_type === 'MORTALITY_CLAIM' && r.entry_type === 'OUT')
@@ -297,7 +306,13 @@ export default async function FinancesPage({
     const rate = Number(a.monthly_palai_fee) > 0 ? Number(a.monthly_palai_fee) : 5000
     const acqStr = a.acquisition_date ? String(a.acquisition_date).split('T')[0] : todayStr
     const daysBoarded = Math.max(1, daysBetweenDateStrings(acqStr, todayStr, 1))
+    // BUSINESS RULE: Palai is billed in non-refundable 30-day advance blocks.
+    // Day 1-30 = Block 1; Day 31 begins Block 2.
     const billedMonths = Math.max(1, Math.ceil(daysBoarded / 30))
+    const billedDays = billedMonths * 30
+    const nextBillingDate = new Date(`${acqStr}T00:00:00Z`)
+    nextBillingDate.setUTCDate(nextBillingDate.getUTCDate() + billedDays)
+    const nextBillingDateStr = nextBillingDate.toISOString().slice(0, 10)
     const accruedBoarding = rate * billedMonths
 
     const animalRevenueLogs = (animalFinLogs || []).filter(
@@ -344,6 +359,8 @@ export default async function FinancesPage({
       monthly_fee: rate,
       daysBoarded,
       billedMonths,
+      billedDays,
+      nextBillingDate: nextBillingDateStr,
       totalBilled,
       totalPaid,
       balanceDue,
@@ -611,10 +628,14 @@ export default async function FinancesPage({
   // Server Action: Fund / Adjust a Wallet (4 Wallets Discipline)
   const fundWalletAction = async (formData: FormData) => {
     'use server'
+    const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
+    if (!actionUser || !actionFarm || actionRole !== 'admin' || actionFarm.id !== farm.id) {
+      return redirect(`/finances?error=${encodeURIComponent('Access denied: admin permission required for this financial action.')}`)
+    }
     const walletType = ((formData.get('wallet_type') as string) || 'OPERATING_CASH') as WalletType
     const entryType = ((formData.get('entry_type') as string) || 'IN') === 'OUT' ? 'OUT' : 'IN'
     const amount = parseFloat((formData.get('amount') as string) || '0')
-    const txnDate = ((formData.get('txn_date') as string) || '').trim() || new Date().toISOString().split('T')[0]
+    const txnDate = ((formData.get('txn_date') as string) || '').trim() || getPakistanDateString()
     const notes = ((formData.get('notes') as string) || '').trim() || 'Wallet Funding / Adjustment'
 
     if (isNaN(amount) || amount <= 0) {
@@ -664,6 +685,10 @@ export default async function FinancesPage({
   // Phase 5 Server Action: Delete Wallet Audit Transaction & Recalculate Wallet Balance
   const deleteWalletAuditRowAction = async (formData: FormData) => {
     'use server'
+    const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
+    if (!actionUser || !actionFarm || actionRole !== 'admin' || actionFarm.id !== farm.id) {
+      return redirect(`/finances?error=${encodeURIComponent('Access denied: admin permission required for this financial action.')}`)
+    }
     const wtId = ((formData.get('wtId') as string) || '').trim()
     const walletId = ((formData.get('walletId') as string) || '').trim()
     if (!wtId || !walletId) {
@@ -689,9 +714,13 @@ export default async function FinancesPage({
   // Server Action: Log Palai Client Boarding Payment (credits Operating Cash Wallet)
   const logPalaiPaymentAction = async (formData: FormData) => {
     'use server'
+    const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
+    if (!actionUser || !actionFarm || actionRole !== 'admin' || actionFarm.id !== farm.id) {
+      return redirect(`/finances?error=${encodeURIComponent('Access denied: admin permission required for this financial action.')}`)
+    }
     const animalId = ((formData.get('animalId') as string) || '').trim()
     const amount = parseFloat((formData.get('amount') as string) || '0')
-    const paymentDate = ((formData.get('payment_date') as string) || '').trim() || new Date().toISOString().split('T')[0]
+    const paymentDate = ((formData.get('payment_date') as string) || '').trim() || getPakistanDateString()
     const notes = ((formData.get('notes') as string) || '').trim() || 'Palai Client Boarding Payment'
 
     if (!animalId || isNaN(amount) || amount <= 0) {
@@ -772,8 +801,12 @@ export default async function FinancesPage({
   // Server Action: One-Click Species-Scoped Weight & Acquisition-Based Overhead Allocation
   const allocateDeficitByWeight = async (formData: FormData) => {
     'use server'
+    const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
+    if (!actionUser || !actionFarm || actionRole !== 'admin' || actionFarm.id !== farm.id) {
+      return redirect(`/finances?error=${encodeURIComponent('Access denied: admin permission required for this financial action.')}`)
+    }
     const targetSpecies = ((formData.get('allocate_species') as string) || 'Goat').trim()
-    const allocationDate = ((formData.get('allocation_date') as string) || '').trim() || new Date().toISOString().split('T')[0]
+    const allocationDate = ((formData.get('allocation_date') as string) || '').trim() || getPakistanDateString()
     const periodLabel = ((formData.get('period_label') as string) || '').trim() || `${targetSpecies} Overhead Split`
     const customAmountRaw = ((formData.get('custom_amount') as string) || '').trim()
     const parsedCustomAmount = customAmountRaw ? parseFloat(customAmountRaw) : NaN
@@ -787,7 +820,7 @@ export default async function FinancesPage({
       { data: liveWeightLogs },
     ] = await Promise.all([
       supabaseClient.from('transactions').select('type, amount, target_species, description').eq('farm_id', farm.id),
-      supabaseClient.from('animal_financial_logs').select('entry_type, amount, livestock_master(species)').eq('farm_id', farm.id),
+      supabaseClient.from('animal_financial_logs').select('entry_type, category, amount, livestock_master(species)').eq('farm_id', farm.id),
       supabaseClient
         .from('livestock_master')
         .select('id, tag_id, species, acquisition_date')
@@ -815,6 +848,7 @@ export default async function FinancesPage({
     })
 
     ;(liveAnimalLogs || []).forEach((f: any) => {
+      if (f.category === 'Farm Overhead / Deficit Share') return
       const animalInfo = Array.isArray(f.livestock_master) ? f.livestock_master[0] : f.livestock_master
       const finSp = animalInfo?.species || 'Goat'
       if (!isSharedPool && finSp !== targetSpecies) return
@@ -831,6 +865,7 @@ export default async function FinancesPage({
       else overallExpense += amt
     })
     ;(liveAnimalLogs || []).forEach((f: any) => {
+      if (f.category === 'Farm Overhead / Deficit Share') return
       const amt = Number(f.amount) || 0
       if (f.entry_type === 'Revenue') overallIncome += amt
       else overallExpense += amt
@@ -892,19 +927,26 @@ export default async function FinancesPage({
       notes: string
     }> = []
 
+    // One idempotency lookup instead of one query per animal.
+    const { data: existingAllocationRows, error: existingAllocationErr } = await supabaseClient
+      .from('animal_financial_logs')
+      .select('id, animal_id, notes')
+      .eq('farm_id', farm.id)
+      .eq('category', 'Farm Overhead / Deficit Share')
+      .ilike('notes', `${allocationTag}%`)
+
+    if (existingAllocationErr) {
+      return redirect(`/finances?error=${encodeURIComponent('Could not verify prior allocation: ' + existingAllocationErr.message)}`)
+    }
+
+    if ((existingAllocationRows || []).length > 0) {
+      return redirect(`/finances?msg=${encodeURIComponent(`Allocation tag already exists for ${targetSpecies} (${periodLabel} @ ${allocationDate}). No new entries created to avoid double allocation.`)}`)
+    }
+
     let allocatedSum = 0
 
     for (let idx = 0; idx < weightedAnimals.length; idx++) {
       const animal = weightedAnimals[idx]
-
-      const { data: existingEntry } = await supabaseClient
-        .from('animal_financial_logs')
-        .select('id')
-        .eq('animal_id', animal.id)
-        .eq('notes', allocationTag)
-        .maybeSingle()
-
-      if (existingEntry) continue
 
       const shareRatio = animal.effectiveWeight / sumEffectiveWeight
       const isLast = idx === weightedAnimals.length - 1
@@ -953,6 +995,10 @@ export default async function FinancesPage({
   // Server Action: Run Monthly Palai Auto-Billing
   const runMonthlyPalaiBilling = async (formData: FormData) => {
     'use server'
+    const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
+    if (!actionUser || !actionFarm || actionRole !== 'admin' || actionFarm.id !== farm.id) {
+      return redirect(`/finances?error=${encodeURIComponent('Access denied: admin permission required for this financial action.')}`)
+    }
     const billingMonth = formData.get('billing_month') as string
     const defaultFee = parseFloat(formData.get('default_fee') as string) || 5000
 
@@ -971,50 +1017,41 @@ export default async function FinancesPage({
 
     const billingNoteTag = `Auto-Bill (${billingMonth})`
     const billingDate = `${billingMonth}-01`
-    let billedCount = 0
 
-    for (const animal of activePalai) {
-      const { data: existingLog } = await supabaseClient
+    // Fetch prior billing records once; avoids one query per animal.
+    const { data: existingBillingRows, error: existingBillingErr } = await supabaseClient
+      .from('animal_financial_logs')
+      .select('animal_id')
+      .eq('farm_id', farm.id)
+      .eq('category', 'Palai Monthly Fee')
+      .eq('notes', billingNoteTag)
+
+    if (existingBillingErr) {
+      return redirect(`/finances?error=${encodeURIComponent('Could not check existing Palai bills: ' + existingBillingErr.message)}`)
+    }
+
+    const alreadyBilledAnimalIds = new Set((existingBillingRows || []).map((r: any) => r.animal_id))
+    const billingInserts = activePalai
+      .filter((animal: any) => !alreadyBilledAnimalIds.has(animal.id))
+      .map((animal: any) => ({
+        farm_id: farm.id,
+        animal_id: animal.id,
+        entry_type: 'Revenue',
+        category: 'Palai Monthly Fee',
+        amount: Number(animal.monthly_palai_fee) > 0 ? Number(animal.monthly_palai_fee) : defaultFee,
+        transaction_date: billingDate,
+        notes: billingNoteTag,
+      }))
+
+    const billedCount = billingInserts.length
+    if (billedCount > 0) {
+      const { error: billingInsertErr } = await supabaseClient
         .from('animal_financial_logs')
-        .select('id')
-        .eq('animal_id', animal.id)
-        .eq('notes', billingNoteTag)
-        .maybeSingle()
+        .insert(billingInserts)
 
-      if (existingLog) continue
-
-      const feeAmount = Number(animal.monthly_palai_fee) > 0 ? Number(animal.monthly_palai_fee) : defaultFee
-
-      await supabaseClient.from('animal_financial_logs').insert([
-        {
-          farm_id: farm.id,
-          animal_id: animal.id,
-          entry_type: 'Revenue',
-          category: 'Palai Monthly Fee',
-          amount: feeAmount,
-          transaction_date: billingDate,
-          notes: billingNoteTag,
-        },
-      ])
-
-      if (animal.client_name) {
-        const { data: contactMatch } = await supabaseClient
-          .from('contacts')
-          .select('id, opening_balance')
-          .eq('farm_id', farm.id)
-          .ilike('name', animal.client_name.trim())
-          .maybeSingle()
-
-        if (contactMatch) {
-          const updatedReceivable = (Number(contactMatch.opening_balance) || 0) + feeAmount
-          await supabaseClient
-            .from('contacts')
-            .update({ opening_balance: updatedReceivable })
-            .eq('id', contactMatch.id)
-        }
+      if (billingInsertErr) {
+        return redirect(`/finances?error=${encodeURIComponent('Palai billing failed: ' + billingInsertErr.message)}`)
       }
-
-      billedCount++
     }
 
     if (billedCount === 0) {
@@ -1023,7 +1060,7 @@ export default async function FinancesPage({
 
     return redirect(
       `/finances?msg=${encodeURIComponent(
-        `Generated monthly Palai bills for ${billedCount} animal(s) for ${billingMonth} & updated client balances.`
+        `Generated monthly Palai bills for ${billedCount} animal(s) for ${billingMonth}. Client receivables remain in the Palai ledger; contacts opening balances were not changed.`
       )}`
     )
   }
@@ -1031,12 +1068,16 @@ export default async function FinancesPage({
   // Server Action: Add Global Farm Transaction (with Target Species & Wallet Guardrail)
   const addTransaction = async (formData: FormData) => {
     'use server'
+    const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
+    if (!actionUser || !actionFarm || actionRole !== 'admin' || actionFarm.id !== farm.id) {
+      return redirect(`/finances?error=${encodeURIComponent('Access denied: admin permission required for this financial action.')}`)
+    }
     const rawType = ((formData.get('type') as string) || 'Expense').trim()
     const type = rawType === 'Income' ? 'Income' : 'Expense'
     const targetSpecies = ((formData.get('target_species') as string) || 'Goat').trim()
     const category = ((formData.get('category') as string) || '').trim()
     const parsedAmount = parseFloat((formData.get('amount') as string) || '0')
-    const txn_date = ((formData.get('txn_date') as string) || '').trim() || new Date().toISOString().split('T')[0]
+    const txn_date = ((formData.get('txn_date') as string) || '').trim() || getPakistanDateString()
     const rawDescription = ((formData.get('description') as string) || '').trim()
     const selectedWalletType = ((formData.get('wallet_type') as string) || 'OPERATING_CASH') as WalletType
 
@@ -1088,39 +1129,84 @@ export default async function FinancesPage({
 
     if (error) return redirect(`/finances?error=${encodeURIComponent(error.message)}`)
 
-    // Sync wallet ledger for selected wallet
+    // Sync wallet ledger. Only explicitly categorized animal-sale income uses 60/20/20.
     const farmWallets = await ensureDefaultWallets(supabaseClient, farm.id)
-    const targetWallet = farmWallets.find(w => w.wallet_type === selectedWalletType)
-    if (targetWallet) {
-      const sourceType =
-        type === 'Income' && (catLower.includes('milk') || catLower.includes('manure'))
-          ? 'MILK_MANURE'
-          : type === 'Income' && catLower.includes('palai')
-          ? 'PALAI_PAYMENT'
-          : type === 'Income'
-          ? 'ANIMAL_SALE'
-          : 'DAILY_EXPENSE'
+    const walletFor = (walletType: WalletType) => farmWallets.find(w => w.wallet_type === walletType)
+    const walletNotes = `${category} (${targetSpecies})${rawDescription ? ` — ${rawDescription}` : ''}`
 
-      await supabaseClient.from('wallet_transactions').insert([
-        {
+    const isAnimalSaleIncome =
+      type === 'Income' && (catLower.includes('animal sale') || catLower.includes('livestock sale'))
+
+    if (isAnimalSaleIncome) {
+      const capitalAmount = Math.round(parsedAmount * 0.60)
+      const operatingAmount = Math.round(parsedAmount * 0.20)
+      const ownerProfitAmount = parsedAmount - capitalAmount - operatingAmount
+      const splitEntries = [
+        { walletType: 'ANIMAL_CAPITAL' as WalletType, amount: capitalAmount, sourceType: 'ANIMAL_SALE_60_CAPITAL' },
+        { walletType: 'OPERATING_CASH' as WalletType, amount: operatingAmount, sourceType: 'ANIMAL_SALE_20_OPERATING' },
+        { walletType: 'OWNER_PROFIT' as WalletType, amount: ownerProfitAmount, sourceType: 'ANIMAL_SALE_20_OWNER_PROFIT' },
+      ].filter(e => e.amount > 0)
+
+      for (const entry of splitEntries) {
+        const wallet = walletFor(entry.walletType)
+        if (!wallet) {
+          return redirect(`/finances?error=${encodeURIComponent(`Required wallet missing: ${entry.walletType}. Transaction saved, but wallet split is incomplete; reconcile before proceeding.`)}`)
+        }
+        const { error: walletInsertErr } = await supabaseClient.from('wallet_transactions').insert([{
+          farm_id: farm.id,
+          wallet_id: wallet.id,
+          entry_type: 'IN',
+          amount: entry.amount,
+          source_type: entry.sourceType,
+          txn_date,
+          notes: walletNotes,
+        }])
+        if (walletInsertErr) {
+          return redirect(`/finances?error=${encodeURIComponent(`Sale recorded, but wallet split failed: ${walletInsertErr.message}. Reconcile this transaction.`)}`)
+        }
+        await recalculateWalletBalance(supabaseClient, farm.id, wallet.id)
+      }
+    } else {
+      const targetWallet = walletFor(selectedWalletType)
+      if (targetWallet) {
+        const sourceType =
+          type === 'Income' && (catLower.includes('milk') || catLower.includes('manure'))
+            ? 'MILK_MANURE'
+            : type === 'Income' && catLower.includes('palai')
+            ? 'PALAI_PAYMENT'
+            : type === 'Income'
+            ? 'OTHER_INCOME'
+            : 'DAILY_EXPENSE'
+
+        const { error: walletInsertErr } = await supabaseClient.from('wallet_transactions').insert([{
           farm_id: farm.id,
           wallet_id: targetWallet.id,
           entry_type: type === 'Income' ? 'IN' : 'OUT',
           amount: parsedAmount,
           source_type: sourceType,
           txn_date,
-          notes: `${category} (${targetSpecies})${rawDescription ? ` — ${rawDescription}` : ''}`,
-        },
-      ])
-      await recalculateWalletBalance(supabaseClient, farm.id, targetWallet.id)
+          notes: walletNotes,
+        }])
+        if (walletInsertErr) {
+          return redirect(`/finances?error=${encodeURIComponent(`Transaction saved, but wallet sync failed: ${walletInsertErr.message}. Reconcile this transaction.`)}`)
+        }
+        await recalculateWalletBalance(supabaseClient, farm.id, targetWallet.id)
+      }
     }
 
     return redirect(`/finances?msg=${encodeURIComponent(`Transaction recorded under ${targetSpecies}.`)}`)
   }
 
+  // NOTE: This remains a hard-delete action in this version. Safe VOID behavior requires
+  // status-aware wallet recalculation in @/utils/wallets and linked source IDs; do not deploy
+  // this delete action until those companion changes are applied.
   // Server Action: Delete Transaction
   const deleteTransaction = async (formData: FormData) => {
     'use server'
+    const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
+    if (!actionUser || !actionFarm || actionRole !== 'admin' || actionFarm.id !== farm.id) {
+      return redirect(`/finances?error=${encodeURIComponent('Access denied: admin permission required for this financial action.')}`)
+    }
     const txnId = formData.get('txnId') as string
     const source = formData.get('source') as string
     const supabaseClient = await createClient()
@@ -1899,7 +1985,7 @@ export default async function FinancesPage({
                       <td className="px-5 py-3.5 text-xs font-mono text-slate-700">
                         <div>Rs. {row.monthly_fee.toLocaleString()}/mo</div>
                         <div className="text-[10px] text-slate-400">
-                          {row.daysBoarded}d ({row.billedMonths} mo)
+                          {row.daysBoarded}d ({row.billedMonths} × 30d blocks)\n                          <div>Next block: {formatDateDDMMYYYY(row.nextBillingDate)}</div>
                         </div>
                       </td>
                       <td className="px-5 py-3.5 text-xs font-mono font-bold text-slate-900">
