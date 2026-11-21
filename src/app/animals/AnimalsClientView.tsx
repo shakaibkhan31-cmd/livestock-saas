@@ -205,12 +205,21 @@ export default function AnimalsClientView({
     <div className="space-y-4">
       {/* Multi-Select Bulk Action Bar */}
       {selectedIds.length > 0 && (
-        <div className="bg-slate-900 text-white px-5 py-3.5 rounded-2xl shadow-lg flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <span className="px-2.5 py-1 bg-green-500 text-slate-950 font-bold text-xs rounded-lg">
-              {selectedIds.length} Selected
-            </span>
-            <span className="text-sm text-slate-300">Apply bulk status change or action:</span>
+        <div className="bg-slate-900 text-white px-4 sm:px-5 py-3.5 rounded-2xl shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center justify-between sm:justify-start gap-3">
+            <div className="flex items-center gap-2.5">
+              <span className="px-2.5 py-1 bg-green-500 text-slate-950 font-bold text-xs rounded-lg">
+                {selectedIds.length} Selected
+              </span>
+              <span className="text-xs sm:text-sm text-slate-300">Bulk action:</span>
+            </div>
+            <button
+              type="button"
+              onClick={toggleSelectAll}
+              className="text-xs text-emerald-300 hover:underline sm:hidden"
+            >
+              {selectedIds.length === filteredAnimals.length ? 'Unselect All' : 'Select All'}
+            </button>
           </div>
 
           <form action={bulkUpdateAction} className="flex flex-wrap items-center gap-2">
@@ -262,23 +271,23 @@ export default function AnimalsClientView({
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
         {/* Search, Filter & Bulk Tools Toolbar */}
         <div className="p-4 sm:p-6 border-b border-slate-100 space-y-3 bg-slate-50/50">
-          <div className="flex flex-col lg:flex-row items-center justify-between gap-4">
+          <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3.5">
             <div className="w-full lg:w-80">
               <input
                 type="text"
-                placeholder="Search by Tag ID, Species, Breed, Client..."
+                placeholder="Search Tag ID, Species, Breed, Client..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full px-4 py-2 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-600 transition"
+                className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-600 transition"
               />
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto justify-between lg:justify-end">
-              <div className="flex items-center gap-1.5">
+            <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2 w-full lg:w-auto justify-between lg:justify-end">
+              <div className="grid grid-cols-3 sm:flex items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => setFilterOwnership('All')}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${
+                  className={`px-2.5 py-1.5 text-xs font-medium rounded-lg transition text-center ${
                     filterOwnership === 'All' ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
                   }`}
                 >
@@ -287,7 +296,7 @@ export default function AnimalsClientView({
                 <button
                   type="button"
                   onClick={() => setFilterOwnership('Self')}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${
+                  className={`px-2.5 py-1.5 text-xs font-medium rounded-lg transition text-center ${
                     filterOwnership === 'Self' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
                   }`}
                 >
@@ -296,37 +305,37 @@ export default function AnimalsClientView({
                 <button
                   type="button"
                   onClick={() => setFilterOwnership('Client')}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-lg transition ${
+                  className={`px-2.5 py-1.5 text-xs font-medium rounded-lg transition text-center ${
                     filterOwnership === 'Client' ? 'bg-purple-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
                   }`}
                 >
-                  Palai (Client)
+                  Palai
                 </button>
               </div>
 
-              <div className="h-5 w-px bg-slate-200 hidden sm:block mx-1"></div>
+              <div className="h-5 w-px bg-slate-200 hidden lg:block mx-1"></div>
 
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="grid grid-cols-3 sm:flex flex-wrap items-center gap-1.5 sm:gap-2">
                 <button
                   type="button"
                   onClick={() => setShowWeightModal(true)}
-                  className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-50 text-amber-800 border border-amber-300 hover:bg-amber-100 transition"
+                  className="px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-amber-50 text-amber-800 border border-amber-300 hover:bg-amber-100 transition text-center"
                 >
-                  ⚖️ Bulk Weigh-In
+                  ⚖️ Weigh-In
                 </button>
                 <button
                   type="button"
                   onClick={() => setShowImportModal(true)}
-                  className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition"
+                  className="px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition text-center"
                 >
-                  ↑ Bulk CSV Import
+                  ↑ Import
                 </button>
                 <button
                   type="button"
                   onClick={exportFilteredCsv}
-                  className="px-3 py-1.5 text-xs font-medium rounded-lg bg-white text-slate-700 border border-slate-200 hover:bg-slate-100 transition"
+                  className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-white text-slate-700 border border-slate-200 hover:bg-slate-100 transition text-center"
                 >
-                  ↓ Export CSV
+                  ↓ CSV
                 </button>
               </div>
             </div>
@@ -375,8 +384,140 @@ export default function AnimalsClientView({
           )}
         </div>
 
-        {/* Table */}
-        <div className="overflow-x-auto">
+        {/* Mobile Card View (< md) */}
+        <div className="md:hidden divide-y divide-slate-100">
+          {filteredAnimals.length > 0 ? (
+            filteredAnimals.map((animal) => {
+              const isChecked = selectedIds.includes(animal.id)
+              const isSelf = animal.ownership === 'Self'
+              const emoji = getSpeciesEmoji(animal.species)
+
+              return (
+                <div
+                  key={animal.id}
+                  className={`p-4 space-y-3 transition-colors ${
+                    isChecked ? 'bg-green-50/60' : 'bg-white'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => toggleSelect(animal.id)}
+                        className="h-4 w-4 rounded border-slate-300 accent-green-600 cursor-pointer shrink-0"
+                      />
+                      <div className="h-11 w-11 rounded-xl bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center shrink-0">
+                        {animal.photo_url ? (
+                          <img src={animal.photo_url} alt={animal.tag_id} className="h-full w-full object-cover" />
+                        ) : (
+                          <span className="text-xl">{emoji}</span>
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <Link
+                            href={`/animals/${animal.id}`}
+                            className="font-mono font-bold text-sm text-green-700 hover:underline bg-green-50 px-2 py-0.5 rounded-lg border border-green-200"
+                          >
+                            {animal.tag_id}
+                          </Link>
+                          <span
+                            className={`inline-flex items-center px-2 py-0.5 text-[10px] font-semibold rounded-full border ${
+                              animal.status === 'Sold'
+                                ? 'bg-amber-50 text-amber-800 border-amber-300'
+                                : animal.status === 'Active'
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                : 'bg-slate-100 text-slate-700 border-slate-200'
+                            }`}
+                          >
+                            {animal.status}
+                          </span>
+                        </div>
+                        <p className="text-xs font-medium text-slate-800 mt-1 truncate">
+                          {emoji} {animal.species}
+                          {animal.breed_name ? ` • ${animal.breed_name}` : ''} • {animal.sex}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="text-right shrink-0">
+                      <p className="text-[10px] uppercase font-semibold text-slate-400">Cost Basis</p>
+                      <p className="text-xs font-mono font-bold text-slate-900">
+                        Rs. {Number(animal.cost_basis || 0).toLocaleString()}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100 text-xs">
+                    <span
+                      className={`inline-flex items-center px-2 py-0.5 text-[11px] font-medium rounded-full ${
+                        isSelf
+                          ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                          : 'bg-purple-50 text-purple-700 border border-purple-200'
+                      }`}
+                    >
+                      {animal.ownership} {animal.client_name ? `(${animal.client_name})` : ''}
+                    </span>
+
+                    {isSelf && animal.breakEven && (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="px-2 py-0.5 rounded-md text-[11px] font-mono font-bold bg-slate-900 text-amber-300">
+                          BE: Rs. {animal.breakEven.breakEvenToday.toLocaleString()}
+                        </span>
+                        {animal.breakEven.perKgToday !== null && animal.breakEven.latestWeight && (
+                          <span className="px-2 py-0.5 rounded-md text-[11px] font-mono font-bold bg-emerald-100 text-emerald-900 border border-emerald-300">
+                            Rs. {animal.breakEven.perKgToday.toLocaleString()}/kg
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2 pt-1">
+                    {isSelf && animal.status === 'Active' && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSaleAnimal(animal)
+                          setSalePrice(
+                            animal.breakEven ? String(animal.breakEven.breakEvenToday) : ''
+                          )
+                          setSaleNotes('')
+                        }}
+                        className="flex-1 py-1.5 px-2.5 rounded-lg text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 transition text-xs font-semibold text-center"
+                      >
+                        💰 Sell
+                      </button>
+                    )}
+                    <Link
+                      href={`/animals/${animal.id}/edit`}
+                      className="flex-1 py-1.5 px-2.5 rounded-lg text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 transition text-xs font-medium text-center"
+                    >
+                      Edit
+                    </Link>
+                    <form action={deleteAction} className="flex-1">
+                      <input type="hidden" name="animalId" value={animal.id} />
+                      <button
+                        type="submit"
+                        className="w-full py-1.5 px-2.5 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 transition text-xs font-medium text-center"
+                      >
+                        Delete
+                      </button>
+                    </form>
+                  </div>
+                </div>
+              )
+            })
+          ) : (
+            <div className="px-5 py-10 text-center text-sm text-slate-500">
+              No animals found matching your search or filter.
+            </div>
+          )}
+        </div>
+
+        {/* Desktop Table View (>= md) */}
+        <div className="hidden md:block overflow-x-auto">
           <table className="min-w-full divide-y divide-slate-100">
             <thead className="bg-slate-50">
               <tr>
@@ -538,18 +679,18 @@ export default function AnimalsClientView({
 
       {/* Bulk Weight Logging Modal */}
       {showWeightModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-2xl w-full overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-900 text-white">
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="px-5 sm:px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-900 text-white shrink-0">
               <div>
-                <h3 className="text-base font-bold">⚖️ Bulk Shed Weigh-In</h3>
-                <p className="text-xs text-slate-300">Enter current weights (KG) for one or more active animals</p>
+                <h3 className="text-sm sm:text-base font-bold">⚖️ Bulk Shed Weigh-In</h3>
+                <p className="text-[11px] sm:text-xs text-slate-300">Enter current weights (KG) for one or more active animals</p>
               </div>
               <button
                 type="button"
                 disabled={isSavingWeights}
                 onClick={() => setShowWeightModal(false)}
-                className="text-slate-300 hover:text-white font-bold text-lg"
+                className="text-slate-300 hover:text-white font-bold text-lg px-1"
               >
                 ×
               </button>
@@ -564,7 +705,7 @@ export default function AnimalsClientView({
                   setIsSavingWeights(false)
                 }
               }}
-              className="p-6 space-y-4"
+              className="p-4 sm:p-6 space-y-4 overflow-y-auto"
             >
               <input type="hidden" name="weightEntries" value={JSON.stringify(validWeightEntries)} />
 
@@ -593,25 +734,25 @@ export default function AnimalsClientView({
                 </div>
               </div>
 
-              <div className="max-h-72 overflow-y-auto border border-slate-200 rounded-xl divide-y divide-slate-100">
+              <div className="max-h-64 overflow-y-auto border border-slate-200 rounded-xl divide-y divide-slate-100">
                 {activeAnimals.length > 0 ? (
                   activeAnimals.map(a => (
-                    <div key={a.id} className="px-4 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50">
-                      <div className="flex items-center gap-2.5">
-                        <span className="text-base">{getSpeciesEmoji(a.species)}</span>
-                        <div>
+                    <div key={a.id} className="px-3.5 sm:px-4 py-2.5 flex items-center justify-between gap-2 sm:gap-3 hover:bg-slate-50">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-base shrink-0">{getSpeciesEmoji(a.species)}</span>
+                        <div className="min-w-0">
                           <span className="font-mono font-bold text-xs text-slate-900">{a.tag_id}</span>
-                          <span className="text-xs text-slate-500 ml-2">
+                          <span className="text-xs text-slate-500 ml-1.5 truncate">
                             {a.species} {a.breed_name ? `(${a.breed_name})` : ''}
                           </span>
                           {a.breakEven?.latestWeight && (
                             <p className="text-[11px] text-slate-400">
-                              Last recorded: {a.breakEven.latestWeight} kg
+                              Last: {a.breakEven.latestWeight} kg
                             </p>
                           )}
                         </div>
                       </div>
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1 shrink-0">
                         <input
                           type="number"
                           step="0.1"
@@ -624,7 +765,7 @@ export default function AnimalsClientView({
                               [a.id]: e.target.value,
                             }))
                           }
-                          className="w-24 px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-right text-slate-900 focus:ring-2 focus:ring-green-600"
+                          className="w-20 sm:w-24 px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-right text-slate-900 focus:ring-2 focus:ring-green-600"
                         />
                         <span className="text-xs text-slate-400">kg</span>
                       </div>
@@ -635,7 +776,7 @@ export default function AnimalsClientView({
                 )}
               </div>
 
-              <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 pt-3 border-t border-slate-100">
                 <span className="text-xs text-slate-500">
                   <strong>{validWeightEntries.length}</strong> animal weight(s) ready to log
                 </span>
@@ -644,14 +785,14 @@ export default function AnimalsClientView({
                     type="button"
                     disabled={isSavingWeights}
                     onClick={() => setShowWeightModal(false)}
-                    className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-medium hover:bg-slate-50"
+                    className="flex-1 sm:flex-none px-4 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-medium hover:bg-slate-50"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
                     disabled={validWeightEntries.length === 0 || isSavingWeights}
-                    className="px-5 py-2 rounded-xl bg-green-600 text-white text-xs font-semibold hover:bg-green-700 disabled:opacity-40 transition"
+                    className="flex-1 sm:flex-none px-5 py-2 rounded-xl bg-green-600 text-white text-xs font-semibold hover:bg-green-700 disabled:opacity-40 transition"
                   >
                     {isSavingWeights
                       ? 'Saving Weights...'
@@ -666,11 +807,11 @@ export default function AnimalsClientView({
 
       {/* Sale / Exit Settlement Modal */}
       {saleAnimal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-md w-full overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-emerald-950 text-white">
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-md w-full max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="px-5 sm:px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-emerald-950 text-white shrink-0">
               <div>
-                <h3 className="text-base font-bold">💰 Record Animal Sale &amp; Realized P&amp;L</h3>
+                <h3 className="text-sm sm:text-base font-bold">💰 Record Animal Sale &amp; Realized P&amp;L</h3>
                 <p className="text-xs text-emerald-200 font-mono">
                   {getSpeciesEmoji(saleAnimal.species)} {saleAnimal.tag_id} • {saleAnimal.species}
                 </p>
@@ -679,7 +820,7 @@ export default function AnimalsClientView({
                 type="button"
                 disabled={isRecordingSale}
                 onClick={() => setSaleAnimal(null)}
-                className="text-emerald-200 hover:text-white font-bold text-lg"
+                className="text-emerald-200 hover:text-white font-bold text-lg px-1"
               >
                 ×
               </button>
@@ -694,7 +835,7 @@ export default function AnimalsClientView({
                   setIsRecordingSale(false)
                 }
               }}
-              className="p-6 space-y-4"
+              className="p-4 sm:p-6 space-y-4 overflow-y-auto"
             >
               <input type="hidden" name="animalId" value={saleAnimal.id} />
 
@@ -768,14 +909,14 @@ export default function AnimalsClientView({
                   type="button"
                   disabled={isRecordingSale}
                   onClick={() => setSaleAnimal(null)}
-                  className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-medium hover:bg-slate-50"
+                  className="flex-1 sm:flex-none px-4 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-medium hover:bg-slate-50"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={parsedSalePrice <= 0 || isRecordingSale}
-                  className="px-5 py-2 rounded-xl bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 disabled:opacity-40 transition"
+                  className="flex-1 sm:flex-none px-5 py-2 rounded-xl bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 disabled:opacity-40 transition"
                 >
                   {isRecordingSale ? 'Recording Sale...' : 'Confirm Sale & Close'}
                 </button>
@@ -787,10 +928,10 @@ export default function AnimalsClientView({
 
       {/* Bulk CSV Import Modal */}
       {showImportModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-lg w-full overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-              <h3 className="text-base font-bold text-slate-900">Bulk Import Animals via CSV</h3>
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="px-5 sm:px-6 py-4 border-b border-slate-100 flex items-center justify-between shrink-0">
+              <h3 className="text-sm sm:text-base font-bold text-slate-900">Bulk Import Animals via CSV</h3>
               <button
                 type="button"
                 disabled={isImporting}
@@ -799,14 +940,14 @@ export default function AnimalsClientView({
                   setParsedRows([])
                   setCsvError('')
                 }}
-                className="text-slate-400 hover:text-slate-700 font-bold text-lg disabled:opacity-40"
+                className="text-slate-400 hover:text-slate-700 font-bold text-lg disabled:opacity-40 px-1"
               >
                 ×
               </button>
             </div>
 
-            <div className="p-6 space-y-4">
-              <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between">
+            <div className="p-4 sm:p-6 space-y-4 overflow-y-auto">
+              <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between gap-3">
                 <div>
                   <p className="text-xs font-semibold text-slate-800">Step 1: Download Sample Template</p>
                   <p className="text-[11px] text-slate-500">Fill your Mandi purchase or Palai batch in Excel/CSV.</p>
@@ -815,7 +956,7 @@ export default function AnimalsClientView({
                   type="button"
                   disabled={isImporting}
                   onClick={downloadSampleCsv}
-                  className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold rounded-lg transition disabled:opacity-40"
+                  className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold rounded-lg transition disabled:opacity-40 shrink-0"
                 >
                   Download CSV
                 </button>
@@ -828,7 +969,7 @@ export default function AnimalsClientView({
                   accept=".csv"
                   disabled={isImporting}
                   onChange={handleCsvFileUpload}
-                  className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-green-50 file:text-green-700 hover:file:bg-green-100 cursor-pointer disabled:opacity-40"
+                  className="block w-full text-xs sm:text-sm text-slate-500 file:mr-3 file:py-2 file:px-3.5 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-green-50 file:text-green-700 hover:file:bg-green-100 cursor-pointer disabled:opacity-40"
                 />
               </div>
 
