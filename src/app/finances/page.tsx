@@ -7,6 +7,7 @@ import {
   daysBetweenDateStrings,
   formatDateDDMMYYYY,
 } from '@/utils/breakeven'
+import FinancesExportButton, { type ExportableTxn } from './FinancesExportButton'
 
 const SPECIES_OPTIONS = [
   'Goat',
@@ -36,6 +37,60 @@ function extractSpeciesFromTxn(txn: { target_species?: string | null; descriptio
 function stripSpeciesTag(description?: string | null): string {
   if (!description) return ''
   return description.replace(/\s*\[Species:\s*[^\]]+\]\s*/gi, ' ').trim()
+}
+
+function formatPakistanWhatsAppPhone(rawPhone?: string | null): string | null {
+  if (!rawPhone) return null
+  const digits = rawPhone.replace(/\D/g, '')
+  if (!digits) return null
+  if (digits.startsWith('0092')) return digits.slice(2)
+  if (digits.startsWith('92')) return digits
+  if (digits.startsWith('03') && digits.length === 11) return `92${digits.slice(1)}`
+  if (digits.startsWith('3') && digits.length === 10) return `92${digits}`
+  return digits.length >= 10 ? digits : null
+}
+
+function buildPalaiWhatsAppReminderUrl({
+  farmName,
+  clientName,
+  tagId,
+  species,
+  monthlyFee,
+  billedMonths,
+  totalBilled,
+  totalPaid,
+  balanceDue,
+  phone,
+}: {
+  farmName: string
+  clientName: string
+  tagId: string
+  species: string
+  monthlyFee: number
+  billedMonths: number
+  totalBilled: number
+  totalPaid: number
+  balanceDue: number
+  phone?: string | null
+}): string {
+  const message = [
+    `Assalam-o-Alaikum ${clientName},`,
+    ``,
+    `Friendly Palai boarding reminder from *${farmName}*:`,
+    `• Animal Tag: *${tagId}* (${species})`,
+    `• Monthly Rate: Rs. ${monthlyFee.toLocaleString()}/month (${billedMonths} mo)`,
+    `• Total Billed: Rs. ${totalBilled.toLocaleString()}`,
+    `• Paid to Date: Rs. ${totalPaid.toLocaleString()}`,
+    `• *Pending Balance Due: Rs. ${balanceDue.toLocaleString()}*`,
+    ``,
+    `Kindly share confirmation once transferred. JazakAllah!`,
+  ].join('\n')
+
+  const encoded = encodeURIComponent(message)
+  const formattedPhone = formatPakistanWhatsAppPhone(phone)
+  return formattedPhone
+    ? `https://wa.me/${formattedPhone}?text=${encoded}`
+    : `https://wa.me/?text=${encoded}`
 }
 
 function buildFinancesUrl({
@@ -92,6 +147,7 @@ export default async function FinancesPage({
     { data: weightLogs },
     { data: globalTxns },
     { data: animalFinLogs },
+    { data: contactsList },
   ] = await Promise.all([
     supabase
       .from('livestock_master')
@@ -133,10 +189,22 @@ export default async function FinancesPage({
       `)
       .eq('farm_id', farm.id)
       .order('transaction_date', { ascending: false }),
+    supabase
+      .from('contacts')
+      .select('id, name, phone')
+      .eq('farm_id', farm.id),
   ])
 
   const todayStr = new Date().toISOString().split('T')[0]
   const currentMonthStr = todayStr.slice(0, 7)
+
+  const contactPhoneByName: Record<string, string> = {}
+  ;(contactsList || []).forEach(c => {
+    const key = (c.name || '').trim().toLowerCase()
+    if (key && c.phone) {
+      contactPhoneByName[key] = c.phone
+    }
+  })
 
   // Palai Client Billing & Dues Statement per active Palai animal
   const palaiClientLedger = (palaiAnimals || []).map(a => {
@@ -162,24 +230,45 @@ export default async function FinancesPage({
     const totalBilled = Math.max(accruedBoarding, autoBilledRevenue)
     const totalPaid = Math.max(0, totalRevenueRecorded - autoBilledRevenue)
     const balanceDue = Math.max(0, totalBilled - totalPaid)
+    const clientName = a.client_name || 'Unnamed Client'
+    const phone = contactPhoneByName[clientName.trim().toLowerCase()] || null
+
+    const whatsappUrl =
+      balanceDue > 0
+        ? buildPalaiWhatsAppReminderUrl({
+            farmName: farm.farm_name || 'BAA BAA Shed',
+            clientName,
+            tagId: a.tag_id,
+            species: a.species || 'Goat',
+            monthlyFee: rate,
+            billedMonths,
+            totalBilled,
+            totalPaid,
+            balanceDue,
+            phone,
+          })
+        : null
 
     return {
       id: a.id,
       tag_id: a.tag_id,
       species: a.species || 'Goat',
-      client_name: a.client_name || 'Unnamed Client',
+      client_name: clientName,
+      phone,
       monthly_fee: rate,
       daysBoarded,
       billedMonths,
       totalBilled,
       totalPaid,
       balanceDue,
+      whatsappUrl,
     }
   })
 
   const totalPalaiBilled = palaiClientLedger.reduce((s, r) => s + r.totalBilled, 0)
   const totalPalaiPaid = palaiClientLedger.reduce((s, r) => s + r.totalPaid, 0)
   const totalPalaiDue = palaiClientLedger.reduce((s, r) => s + r.balanceDue, 0)
+  const overduePalaiClients = palaiClientLedger.filter(r => r.balanceDue > 0)
 
   // Latest weight per animal
   const latestWeightByAnimal: Record<string, number> = {}
@@ -257,6 +346,23 @@ export default async function FinancesPage({
 
     return haystack.includes(normalizedQuery)
   })
+
+  const exportableRows: ExportableTxn[] = filteredLedger.map(item => ({
+    date: item.date,
+    type: item.type,
+    category: item.category,
+    tagOrSpecies:
+      item.source === 'animal' && item.tagId
+        ? `${item.tagId} (${item.targetSpecies || 'Goat'})`
+        : item.targetSpecies || 'Goat',
+    amount: item.amount,
+    description: item.description,
+    source: item.source,
+  }))
+
+  const exportFileName = `${(farm.farm_name || 'farm')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')}-finances-${filterType.toLowerCase()}-${todayStr}.csv`
 
   const totalFilteredCount = filteredLedger.length
   const totalPages = Math.max(1, Math.ceil(totalFilteredCount / pageSize))
@@ -685,10 +791,11 @@ export default async function FinancesPage({
               </span>
             </div>
             <h1 className="text-3xl font-bold text-slate-900 tracking-tight mt-1">Financials &amp; Billing</h1>
-            <p className="text-sm text-slate-500">Consolidated farm-wide income, Palai client statements, automated billing &amp; analytics</p>
+            <p className="text-sm text-slate-500">Consolidated farm-wide income, Palai client WhatsApp reminders, CSV export &amp; analytics</p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <FinancesExportButton rows={exportableRows} fileName={exportFileName} />
             <Link
               href="/contacts"
               className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-xl shadow-sm transition text-sm"
@@ -765,28 +872,32 @@ export default async function FinancesPage({
           </form>
         </div>
 
-        {/* Palai Client Billing & Dues Ledger */}
+        {/* Palai Client Billing & Dues Ledger + WhatsApp Reminders */}
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/70 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <h2 className="text-base font-bold text-slate-900">Palai Client Billing &amp; Statement Ledger</h2>
+              <h2 className="text-base font-bold text-slate-900">
+                Palai Client Billing &amp; Statement Ledger
+              </h2>
               <p className="text-xs text-slate-500">
-                Accrued boarding charges vs. client payments received, with pending dues and 1-click payment recording
+                Accrued boarding charges vs. client payments received, with 1-click WhatsApp reminders for overdue dues
               </p>
             </div>
-            <div className="flex flex-wrap items-center gap-3 text-xs font-mono">
+            <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
               <span className="px-2.5 py-1 rounded-lg bg-slate-100 text-slate-800 font-semibold">
                 Billed: Rs. {totalPalaiBilled.toLocaleString()}
               </span>
               <span className="px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
                 Paid: Rs. {totalPalaiPaid.toLocaleString()}
               </span>
-              <span className={`px-2.5 py-1 rounded-lg font-bold border ${
-                totalPalaiDue > 0
-                  ? 'bg-rose-50 text-rose-700 border-rose-200'
-                  : 'bg-emerald-50 text-emerald-700 border-emerald-200'
-              }`}>
-                Due: Rs. {totalPalaiDue.toLocaleString()}
+              <span
+                className={`px-2.5 py-1 rounded-lg font-bold border ${
+                  totalPalaiDue > 0
+                    ? 'bg-rose-50 text-rose-700 border-rose-200'
+                    : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                }`}
+              >
+                Due: Rs. {totalPalaiDue.toLocaleString()} ({overduePalaiClients.length})
               </span>
             </div>
           </div>
@@ -800,7 +911,9 @@ export default async function FinancesPage({
                   <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Total Billed</th>
                   <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Paid</th>
                   <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Balance Due</th>
-                  <th className="px-5 py-3 text-right text-xs font-semibold text-slate-500 uppercase">Log Payment</th>
+                  <th className="px-5 py-3 text-right text-xs font-semibold text-slate-500 uppercase">
+                    WhatsApp &amp; Payment
+                  </th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-slate-100">
@@ -808,7 +921,12 @@ export default async function FinancesPage({
                   palaiClientLedger.map(row => (
                     <tr key={row.id} className="hover:bg-slate-50/80 transition-colors">
                       <td className="px-5 py-3.5">
-                        <div className="text-xs font-bold text-slate-900">{row.client_name}</div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs font-bold text-slate-900">{row.client_name}</span>
+                          {row.phone && (
+                            <span className="text-[10px] font-mono text-slate-400">({row.phone})</span>
+                          )}
+                        </div>
                         <div className="flex items-center gap-1.5 mt-0.5">
                           <Link
                             href={`/animals/${row.id}`}
@@ -851,25 +969,43 @@ export default async function FinancesPage({
                         )}
                       </td>
                       <td className="px-5 py-3.5 text-right">
-                        <form action={logPalaiPaymentAction} className="inline-flex items-center gap-1.5">
-                          <input type="hidden" name="animalId" value={row.id} />
-                          <input type="hidden" name="payment_date" value={todayStr} />
-                          <input
-                            name="amount"
-                            type="number"
-                            min="1"
-                            step="1"
-                            required
-                            defaultValue={row.balanceDue > 0 ? row.balanceDue : row.monthly_fee}
-                            className="w-24 px-2 py-1 border border-slate-300 rounded-lg text-xs font-mono text-right text-slate-900"
-                          />
-                          <button
-                            type="submit"
-                            className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold transition"
-                          >
-                            + Pay
-                          </button>
-                        </form>
+                        <div className="inline-flex flex-wrap items-center justify-end gap-2">
+                          {row.whatsappUrl && (
+                            <a
+                              href={row.whatsappUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              title={
+                                row.phone
+                                  ? `Send WhatsApp reminder to ${row.phone}`
+                                  : 'Open WhatsApp with pre-filled reminder (pick contact)'
+                              }
+                              className="px-2.5 py-1 bg-green-50 hover:bg-green-100 text-green-800 border border-green-300 rounded-lg text-xs font-semibold transition inline-flex items-center gap-1"
+                            >
+                              <span>💬 Remind</span>
+                            </a>
+                          )}
+
+                          <form action={logPalaiPaymentAction} className="inline-flex items-center gap-1.5">
+                            <input type="hidden" name="animalId" value={row.id} />
+                            <input type="hidden" name="payment_date" value={todayStr} />
+                            <input
+                              name="amount"
+                              type="number"
+                              min="1"
+                              step="1"
+                              required
+                              defaultValue={row.balanceDue > 0 ? row.balanceDue : row.monthly_fee}
+                              className="w-24 px-2 py-1 border border-slate-300 rounded-lg text-xs font-mono text-right text-slate-900"
+                            />
+                            <button
+                              type="submit"
+                              className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold transition"
+                            >
+                              + Pay
+                            </button>
+                          </form>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -1076,7 +1212,7 @@ export default async function FinancesPage({
                     Showing {paginatedLedger.length} of {totalFilteredCount} matching entries (Total: {unifiedList.length})
                   </p>
                 </div>
-                <div className="flex items-center gap-1.5">
+                <div className="flex flex-wrap items-center gap-1.5">
                   <Link
                     href={buildFinancesUrl({ filter: 'All', q: searchQuery, page: 1 })}
                     className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${
