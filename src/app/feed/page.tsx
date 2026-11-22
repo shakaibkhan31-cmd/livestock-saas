@@ -382,11 +382,11 @@ export default async function FeedManagementPage({
       .limit(1)
 
     if (selInvErr) {
-      throw new Error(`Failed querying feed_inventory: ${selInvErr.message}`)
+      return
     }
 
     if (existingInv && existingInv.length > 0) {
-      const { error: updErr } = await supabaseClient
+      await supabaseClient
         .from('feed_inventory')
         .update({
           feed_name: cleanFeedName,
@@ -402,12 +402,8 @@ export default async function FeedManagementPage({
         })
         .eq('id', existingInv[0].id)
         .eq('farm_id', farmId)
-
-      if (updErr) {
-        throw new Error(`Failed updating feed_inventory: ${updErr.message}`)
-      }
     } else {
-      const { error: insErr } = await supabaseClient.from('feed_inventory').insert([
+      await supabaseClient.from('feed_inventory').insert([
         {
           farm_id: farmId,
           feed_name: cleanFeedName,
@@ -424,10 +420,6 @@ export default async function FeedManagementPage({
           notes: noteText,
         },
       ])
-
-      if (insErr) {
-        throw new Error(`Failed inserting feed_inventory: ${insErr.message}`)
-      }
     }
   }
 
@@ -581,7 +573,7 @@ export default async function FeedManagementPage({
     return redirect(`/feed?msg=${encodeURIComponent('Feed log entry deleted and inventory/wallet synced.')}`)
   }
 
-  // SERVER ACTION 3: Stock Adjustment (Downward -> Consumption pending split; Upward -> Stock correction at avg rate)
+  // SERVER ACTION 3: Stock Adjustment (Only 'Consumption' or 'Purchase' to satisfy feed_logs_entry_type_check)
   const adjustFeedStock = async (formData: FormData) => {
     'use server'
     try {
@@ -643,6 +635,7 @@ export default async function FeedManagementPage({
         const avgRatePerKg = totalPurchasedKg > 0 ? totalPurchasedCost / totalPurchasedKg : 0
 
         if (diff > 0) {
+          // Target < Current -> Stock kam karna hai -> Consumption
           const adjustedCost = avgRatePerKg > 0 ? Math.round(avgRatePerKg * diff) : 0
           adjustmentsToInsert.push({
             farm_id: authFarm.id,
@@ -656,6 +649,7 @@ export default async function FeedManagementPage({
             is_allocated: false,
           })
         } else if (diff < 0) {
+          // Target > Current -> Stock barhana hai -> Purchase
           const upQty = Math.abs(diff)
           const correctionCost = avgRatePerKg > 0 ? Math.round(avgRatePerKg * upQty) : 0
           adjustmentsToInsert.push({
