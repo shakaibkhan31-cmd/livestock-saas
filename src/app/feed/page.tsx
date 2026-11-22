@@ -4,6 +4,15 @@ import Link from 'next/link'
 import { getUserFarmAndRole } from '@/utils/rbac'
 import SplitEngineClient from './SplitEngineClient'
 
+function getKarachiDate(): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Karachi',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date())
+}
+
 // Helper: Consistent DD/MM/YYYY Date Formatter
 function formatDateDDMMYYYY(dateInput?: string | null): string {
   if (!dateInput) return 'N/A'
@@ -45,6 +54,19 @@ function buildFeedUrl({
   if (page && page > 1) sp.set('page', String(page))
   const qs = sp.toString()
   return qs ? `/feed?${qs}` : '/feed'
+}
+
+function distributeExactShares(totalPool: number, weightsOrEqual: number[]): number[] {
+  const n = weightsOrEqual.length
+  if (n === 0 || totalPool <= 0) return weightsOrEqual.map(() => 0)
+  const weightSum = weightsOrEqual.reduce((s, w) => s + w, 0)
+  if (weightSum <= 0) return weightsOrEqual.map(() => 0)
+
+  const shares = weightsOrEqual.map(w => Math.floor((totalPool * w) / weightSum))
+  const allocatedSum = shares.reduce((s, v) => s + v, 0)
+  const remainder = totalPool - allocatedSum
+  shares[n - 1] = Math.max(0, shares[n - 1] + remainder)
+  return shares
 }
 
 const SPECIES_OPTIONS = [
@@ -114,19 +136,30 @@ export default async function FeedManagementPage({
   const isAdmin = role === 'admin'
 
   const supabase = await createClient()
-  const todayStr = new Date().toISOString().split('T')[0]
+  const todayStr = getKarachiDate()
 
-  // Run independent queries in parallel to speed up page load
+  const rangeFrom = (currentPage - 1) * pageSize
+  const rangeTo = rangeFrom + pageSize - 1
+
+  // Run independent queries in parallel (using .range() for page feed logs + summary rows for stock/pool)
   const [
-    { data: allFeedLogs },
+    { data: pagedFeedLogs, count: pagedTotalCount },
+    { data: summaryFeedLogs },
     { data: activeAnimals },
     { data: inventoryRows },
   ] = await Promise.all([
     supabase
       .from('feed_logs')
-      .select('id, target_species, entry_type, feed_type, quantity_kg, total_cost, log_date, notes, is_allocated')
+      .select('id, target_species, entry_type, feed_type, quantity_kg, total_cost, log_date, notes, is_allocated', {
+        count: 'exact',
+      })
       .eq('farm_id', farm.id)
-      .order('log_date', { ascending: false }),
+      .order('log_date', { ascending: false })
+      .range(rangeFrom, rangeTo),
+    supabase
+      .from('feed_logs')
+      .select('id, target_species, entry_type, feed_type, quantity_kg, total_cost, log_date, is_allocated')
+      .eq('farm_id', farm.id),
     supabase
       .from('livestock_master')
       .select('id, tag_id, species, ownership, client_name, acquisition_date')
@@ -139,30 +172,35 @@ export default async function FeedManagementPage({
       .order('stock_check_date', { ascending: false }),
   ])
 
-  // Auto-learn custom feed names from previous entries + inventory + defaults
+  const allFeedLogs = summaryFeedLogs || []
+
+  // Auto-learn custom feed names from entries + inventory + defaults
   const dynamicFeedSuggestions = Array.from(
     new Set([
       ...DEFAULT_FEED_SUGGESTIONS,
-      ...(allFeedLogs || []).map(l => (l.feed_type || '').trim()).filter(Boolean),
+      ...allFeedLogs.map(l => (l.feed_type || '').trim()).filter(Boolean),
       ...(inventoryRows || []).map(r => (r.feed_name || r.item_name || '').trim()).filter(Boolean),
     ])
   ).sort()
 
   // Species-level logs used for KPIs & Live Shed Stock
-  const speciesFeedLogs = (allFeedLogs || []).filter(log => {
+  const speciesFeedLogs = allFeedLogs.filter(log => {
     if (selectedSpeciesFilter === 'All') return true
     return (log.target_species || 'Goat') === selectedSpeciesFilter
   })
 
-  // Ledger-specific filtering (Entry Type + Allocation Status + Search Query)
-  const filteredLedgerLogs = speciesFeedLogs.filter(log => {
+  // Ledger filtering on fetched page logs
+  const filteredLedgerLogs = (pagedFeedLogs || []).filter(log => {
+    if (selectedSpeciesFilter !== 'All' && (log.target_species || 'Goat') !== selectedSpeciesFilter) {
+      return false
+    }
     const isPurchase = log.entry_type === 'Purchase' || !log.entry_type
 
     if (selectedEntryType === 'Purchase' && !isPurchase) return false
     if (selectedEntryType === 'Consumption' && isPurchase) return false
 
-    if (selectedAllocFilter === 'Pending' && (!isPurchase || log.is_allocated)) return false
-    if (selectedAllocFilter === 'Allocated' && (!isPurchase || !log.is_allocated)) return false
+    if (selectedAllocFilter === 'Pending' && log.is_allocated) return false
+    if (selectedAllocFilter === 'Allocated' && !log.is_allocated) return false
 
     if (!normalizedQuery) return true
 
@@ -181,12 +219,8 @@ export default async function FeedManagementPage({
     return haystack.includes(normalizedQuery)
   })
 
-  // Pagination slice for Ledger table
-  const totalLedgerCount = filteredLedgerLogs.length
-  const totalPages = Math.max(1, Math.ceil(totalLedgerCount / pageSize))
-  const safePage = Math.min(currentPage, totalPages)
-  const startIndex = (safePage - 1) * pageSize
-  const paginatedFeedLogs = filteredLedgerLogs.slice(startIndex, startIndex + pageSize)
+  const totalDbPages = Math.max(1, Math.ceil((pagedTotalCount ?? filteredLedgerLogs.length) / pageSize))
+  const safePage = Math.min(currentPage, totalDbPages)
 
   // Map low_stock_threshold_kg from public.feed_inventory by feed name
   const thresholdByFeedName: Record<string, number> = {}
@@ -253,10 +287,10 @@ export default async function FeedManagementPage({
 
   const lowStockCount = inventoryList.filter(i => i.remainingKg <= i.thresholdKg).length
 
-  // Unallocated Cost Pool grouped by Species
+  // Pending Consumption Cost Pool grouped by Species (Step 2 -> Step 3)
   const unallocatedBySpecies: Record<string, { amount: number; billCount: number }> = {}
-  ;(allFeedLogs || []).forEach(l => {
-    if (!l.is_allocated && (l.entry_type === 'Purchase' || !l.entry_type) && Number(l.total_cost) > 0) {
+  allFeedLogs.forEach(l => {
+    if (!l.is_allocated && l.entry_type === 'Consumption' && Number(l.total_cost) > 0) {
       const sp = (l.target_species || 'Goat').trim()
       if (!unallocatedBySpecies[sp]) {
         unallocatedBySpecies[sp] = { amount: 0, billCount: 0 }
@@ -267,11 +301,11 @@ export default async function FeedManagementPage({
   })
 
   const filteredUnallocatedPool = speciesFeedLogs
-    .filter(l => !l.is_allocated && (l.entry_type === 'Purchase' || !l.entry_type) && Number(l.total_cost) > 0)
+    .filter(l => !l.is_allocated && l.entry_type === 'Consumption' && Number(l.total_cost) > 0)
     .reduce((sum, l) => sum + (Number(l.total_cost) || 0), 0)
 
   const filteredUnallocatedBillsCount = speciesFeedLogs.filter(
-    l => !l.is_allocated && (l.entry_type === 'Purchase' || !l.entry_type) && Number(l.total_cost) > 0
+    l => !l.is_allocated && l.entry_type === 'Consumption' && Number(l.total_cost) > 0
   ).length
 
   const totalPurchasedSpend = speciesFeedLogs
@@ -282,7 +316,6 @@ export default async function FeedManagementPage({
 
   const effectiveSplitDate = (params.splitDate || todayStr).split('T')[0]
 
-  // Split across all currently Active matching animals (including newly onboarded / Palai animals)
   const matchingActiveAnimals = (activeAnimals || []).filter(a => {
     if (selectedSpeciesFilter === 'All' || selectedSpeciesFilter === 'Shared (All Species)') return true
     return a.species === selectedSpeciesFilter
@@ -291,38 +324,53 @@ export default async function FeedManagementPage({
   const activeSpeciesTabs = Array.from(
     new Set([
       ...(activeAnimals || []).map(a => a.species),
-      ...(allFeedLogs || []).map(l => l.target_species || 'Goat'),
+      ...allFeedLogs.map(l => l.target_species || 'Goat'),
     ])
   ).filter(Boolean)
 
-  // Helper to sync current balance into public.feed_inventory using existing columns
+  // Helper to sync weighted average rate & closing stock into public.feed_inventory per species
   const syncFeedInventorySnapshot = async (
     supabaseClient: Awaited<ReturnType<typeof createClient>>,
+    farmId: string,
     feedName: string,
     category: string,
-    ratePerKg: number,
     dateStr: string,
     noteText: string | null
   ) => {
-    const { data: logsForName } = await supabaseClient
+    let logsQuery = supabaseClient
       .from('feed_logs')
-      .select('quantity_kg, entry_type')
-      .eq('farm_id', farm.id)
+      .select('quantity_kg, total_cost, entry_type')
+      .eq('farm_id', farmId)
       .ilike('feed_type', feedName)
 
+    if (category && category !== 'Shared (All Species)') {
+      logsQuery = logsQuery.eq('target_species', category)
+    }
+
+    const { data: logsForName } = await logsQuery
+
     let purchKg = 0
+    let purchCost = 0
     let consKg = 0
     ;(logsForName || []).forEach(l => {
       const q = Number(l.quantity_kg) || 0
-      if (l.entry_type === 'Purchase' || !l.entry_type) purchKg += q
-      else consKg += q
+      const c = Number(l.total_cost) || 0
+      if (l.entry_type === 'Purchase' || !l.entry_type) {
+        purchKg += q
+        purchCost += c
+      } else {
+        consKg += q
+      }
     })
+
     const closingBalanceKg = Number((purchKg - consKg).toFixed(2))
+    const weightedAvgRate = purchKg > 0 ? Number((purchCost / purchKg).toFixed(2)) : 0
 
     const { data: existingInv } = await supabaseClient
       .from('feed_inventory')
       .select('id, low_stock_threshold_kg')
-      .eq('farm_id', farm.id)
+      .eq('farm_id', farmId)
+      .eq('category', category)
       .ilike('feed_name', feedName)
       .limit(1)
 
@@ -336,17 +384,17 @@ export default async function FeedManagementPage({
           purchase_kg: purchKg,
           closing_kg: closingBalanceKg,
           current_stock_kg: closingBalanceKg,
-          cost_per_kg: ratePerKg,
-          unit_cost_per_kg: ratePerKg,
+          cost_per_kg: weightedAvgRate,
+          unit_cost_per_kg: weightedAvgRate,
           stock_check_date: dateStr,
           notes: noteText,
         })
         .eq('id', existingInv[0].id)
-        .eq('farm_id', farm.id)
+        .eq('farm_id', farmId)
     } else {
       await supabaseClient.from('feed_inventory').insert([
         {
-          farm_id: farm.id,
+          farm_id: farmId,
           feed_name: feedName,
           item_name: feedName,
           category,
@@ -354,8 +402,8 @@ export default async function FeedManagementPage({
           purchase_kg: purchKg,
           closing_kg: closingBalanceKg,
           current_stock_kg: closingBalanceKg,
-          cost_per_kg: ratePerKg,
-          unit_cost_per_kg: ratePerKg,
+          cost_per_kg: weightedAvgRate,
+          unit_cost_per_kg: weightedAvgRate,
           low_stock_threshold_kg: 50,
           stock_check_date: dateStr,
           notes: noteText,
@@ -364,12 +412,17 @@ export default async function FeedManagementPage({
     }
   }
 
-  // SERVER ACTION 1: Record Bulk Purchase (Stock-In)
+  // SERVER ACTION 1: Record Bulk Purchase (Stock-In + OPERATING Wallet Deduction; No animal_financial_logs)
   const addFeedLog = async (formData: FormData) => {
     'use server'
+    const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
+    if (!authUser || !authFarm || authRole !== 'admin') {
+      return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Admin only')}`)
+    }
+
     const target_species = (formData.get('target_species') as string) || 'Goat'
-    const log_date = (formData.get('log_date') as string) || new Date().toISOString().split('T')[0]
-    const notes = (formData.get('notes') as string) || ''
+    const log_date = (formData.get('log_date') as string) || getKarachiDate()
+    const notes = ((formData.get('notes') as string) || '').trim()
 
     const feedTypes = formData.getAll('feed_type') as string[]
     const quantities = formData.getAll('quantity_kg') as string[]
@@ -381,12 +434,11 @@ export default async function FeedManagementPage({
     for (let i = 0; i < feedTypes.length; i++) {
       const ft = (feedTypes[i] || '').trim()
       const qty = parseFloat(quantities[i] || '0') || 0
-      if (!ft || qty <= 0) continue
-
-      const finalCost = costs[i] ? parseFloat(costs[i]) || 0 : 0
+      const finalCost = parseFloat(costs[i] || '0') || 0
+      if (!ft || qty <= 0 || finalCost <= 0) continue
 
       recordsToInsert.push({
-        farm_id: farm.id,
+        farm_id: authFarm.id,
         target_species,
         entry_type: 'Purchase',
         feed_type: ft,
@@ -399,58 +451,115 @@ export default async function FeedManagementPage({
     }
 
     if (recordsToInsert.length === 0) {
-      return redirect('/feed?error=Please+enter+at+least+one+valid+feed+item+and+quantity.')
+      return redirect(
+        `/feed?error=${encodeURIComponent('Please enter valid feed item, quantity (> 0), and cost (> 0).')}`
+      )
     }
 
-    const { error } = await supabaseClient.from('feed_logs').insert(recordsToInsert)
+    const totalPurchaseCost = recordsToInsert.reduce((sum, r) => sum + (Number(r.total_cost) || 0), 0)
 
+    const { error } = await supabaseClient.from('feed_logs').insert(recordsToInsert)
     if (error) {
       return redirect(`/feed?error=${encodeURIComponent(error.message)}`)
     }
 
+    const { error: walletErr } = await supabaseClient.from('wallet_transactions').insert({
+      farm_id: authFarm.id,
+      wallet_type: 'OPERATING',
+      amount: -totalPurchaseCost,
+      source_type: 'FEED_PURCHASE',
+      description: `Feed Purchase - ${target_species} - Rs. ${totalPurchaseCost}`,
+    })
+
+    if (walletErr) {
+      return redirect(`/feed?error=${encodeURIComponent('Purchase saved, wallet error: ' + walletErr.message)}`)
+    }
+
     await Promise.all(
-      recordsToInsert.map(rec => {
-        const ratePerKg = rec.quantity_kg > 0 ? Number((rec.total_cost / rec.quantity_kg).toFixed(2)) : 0
-        return syncFeedInventorySnapshot(
-          supabaseClient,
-          rec.feed_type,
-          target_species,
-          ratePerKg,
-          log_date,
-          notes || null
-        )
-      })
+      recordsToInsert.map(rec =>
+        syncFeedInventorySnapshot(supabaseClient, authFarm.id, rec.feed_type, target_species, log_date, notes || null)
+      )
     )
 
     return redirect(
       `/feed?species=${encodeURIComponent(target_species)}&msg=${encodeURIComponent(
-        `Saved ${recordsToInsert.length} ${target_species} bulk purchase item(s)!`
+        `Saved ${recordsToInsert.length} ${target_species} bulk purchase item(s) (Rs. ${totalPurchaseCost.toLocaleString()} deducted from OPERATING wallet).`
       )}`
     )
   }
 
-  // SERVER ACTION 2: Delete Feed Log (Admin Only)
+  // SERVER ACTION 2: Delete Feed Log (Admin Only, Guard Allocated, Reverse Wallet on Purchase, Resync Stock)
   const deleteFeedLog = async (formData: FormData) => {
     'use server'
+    const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
+    if (!authUser || !authFarm || authRole !== 'admin') {
+      return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Admin only')}`)
+    }
+
     const logId = formData.get('logId') as string
     const supabaseClient = await createClient()
+
+    const { data: existingLog, error: fetchErr } = await supabaseClient
+      .from('feed_logs')
+      .select('id, entry_type, total_cost, feed_type, target_species, is_allocated, log_date')
+      .eq('id', logId)
+      .eq('farm_id', authFarm.id)
+      .single()
+
+    if (fetchErr || !existingLog) {
+      return redirect(`/feed?error=${encodeURIComponent('Feed log entry not found.')}`)
+    }
+
+    if (existingLog.is_allocated) {
+      return redirect(
+        `/feed?error=${encodeURIComponent('Cannot delete: Already allocated. Pehle allocation reverse karo.')}`
+      )
+    }
 
     const { error } = await supabaseClient
       .from('feed_logs')
       .delete()
       .eq('id', logId)
-      .eq('farm_id', farm.id)
+      .eq('farm_id', authFarm.id)
 
-    if (error) return redirect(`/feed?error=${encodeURIComponent(error.message)}`)
-    return redirect(`/feed?msg=${encodeURIComponent('Feed log entry deleted.')}`)
+    if (error) {
+      return redirect(`/feed?error=${encodeURIComponent(error.message)}`)
+    }
+
+    const logCost = Number(existingLog.total_cost) || 0
+    if ((existingLog.entry_type === 'Purchase' || !existingLog.entry_type) && logCost > 0) {
+      await supabaseClient.from('wallet_transactions').insert({
+        farm_id: authFarm.id,
+        wallet_type: 'OPERATING',
+        amount: Math.abs(logCost),
+        source_type: 'FEED_PURCHASE_REVERSAL',
+        description: `Reversed Feed Purchase - ${existingLog.target_species || 'Goat'} (${existingLog.feed_type}) - Rs. ${Math.abs(logCost)}`,
+      })
+    }
+
+    await syncFeedInventorySnapshot(
+      supabaseClient,
+      authFarm.id,
+      existingLog.feed_type,
+      existingLog.target_species || 'Goat',
+      String(existingLog.log_date || getKarachiDate()).split('T')[0],
+      null
+    )
+
+    return redirect(`/feed?msg=${encodeURIComponent('Feed log entry deleted and inventory/wallet synced.')}`)
   }
 
-  // SERVER ACTION 3: Multi-Item Feed Stock Adjustment / Closing Write-off (With Auto Cost Calculation)
+  // SERVER ACTION 3: Stock Adjustment (Downward -> Consumption pending split; Upward -> Stock correction)
   const adjustFeedStock = async (formData: FormData) => {
     'use server'
+    const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
+    if (!authUser || !authFarm || authRole !== 'admin') {
+      return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Admin only')}`)
+    }
+
     const target_species = (formData.get('target_species') as string) || 'Goat'
-    const log_date = (formData.get('log_date') as string) || new Date().toISOString().split('T')[0]
-    const notes = (formData.get('notes') as string) || 'Closing Stock Adjustment / Write-off'
+    const log_date = (formData.get('log_date') as string) || getKarachiDate()
+    const notes = (formData.get('notes') as string) || 'Closing Stock Adjustment'
 
     const feedTypes = formData.getAll('feed_type') as string[]
     const targetQuantities = formData.getAll('target_remaining_kg') as string[]
@@ -468,7 +577,7 @@ export default async function FeedManagementPage({
       const { data: itemLogs } = await supabaseClient
         .from('feed_logs')
         .select('quantity_kg, total_cost, entry_type')
-        .eq('farm_id', farm.id)
+        .eq('farm_id', authFarm.id)
         .eq('target_species', target_species)
         .eq('feed_type', ft)
 
@@ -489,13 +598,12 @@ export default async function FeedManagementPage({
 
       const currentRemaining = totalPurchasedKg - totalConsumedKg
       const diff = Number((currentRemaining - targetRemainingKg).toFixed(3))
+      const avgRatePerKg = totalPurchasedKg > 0 ? totalPurchasedCost / totalPurchasedKg : 0
 
       if (diff > 0) {
-        const avgRatePerKg = totalPurchasedKg > 0 ? totalPurchasedCost / totalPurchasedKg : 0
         const adjustedCost = avgRatePerKg > 0 ? Math.round(avgRatePerKg * diff) : 0
-
         adjustmentsToInsert.push({
-          farm_id: farm.id,
+          farm_id: authFarm.id,
           target_species,
           entry_type: 'Consumption',
           feed_type: ft,
@@ -503,6 +611,19 @@ export default async function FeedManagementPage({
           total_cost: adjustedCost,
           log_date,
           notes: `${notes} (${currentRemaining.toFixed(1)}kg -> ${targetRemainingKg.toFixed(1)}kg)`,
+          is_allocated: false,
+        })
+      } else if (diff < 0) {
+        const upQty = Math.abs(diff)
+        adjustmentsToInsert.push({
+          farm_id: authFarm.id,
+          target_species,
+          entry_type: 'Purchase',
+          feed_type: ft,
+          quantity_kg: upQty,
+          total_cost: 0,
+          log_date,
+          notes: `${notes} [Stock Correction +${upQty.toFixed(1)}kg: ${currentRemaining.toFixed(1)}kg -> ${targetRemainingKg.toFixed(1)}kg]`,
           is_allocated: true,
         })
       }
@@ -510,28 +631,18 @@ export default async function FeedManagementPage({
 
     if (adjustmentsToInsert.length === 0) {
       return redirect(
-        `/feed?error=${encodeURIComponent(
-          'No items required downward stock adjustment (check item names or target stock vs current stock).'
-        )}`
+        `/feed?error=${encodeURIComponent('No stock difference detected between physical stock and ledger stock.')}`
       )
     }
 
     const { error } = await supabaseClient.from('feed_logs').insert(adjustmentsToInsert)
-
     if (error) {
       return redirect(`/feed?error=${encodeURIComponent(error.message)}`)
     }
 
     await Promise.all(
       adjustmentsToInsert.map(adj =>
-        syncFeedInventorySnapshot(
-          supabaseClient,
-          adj.feed_type,
-          target_species,
-          adj.quantity_kg > 0 ? Number((adj.total_cost / adj.quantity_kg).toFixed(2)) : 0,
-          log_date,
-          adj.notes
-        )
+        syncFeedInventorySnapshot(supabaseClient, authFarm.id, adj.feed_type, target_species, log_date, adj.notes)
       )
     )
 
@@ -542,57 +653,81 @@ export default async function FeedManagementPage({
     )
   }
 
-  // SERVER ACTION 4: Species-Specific Automated Cost Split Across Current Active Animals (Admin Only)
+  // SERVER ACTION 4: Allocate Pending Consumption Costs to Eligible Animals (Admin Only, No Wallet Touch)
   const allocateFeedCostToAnimals = async (formData: FormData) => {
     'use server'
+    const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
+    if (!authUser || !authFarm || authRole !== 'admin') {
+      return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Admin only')}`)
+    }
+
     const targetSpecies = (formData.get('allocate_species') as string) || 'Goat'
     const splitMethod = (formData.get('split_method') as string) || 'equal'
-    const allocationDate = (formData.get('allocation_date') as string) || new Date().toISOString().split('T')[0]
-    const periodLabel = (formData.get('period_label') as string) || 'Monthly Bulk Ration'
+    const allocationDate = (formData.get('allocation_date') as string) || getKarachiDate()
+    const periodLabel = (formData.get('period_label') as string) || 'Consumption Ration Allocation'
 
     const supabaseClient = await createClient()
 
-    const { data: pendingLogs } = await supabaseClient
+    let pendingQuery = supabaseClient
       .from('feed_logs')
       .select('id, total_cost, feed_type, log_date')
-      .eq('farm_id', farm.id)
-      .eq('target_species', targetSpecies)
-      .eq('entry_type', 'Purchase')
+      .eq('farm_id', authFarm.id)
+      .eq('entry_type', 'Consumption')
       .eq('is_allocated', false)
       .gt('total_cost', 0)
 
+    if (targetSpecies !== 'Shared (All Species)') {
+      pendingQuery = pendingQuery.eq('target_species', targetSpecies)
+    }
+
+    const { data: pendingLogs } = await pendingQuery
+
     if (!pendingLogs || pendingLogs.length === 0) {
-      return redirect(`/feed?error=${encodeURIComponent(`No unallocated feed costs found for ${targetSpecies}.`)}`)
+      return redirect(
+        `/feed?error=${encodeURIComponent(`No unallocated consumption costs found for ${targetSpecies}.`)}`
+      )
     }
 
     const totalPool = pendingLogs.reduce((sum, l) => sum + (Number(l.total_cost) || 0), 0)
+    const latestConsumptionDate = pendingLogs
+      .map(l => String(l.log_date || '').split('T')[0])
+      .filter(Boolean)
+      .sort()
+      .pop() || String(allocationDate).split('T')[0]
 
     let animalQuery = supabaseClient
       .from('livestock_master')
       .select('id, tag_id, species, acquisition_date')
-      .eq('farm_id', farm.id)
+      .eq('farm_id', authFarm.id)
       .eq('status', 'Active')
 
     if (targetSpecies !== 'Shared (All Species)') {
       animalQuery = animalQuery.eq('species', targetSpecies)
     }
 
-    const { data: animals } = await animalQuery
+    const { data: rawAnimals } = await animalQuery
+
+    const animals = (rawAnimals || []).filter(a => {
+      if (!a.acquisition_date) return true
+      const acqDateStr = String(a.acquisition_date).split('T')[0]
+      return acqDateStr <= latestConsumptionDate
+    })
 
     if (!animals || animals.length === 0) {
       return redirect(
-        `/feed?error=${encodeURIComponent(`No active ${targetSpecies} animals currently in shed to split costs.`)}`
+        `/feed?error=${encodeURIComponent(
+          `No active ${targetSpecies} animals existed on or before ${formatDateDDMMYYYY(latestConsumptionDate)} to split costs.`
+        )}`
       )
     }
 
-    const splitDateLabel = formatDateDDMMYYYY(String(allocationDate).split('T')[0])
-
-    let weightsByAnimal: Record<string, number> = {}
+    const weightsByAnimal: Record<string, number> = {}
     if (splitMethod === 'weight') {
       const { data: wLogs } = await supabaseClient
         .from('animal_weight_logs')
         .select('animal_id, weight_kg, recorded_date')
-        .eq('farm_id', farm.id)
+        .eq('farm_id', authFarm.id)
+        .lte('recorded_date', latestConsumptionDate)
         .order('recorded_date', { ascending: false })
 
       ;(wLogs || []).forEach(w => {
@@ -600,35 +735,66 @@ export default async function FeedManagementPage({
           weightsByAnimal[w.animal_id] = Number(w.weight_kg) || 0
         }
       })
+
+      for (const animal of animals) {
+        const w = weightsByAnimal[animal.id] ?? 0
+        if (w <= 0) {
+          return redirect(
+            `/feed?error=${encodeURIComponent(
+              `Weight missing for Tag #${animal.tag_id}, pehle weight enter karo.`
+            )}`
+          )
+        }
+      }
     }
 
-    const totalWeight = animals.reduce((sum, a) => sum + (weightsByAnimal[a.id] || 0), 0)
-    const useWeightSplit = splitMethod === 'weight' && totalWeight > 0
+    const logIds = pendingLogs.map(l => l.id)
+    const batchId = `${Date.now()}`
 
-    const financialInserts = animals.map(animal => {
-      let share = 0
-      let noteDetail = ''
+    // Claim pending logs first to prevent duplicate allocation on double-click
+    const { data: claimedLogs, error: claimErr } = await supabaseClient
+      .from('feed_logs')
+      .update({
+        is_allocated: true,
+        allocated_at: new Date().toISOString(),
+        notes: `${batchId}`,
+      })
+      .in('id', logIds)
+      .eq('farm_id', authFarm.id)
+      .eq('is_allocated', false)
+      .select('id')
 
-      if (useWeightSplit) {
-        const w = weightsByAnimal[animal.id] || 0
-        const ratio = w / totalWeight
-        share = Math.round(totalPool * ratio)
-        noteDetail = `${periodLabel} [${targetSpecies}] (${(ratio * 100).toFixed(1)}% weight share @ ${w}kg across ${animals.length} active ${targetSpecies})`
-      } else {
-        share = Math.round(totalPool / animals.length)
-        noteDetail = `${periodLabel} [${targetSpecies}] (Equal split across ${animals.length} active ${targetSpecies} as of ${splitDateLabel})`
-      }
+    if (claimErr || !claimedLogs || claimedLogs.length === 0) {
+      return redirect(
+        `/feed?error=${encodeURIComponent('Allocation already processed or in progress.')}`
+      )
+    }
 
-      return {
-        animal_id: animal.id,
-        farm_id: farm.id,
-        entry_type: 'Expense',
-        category: 'Feed & Ration',
-        amount: share,
-        transaction_date: allocationDate,
-        notes: noteDetail,
-      }
-    }).filter(entry => entry.amount > 0)
+    const useWeightSplit = splitMethod === 'weight'
+    const weightArray = useWeightSplit
+      ? animals.map(a => weightsByAnimal[a.id] || 0)
+      : animals.map(() => 1)
+    const totalWeight = weightArray.reduce((s, w) => s + w, 0)
+    const shares = distributeExactShares(totalPool, weightArray)
+
+    const financialInserts = animals
+      .map((animal, idx) => {
+        const share = shares[idx]
+        const noteDetail = useWeightSplit
+          ? `${periodLabel} [${targetSpecies}] (${((weightArray[idx] / totalWeight) * 100).toFixed(1)}% weight share @ ${weightArray[idx]}kg, batch ${batchId})`
+          : `${periodLabel} [${targetSpecies}] (Equal split across ${animals.length} ${targetSpecies} on/before ${formatDateDDMMYYYY(latestConsumptionDate)}, batch ${batchId})`
+
+        return {
+          animal_id: animal.id,
+          farm_id: authFarm.id,
+          entry_type: 'Expense',
+          category: 'Feed & Ration',
+          amount: share,
+          transaction_date: allocationDate,
+          notes: noteDetail,
+        }
+      })
+      .filter(entry => entry.amount > 0)
 
     if (financialInserts.length > 0) {
       const { error: finErr } = await supabaseClient
@@ -636,25 +802,25 @@ export default async function FeedManagementPage({
         .insert(financialInserts)
 
       if (finErr) {
+        await supabaseClient
+          .from('feed_logs')
+          .update({ is_allocated: false, allocated_at: null })
+          .in('id', claimedLogs.map(c => c.id))
+          .eq('farm_id', authFarm.id)
+
         return redirect(`/feed?error=${encodeURIComponent('Allocation failed: ' + finErr.message)}`)
       }
     }
 
-    const logIds = pendingLogs.map(l => l.id)
-    await supabaseClient
-      .from('feed_logs')
-      .update({ is_allocated: true, allocated_at: new Date().toISOString() })
-      .in('id', logIds)
-
     return redirect(
       `/feed?species=${encodeURIComponent(targetSpecies)}&msg=${encodeURIComponent(
-        `Rs. ${totalPool.toLocaleString()} (${targetSpecies} Feed Pool) allocated across ${financialInserts.length} currently active ${targetSpecies}(s)!`
+        `Rs. ${totalPool.toLocaleString()} (${targetSpecies} Consumption Pool) allocated across ${financialInserts.length} eligible ${targetSpecies}(s)!`
       )}`
     )
   }
 
   const matchingCount = matchingActiveAnimals.length
-  const estimatedShare = matchingCount > 0 ? Math.round(filteredUnallocatedPool / matchingCount) : 0
+  const estimatedShare = matchingCount > 0 ? Math.floor(filteredUnallocatedPool / matchingCount) : 0
   const hasLedgerFilters =
     selectedEntryType !== 'All' || selectedAllocFilter !== 'All' || searchQuery.length > 0
 
@@ -725,10 +891,10 @@ export default async function FeedManagementPage({
                 : 'text-slate-600 hover:bg-slate-100'
             }`}
           >
-            All ({allFeedLogs?.length || 0})
+            All ({allFeedLogs.length})
           </Link>
           {activeSpeciesTabs.map(sp => {
-            const count = (allFeedLogs || []).filter(l => (l.target_species || 'Goat') === sp).length
+            const count = allFeedLogs.filter(l => (l.target_species || 'Goat') === sp).length
             const pendingAmt = unallocatedBySpecies[sp]?.amount || 0
             return (
               <Link
@@ -754,7 +920,7 @@ export default async function FeedManagementPage({
                   {count}
                 </span>
                 {pendingAmt > 0 && (
-                  <span className="h-2 w-2 rounded-full bg-amber-400" title={`Pending Rs. ${pendingAmt.toLocaleString()}`}></span>
+                  <span className="h-2 w-2 rounded-full bg-amber-400" title={`Pending Consumption Rs. ${pendingAmt.toLocaleString()}`}></span>
                 )}
               </Link>
             )
@@ -797,9 +963,9 @@ export default async function FeedManagementPage({
 
           {isAdmin && (
             <div className="bg-amber-50/60 p-4 rounded-2xl border border-amber-200/90 shadow-xs">
-              <p className="text-[11px] font-bold text-amber-800 uppercase tracking-wider">Pending Split Pool</p>
+              <p className="text-[11px] font-bold text-amber-800 uppercase tracking-wider">Pending Consumption Pool</p>
               <p className="text-2xl font-bold text-amber-700 mt-1 font-mono">Rs. {filteredUnallocatedPool.toLocaleString()}</p>
-              <p className="text-[11px] text-amber-700/80 mt-0.5">{filteredUnallocatedBillsCount} purchase item(s) unallocated</p>
+              <p className="text-[11px] text-amber-700/80 mt-0.5">{filteredUnallocatedBillsCount} consumption item(s) unallocated</p>
             </div>
           )}
 
@@ -888,7 +1054,7 @@ export default async function FeedManagementPage({
                       : `${selectedSpeciesFilter} Feed Ledger`}
                   </h2>
                   <p className="text-[11px] text-slate-500">
-                    Showing {paginatedFeedLogs.length} of {totalLedgerCount} matching entries (Species Total: {speciesFeedLogs.length})
+                    Page {safePage} of {totalDbPages} • Showing {filteredLedgerLogs.length} of {pagedFeedLogs?.length || 0} on page
                   </p>
                 </div>
 
@@ -949,7 +1115,7 @@ export default async function FeedManagementPage({
                     <Link
                       href={buildFeedUrl({
                         species: selectedSpeciesFilter,
-                        entryType: 'Purchase',
+                        entryType: 'Consumption',
                         alloc: selectedAllocFilter === 'Pending' ? 'All' : 'Pending',
                         q: searchQuery,
                         splitDate: params.splitDate,
@@ -1021,8 +1187,8 @@ export default async function FeedManagementPage({
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-slate-100">
-                  {paginatedFeedLogs.length > 0 ? (
-                    paginatedFeedLogs.map((log) => {
+                  {filteredLedgerLogs.length > 0 ? (
+                    filteredLedgerLogs.map((log) => {
                       const isPurchase = log.entry_type === 'Purchase' || !log.entry_type
                       const speciesLabel = log.target_species || 'Goat'
                       return (
@@ -1053,11 +1219,11 @@ export default async function FeedManagementPage({
                             <div className="text-xs font-bold font-mono text-slate-900">
                               Rs. {Number(log.total_cost || 0).toLocaleString()}
                             </div>
-                            {isPurchase && isAdmin && (
+                            {!isPurchase && isAdmin && (
                               <span className={`text-[10px] font-semibold ${
                                 log.is_allocated ? 'text-emerald-600' : 'text-amber-600'
                               }`}>
-                                {log.is_allocated ? '✓ Allocated' : '• Pending'}
+                                {log.is_allocated ? '✓ Allocated' : '• Pending Split'}
                               </span>
                             )}
                           </td>
@@ -1089,11 +1255,11 @@ export default async function FeedManagementPage({
             </div>
 
             {/* Pagination Footer */}
-            {totalLedgerCount > 0 && (
+            {(pagedTotalCount ?? 0) > 0 && (
               <div className="px-5 py-3 border-t border-slate-100 bg-slate-50/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
                 <span className="text-slate-500">
                   Page <strong className="text-slate-800">{safePage}</strong> of{' '}
-                  <strong className="text-slate-800">{totalPages}</strong>
+                  <strong className="text-slate-800">{totalDbPages}</strong>
                 </span>
 
                 <div className="flex items-center gap-2">
@@ -1117,7 +1283,7 @@ export default async function FeedManagementPage({
                     </span>
                   )}
 
-                  {safePage < totalPages ? (
+                  {safePage < totalDbPages ? (
                     <Link
                       href={buildFeedUrl({
                         species: selectedSpeciesFilter,
@@ -1149,7 +1315,7 @@ export default async function FeedManagementPage({
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                 <div>
                   <h2 className="text-sm font-bold text-slate-900">Record Bulk Purchase</h2>
-                  <p className="text-[11px] text-slate-500">Add ration stock-in &amp; bill amount</p>
+                  <p className="text-[11px] text-slate-500">Add ration stock-in &amp; deduct operating wallet</p>
                 </div>
                 <button
                   type="button"
@@ -1202,6 +1368,7 @@ export default async function FeedManagementPage({
                         name="quantity_kg"
                         type="number"
                         step="0.1"
+                        min="0.1"
                         required
                         placeholder="Qty (KG)"
                         className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-emerald-600"
@@ -1210,6 +1377,8 @@ export default async function FeedManagementPage({
                         name="total_cost"
                         type="number"
                         step="1"
+                        min="1"
+                        required
                         placeholder="Cost (PKR)"
                         className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-emerald-600 cost-input"
                       />
@@ -1241,13 +1410,13 @@ export default async function FeedManagementPage({
               </form>
             </div>
 
-            {/* Card B: Multi-Item Stock Adjustment / Closing Write-off */}
+            {/* Card B: Stock Adjustment / Closing Count */}
             {isAdmin && (
               <div id="adjustment-panel" className="bg-white rounded-2xl shadow-xs border border-slate-200/90 p-5 space-y-4">
                 <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                   <div>
-                    <h2 className="text-sm font-bold text-slate-900">Closing Stock Write-off</h2>
-                    <p className="text-[11px] text-slate-500">Enter actual remaining kg to auto-log stock out &amp; cost</p>
+                    <h2 className="text-sm font-bold text-slate-900">Stock Adjustment / Closing</h2>
+                    <p className="text-[11px] text-slate-500">Enter remaining physical kg (logs consumption pool or stock correction)</p>
                   </div>
                   <button
                     type="button"
@@ -1382,6 +1551,7 @@ export default async function FeedManagementPage({
                   name="quantity_kg"
                   type="number"
                   step="0.1"
+                  min="0.1"
                   required
                   placeholder="Qty (KG)"
                   class="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-emerald-600"
@@ -1390,6 +1560,8 @@ export default async function FeedManagementPage({
                   name="total_cost"
                   type="number"
                   step="1"
+                  min="1"
+                  required
                   placeholder="Cost (PKR)"
                   class="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-emerald-600 cost-input"
                 />
