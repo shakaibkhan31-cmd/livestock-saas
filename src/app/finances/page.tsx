@@ -819,7 +819,7 @@ export default async function FinancesPage({
     )
   }
 
-  // Server Action: Fund / Adjust a Wallet (4 Wallets Discipline + Explicit Audit Source + Fallback Lookup)
+  // Server Action: Fund / Adjust a Wallet (4 Wallets Discipline + Explicit Audit Source + farm_wallets Fallback)
   const fundWalletAction = async (formData: FormData) => {
     'use server'
     const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
@@ -845,8 +845,8 @@ export default async function FinancesPage({
 
     if (!targetWallet) {
       const { data: existingRow, error: readWalletErr } = await supabaseClient
-        .from('wallets')
-        .select('*')
+        .from('farm_wallets')
+        .select('id, farm_id, wallet_type, name, account_label, current_balance, target_buffer_amount')
         .eq('farm_id', farm.id)
         .eq('wallet_type', walletType)
         .maybeSingle()
@@ -858,23 +858,26 @@ export default async function FinancesPage({
       if (existingRow) {
         targetWallet = existingRow as (typeof farmWallets)[number]
       } else {
-        const defaultNameMap: Record<string, string> = {
-          OPERATING_CASH: 'Operating Cash',
-          ANIMAL_CAPITAL: 'Animal Buying Cash',
-          EMERGENCY_MORTALITY: 'Emergency / Mortality',
-          OWNER_PROFIT: 'Owner Draw Wallet',
+        const defaultNameMap: Record<string, { name: string; label: string }> = {
+          OPERATING_CASH: { name: 'Operating Cash (30-Day)', label: 'Separate Ops Bank / Cash' },
+          ANIMAL_CAPITAL: { name: 'Animal Buying Cash (60%)', label: 'Dedicated Purchase Pool' },
+          EMERGENCY_MORTALITY: { name: 'Emergency / Mortality Fund (10%)', label: '10% Active Self Stock Value' },
+          OWNER_PROFIT: { name: 'Owner Draw / Retained Profit (20%)', label: 'Owner Draw & Personal Split' },
         }
+        const meta = defaultNameMap[walletType] || { name: walletType, label: 'Farm Wallet' }
         const { data: createdRow, error: createWalletErr } = await supabaseClient
-          .from('wallets')
+          .from('farm_wallets')
           .insert([
             {
               farm_id: farm.id,
               wallet_type: walletType,
-              name: defaultNameMap[walletType] || walletType,
+              name: meta.name,
+              account_label: meta.label,
               current_balance: 0,
+              target_buffer_amount: 0,
             },
           ])
-          .select('*')
+          .select('id, farm_id, wallet_type, name, account_label, current_balance, target_buffer_amount')
           .single()
 
         if (createWalletErr || !createdRow) {
