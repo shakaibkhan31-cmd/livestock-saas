@@ -819,14 +819,14 @@ export default async function FinancesPage({
     )
   }
 
-  // Server Action: Fund / Adjust a Wallet (4 Wallets Discipline + Explicit Audit Source)
+  // Server Action: Fund / Adjust a Wallet (4 Wallets Discipline + Explicit Audit Source + Fallback Lookup)
   const fundWalletAction = async (formData: FormData) => {
     'use server'
     const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
     if (!actionUser || !actionFarm || actionRole !== 'admin' || actionFarm.id !== farm.id) {
       return redirect(`/finances?error=${encodeURIComponent('Access denied: admin permission required for this financial action.')}`)
     }
-    const walletType = ((formData.get('wallet_type') as string) || 'OPERATING_CASH') as WalletType
+    const walletType = ((formData.get('wallet_type') as string) || 'OPERATING_CASH').trim() as WalletType
     const entryType = ((formData.get('entry_type') as string) || 'IN') === 'OUT' ? 'OUT' : 'IN'
     const rawSourceType = ((formData.get('source_type') as string) || 'WALLET_TRANSFER').trim()
     const amount = parseFloat((formData.get('amount') as string) || '0')
@@ -839,10 +839,53 @@ export default async function FinancesPage({
 
     const supabaseClient = await createClient()
     const farmWallets = await ensureDefaultWallets(supabaseClient, farm.id)
-    const targetWallet = farmWallets.find(w => w.wallet_type === walletType)
+    let targetWallet = farmWallets.find(
+      w => String(w.wallet_type || '').trim().toUpperCase() === walletType.toUpperCase()
+    )
 
     if (!targetWallet) {
-      return redirect(`/finances?error=${encodeURIComponent('Target wallet not found.')}`)
+      const { data: existingRow, error: readWalletErr } = await supabaseClient
+        .from('wallets')
+        .select('*')
+        .eq('farm_id', farm.id)
+        .eq('wallet_type', walletType)
+        .maybeSingle()
+
+      if (readWalletErr) {
+        return redirect(`/finances?error=${encodeURIComponent(`Wallet lookup failed: ${readWalletErr.message}`)}`)
+      }
+
+      if (existingRow) {
+        targetWallet = existingRow as (typeof farmWallets)[number]
+      } else {
+        const defaultNameMap: Record<string, string> = {
+          OPERATING_CASH: 'Operating Cash',
+          ANIMAL_CAPITAL: 'Animal Buying Cash',
+          EMERGENCY_MORTALITY: 'Emergency / Mortality',
+          OWNER_PROFIT: 'Owner Draw Wallet',
+        }
+        const { data: createdRow, error: createWalletErr } = await supabaseClient
+          .from('wallets')
+          .insert([
+            {
+              farm_id: farm.id,
+              wallet_type: walletType,
+              name: defaultNameMap[walletType] || walletType,
+              current_balance: 0,
+            },
+          ])
+          .select('*')
+          .single()
+
+        if (createWalletErr || !createdRow) {
+          return redirect(
+            `/finances?error=${encodeURIComponent(
+              `Target wallet not found (${walletType}): ${createWalletErr?.message || 'unable to initialize wallet'}`
+            )}`
+          )
+        }
+        targetWallet = createdRow as (typeof farmWallets)[number]
+      }
     }
 
     const validSources = new Set<string>(WALLET_FUND_SOURCE_TYPES)
