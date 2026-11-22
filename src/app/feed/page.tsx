@@ -70,6 +70,12 @@ function distributeExactShares(totalPool: number, weightsOrEqual: number[]): num
   return shares
 }
 
+function isNextRedirectError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false
+  const digest = (err as { digest?: unknown }).digest
+  return typeof digest === 'string' && digest.startsWith('NEXT_REDIRECT')
+}
+
 const SPECIES_OPTIONS = [
   'Goat',
   'Sheep',
@@ -119,7 +125,6 @@ export default async function FeedManagementPage({
 }) {
   const params = await searchParams
   const statusMsg = params.msg
-  const errorMsg = params.error
   const selectedSpeciesFilter = params.species || 'All'
   const selectedEntryType =
     params.entryType === 'Purchase' || params.entryType === 'Consumption' ? params.entryType : 'All'
@@ -142,45 +147,80 @@ export default async function FeedManagementPage({
   const rangeFrom = (currentPage - 1) * pageSize
   const rangeTo = rangeFrom + pageSize - 1
 
-  // Run independent queries in parallel (using .range() for page feed logs + summary rows for stock/pool)
-  const [
-    { data: pagedFeedLogs, count: pagedTotalCount },
-    { data: summaryFeedLogs },
-    { data: activeAnimals },
-    { data: inventoryRows },
-  ] = await Promise.all([
-    supabase
-      .from('feed_logs')
-      .select('id, target_species, entry_type, feed_type, quantity_kg, total_cost, log_date, notes, is_allocated', {
-        count: 'exact',
-      })
-      .eq('farm_id', farm.id)
-      .order('log_date', { ascending: false })
-      .range(rangeFrom, rangeTo),
-    supabase
-      .from('feed_logs')
-      .select('id, target_species, entry_type, feed_type, quantity_kg, total_cost, log_date, is_allocated')
-      .eq('farm_id', farm.id),
-    supabase
-      .from('livestock_master')
-      .select('id, tag_id, species, ownership, client_name, acquisition_date')
-      .eq('farm_id', farm.id)
-      .eq('status', 'Active'),
-    supabase
-      .from('feed_inventory')
-      .select('*')
-      .eq('farm_id', farm.id)
-      .order('stock_check_date', { ascending: false }),
-  ])
+  let loadErrorMsg = params.error || ''
+  let pagedFeedLogs: Array<Record<string, any>> = []
+  let pagedTotalCount: number | null = 0
+  let allFeedLogs: Array<Record<string, any>> = []
+  let activeAnimals: Array<Record<string, any>> = []
+  let inventoryRows: Array<Record<string, any>> = []
 
-  const allFeedLogs = summaryFeedLogs || []
+  try {
+    const [
+      pagedRes,
+      summaryRes,
+      animalsRes,
+      invRes,
+    ] = await Promise.all([
+      supabase
+        .from('feed_logs')
+        .select('id, target_species, entry_type, feed_type, quantity_kg, total_cost, log_date, notes, is_allocated', {
+          count: 'exact',
+        })
+        .eq('farm_id', farm.id)
+        .order('log_date', { ascending: false })
+        .range(rangeFrom, rangeTo),
+      supabase
+        .from('feed_logs')
+        .select('id, target_species, entry_type, feed_type, quantity_kg, total_cost, log_date, is_allocated')
+        .eq('farm_id', farm.id),
+      supabase
+        .from('livestock_master')
+        .select('id, tag_id, species, ownership, client_name, acquisition_date')
+        .eq('farm_id', farm.id)
+        .eq('status', 'Active'),
+      supabase
+        .from('feed_inventory')
+        .select('*')
+        .eq('farm_id', farm.id),
+    ])
+
+    if (pagedRes.error) {
+      loadErrorMsg = loadErrorMsg || pagedRes.error.message
+    } else {
+      pagedFeedLogs = pagedRes.data || []
+      pagedTotalCount = pagedRes.count ?? pagedFeedLogs.length
+    }
+
+    if (summaryRes.error) {
+      loadErrorMsg = loadErrorMsg || summaryRes.error.message
+    } else {
+      allFeedLogs = summaryRes.data || []
+    }
+
+    if (animalsRes.error) {
+      loadErrorMsg = loadErrorMsg || animalsRes.error.message
+    } else {
+      activeAnimals = animalsRes.data || []
+    }
+
+    if (!invRes.error) {
+      inventoryRows = invRes.data || []
+    }
+  } catch (err: unknown) {
+    if (isNextRedirectError(err)) throw err
+    loadErrorMsg =
+      loadErrorMsg ||
+      (err instanceof Error ? err.message : 'Failed loading feed data from database.')
+  }
+
+  const errorMsg = loadErrorMsg
 
   // Auto-learn custom feed names from entries + inventory + defaults
   const dynamicFeedSuggestions = Array.from(
     new Set([
       ...DEFAULT_FEED_SUGGESTIONS,
-      ...allFeedLogs.map(l => (l.feed_type || '').trim()).filter(Boolean),
-      ...(inventoryRows || []).map(r => (r.feed_name || r.item_name || '').trim()).filter(Boolean),
+      ...allFeedLogs.map(l => String(l.feed_type || '').trim()).filter(Boolean),
+      ...inventoryRows.map(r => String(r.feed_name || r.item_name || '').trim()).filter(Boolean),
     ])
   ).sort()
 
@@ -191,7 +231,7 @@ export default async function FeedManagementPage({
   })
 
   // Ledger filtering on fetched page logs
-  const filteredLedgerLogs = (pagedFeedLogs || []).filter(log => {
+  const filteredLedgerLogs = pagedFeedLogs.filter(log => {
     if (selectedSpeciesFilter !== 'All' && (log.target_species || 'Goat') !== selectedSpeciesFilter) {
       return false
     }
@@ -225,8 +265,8 @@ export default async function FeedManagementPage({
 
   // Map low_stock_threshold_kg from public.feed_inventory by feed name
   const thresholdByFeedName: Record<string, number> = {}
-  ;(inventoryRows || []).forEach(row => {
-    const nameKey = (row.feed_name || row.item_name || '').trim().toLowerCase()
+  inventoryRows.forEach(row => {
+    const nameKey = String(row.feed_name || row.item_name || '').trim().toLowerCase()
     if (nameKey && row.low_stock_threshold_kg !== null && row.low_stock_threshold_kg !== undefined) {
       thresholdByFeedName[nameKey] = Number(row.low_stock_threshold_kg) || 50
     }
@@ -247,8 +287,8 @@ export default async function FeedManagementPage({
 
   const stockMap: Record<string, StockSummary> = {}
   speciesFeedLogs.forEach(log => {
-    const sp = (log.target_species || 'Goat').trim()
-    const ft = (log.feed_type || 'General Feed').trim()
+    const sp = String(log.target_species || 'Goat').trim()
+    const ft = String(log.feed_type || 'General Feed').trim()
     const key = `${sp}__${ft}`
 
     if (!stockMap[key]) {
@@ -288,11 +328,11 @@ export default async function FeedManagementPage({
 
   const lowStockCount = inventoryList.filter(i => i.remainingKg <= i.thresholdKg).length
 
-  // Pending Consumption Cost Pool grouped by Species (Step 2 -> Step 3)
+  // Pending Consumption Cost Pool grouped by Species
   const unallocatedBySpecies: Record<string, { amount: number; billCount: number }> = {}
   allFeedLogs.forEach(l => {
     if (!l.is_allocated && l.entry_type === 'Consumption' && Number(l.total_cost) > 0) {
-      const sp = (l.target_species || 'Goat').trim()
+      const sp = String(l.target_species || 'Goat').trim()
       if (!unallocatedBySpecies[sp]) {
         unallocatedBySpecies[sp] = { amount: 0, billCount: 0 }
       }
@@ -317,15 +357,15 @@ export default async function FeedManagementPage({
 
   const effectiveSplitDate = (params.splitDate || todayStr).split('T')[0]
 
-  const matchingActiveAnimals = (activeAnimals || []).filter(a => {
+  const matchingActiveAnimals = activeAnimals.filter(a => {
     if (selectedSpeciesFilter === 'All' || selectedSpeciesFilter === 'Shared (All Species)') return true
     return a.species === selectedSpeciesFilter
   })
 
   const activeSpeciesTabs = Array.from(
     new Set([
-      ...(activeAnimals || []).map(a => a.species),
-      ...allFeedLogs.map(l => l.target_species || 'Goat'),
+      ...activeAnimals.map(a => String(a.species || '')),
+      ...allFeedLogs.map(l => String(l.target_species || 'Goat')),
     ])
   ).filter(Boolean)
 
@@ -352,9 +392,7 @@ export default async function FeedManagementPage({
     }
 
     const { data: logsForName, error: logsErr } = await logsQuery
-    if (logsErr) {
-      throw new Error(`Failed reading feed_logs for snapshot: ${logsErr.message}`)
-    }
+    if (logsErr) return
 
     let purchKg = 0
     let purchCost = 0
@@ -381,9 +419,7 @@ export default async function FeedManagementPage({
       .ilike('feed_name', cleanFeedName)
       .limit(1)
 
-    if (selInvErr) {
-      return
-    }
+    if (selInvErr) return
 
     if (existingInv && existingInv.length > 0) {
       await supabaseClient
@@ -426,151 +462,163 @@ export default async function FeedManagementPage({
   // SERVER ACTION 1: Record Bulk Purchase (Stock-In + OPERATING Wallet Deduction + Rollback on Wallet Fail)
   const addFeedLog = async (formData: FormData) => {
     'use server'
-    const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
-    if (!authUser || !authFarm || authRole !== 'admin') {
-      return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Admin only')}`)
-    }
-
-    const target_species = (formData.get('target_species') as string) || 'Goat'
-    const log_date = (formData.get('log_date') as string) || getKarachiDate()
-    const notes = ((formData.get('notes') as string) || '').trim()
-
-    const feedTypes = formData.getAll('feed_type') as string[]
-    const quantities = formData.getAll('quantity_kg') as string[]
-    const costs = formData.getAll('total_cost') as string[]
-
-    const supabaseClient = await createClient()
-    const recordsToInsert: Array<Record<string, any>> = []
-
-    for (let i = 0; i < feedTypes.length; i++) {
-      const ft = (feedTypes[i] || '').trim()
-      const qty = parseFloat(quantities[i] || '0') || 0
-      const finalCost = parseFloat(costs[i] || '0') || 0
-      if (!ft || qty <= 0 || finalCost <= 0) continue
-
-      recordsToInsert.push({
-        farm_id: authFarm.id,
-        target_species,
-        entry_type: 'Purchase',
-        feed_type: ft,
-        quantity_kg: qty,
-        total_cost: finalCost,
-        log_date,
-        notes: notes || null,
-        is_allocated: false,
-      })
-    }
-
-    if (recordsToInsert.length === 0) {
-      return redirect(
-        `/feed?error=${encodeURIComponent('Please enter valid feed item, quantity (> 0), and cost (> 0).')}`
-      )
-    }
-
-    const totalPurchaseCost = recordsToInsert.reduce((sum, r) => sum + (Number(r.total_cost) || 0), 0)
-
-    const { data: insertedLogs, error } = await supabaseClient
-      .from('feed_logs')
-      .insert(recordsToInsert)
-      .select('id')
-
-    if (error) {
-      return redirect(`/feed?error=${encodeURIComponent(error.message)}`)
-    }
-
-    const { error: walletErr } = await supabaseClient.from('wallet_transactions').insert({
-      farm_id: authFarm.id,
-      wallet_type: 'OPERATING',
-      amount: -totalPurchaseCost,
-      source_type: 'FEED_PURCHASE',
-      description: `Feed Purchase - ${target_species} - Rs. ${totalPurchaseCost}`,
-    })
-
-    if (walletErr) {
-      if (insertedLogs && insertedLogs.length > 0) {
-        await supabaseClient
-          .from('feed_logs')
-          .delete()
-          .in('id', insertedLogs.map(l => l.id))
-          .eq('farm_id', authFarm.id)
+    try {
+      const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
+      if (!authUser || !authFarm || authRole !== 'admin') {
+        return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Admin only')}`)
       }
+
+      const target_species = String(formData.get('target_species') || 'Goat').trim() || 'Goat'
+      const log_date = String(formData.get('log_date') || '').trim() || getKarachiDate()
+      const notes = String(formData.get('notes') || '').trim()
+
+      const feedTypes = formData.getAll('feed_type') as string[]
+      const quantities = formData.getAll('quantity_kg') as string[]
+      const costs = formData.getAll('total_cost') as string[]
+
+      const supabaseClient = await createClient()
+      const recordsToInsert: Array<Record<string, any>> = []
+
+      for (let i = 0; i < feedTypes.length; i++) {
+        const ft = String(feedTypes[i] || '').trim()
+        const qty = parseFloat(String(quantities[i] || '0')) || 0
+        const finalCost = parseFloat(String(costs[i] || '0')) || 0
+        if (!ft || qty <= 0 || finalCost <= 0) continue
+
+        recordsToInsert.push({
+          farm_id: authFarm.id,
+          target_species,
+          entry_type: 'Purchase',
+          feed_type: ft,
+          quantity_kg: qty,
+          total_cost: finalCost,
+          log_date,
+          notes: notes || null,
+          is_allocated: false,
+        })
+      }
+
+      if (recordsToInsert.length === 0) {
+        return redirect(
+          `/feed?error=${encodeURIComponent('Please enter valid feed item, quantity (> 0), and cost (> 0).')}`
+        )
+      }
+
+      const totalPurchaseCost = recordsToInsert.reduce((sum, r) => sum + (Number(r.total_cost) || 0), 0)
+
+      const { data: insertedLogs, error } = await supabaseClient
+        .from('feed_logs')
+        .insert(recordsToInsert)
+        .select('id')
+
+      if (error) {
+        return redirect(`/feed?error=${encodeURIComponent(error.message)}`)
+      }
+
+      const { error: walletErr } = await supabaseClient.from('wallet_transactions').insert({
+        farm_id: authFarm.id,
+        wallet_type: 'OPERATING',
+        amount: -totalPurchaseCost,
+        source_type: 'FEED_PURCHASE',
+        description: `Feed Purchase - ${target_species} - Rs. ${totalPurchaseCost}`,
+      })
+
+      if (walletErr) {
+        if (insertedLogs && insertedLogs.length > 0) {
+          await supabaseClient
+            .from('feed_logs')
+            .delete()
+            .in('id', insertedLogs.map(l => l.id))
+            .eq('farm_id', authFarm.id)
+        }
+        return redirect(
+          `/feed?error=${encodeURIComponent('Purchase failed, wallet error: ' + walletErr.message)}`
+        )
+      }
+
+      await Promise.all(
+        recordsToInsert.map(rec =>
+          syncFeedInventorySnapshot(supabaseClient, authFarm.id, rec.feed_type, target_species, log_date, notes || null)
+        )
+      )
+
       return redirect(
-        `/feed?error=${encodeURIComponent('Purchase failed, wallet error: ' + walletErr.message)}`
+        `/feed?species=${encodeURIComponent(target_species)}&msg=${encodeURIComponent(
+          `Saved ${recordsToInsert.length} ${target_species} bulk purchase item(s) (Rs. ${totalPurchaseCost.toLocaleString()} deducted from OPERATING wallet).`
+        )}`
       )
+    } catch (err: unknown) {
+      if (isNextRedirectError(err)) throw err
+      const msg = err instanceof Error ? err.message : 'Unexpected error saving purchase.'
+      return redirect(`/feed?error=${encodeURIComponent(msg)}`)
     }
-
-    await Promise.all(
-      recordsToInsert.map(rec =>
-        syncFeedInventorySnapshot(supabaseClient, authFarm.id, rec.feed_type, target_species, log_date, notes || null)
-      )
-    )
-
-    return redirect(
-      `/feed?species=${encodeURIComponent(target_species)}&msg=${encodeURIComponent(
-        `Saved ${recordsToInsert.length} ${target_species} bulk purchase item(s) (Rs. ${totalPurchaseCost.toLocaleString()} deducted from OPERATING wallet).`
-      )}`
-    )
   }
 
   // SERVER ACTION 2: Delete Feed Log (Admin Only, Guard Allocated, Reverse Wallet on Purchase, Resync Stock)
   const deleteFeedLog = async (formData: FormData) => {
     'use server'
-    const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
-    if (!authUser || !authFarm || authRole !== 'admin') {
-      return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Admin only')}`)
-    }
+    try {
+      const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
+      if (!authUser || !authFarm || authRole !== 'admin') {
+        return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Admin only')}`)
+      }
 
-    const logId = formData.get('logId') as string
-    const supabaseClient = await createClient()
+      const logId = String(formData.get('logId') || '')
+      const supabaseClient = await createClient()
 
-    const { data: existingLog, error: fetchErr } = await supabaseClient
-      .from('feed_logs')
-      .select('id, entry_type, total_cost, feed_type, target_species, is_allocated, log_date')
-      .eq('id', logId)
-      .eq('farm_id', authFarm.id)
-      .single()
+      const { data: existingLog, error: fetchErr } = await supabaseClient
+        .from('feed_logs')
+        .select('id, entry_type, total_cost, feed_type, target_species, is_allocated, log_date')
+        .eq('id', logId)
+        .eq('farm_id', authFarm.id)
+        .single()
 
-    if (fetchErr || !existingLog) {
-      return redirect(`/feed?error=${encodeURIComponent('Feed log entry not found.')}`)
-    }
+      if (fetchErr || !existingLog) {
+        return redirect(`/feed?error=${encodeURIComponent('Feed log entry not found.')}`)
+      }
 
-    if (existingLog.is_allocated) {
-      return redirect(
-        `/feed?error=${encodeURIComponent('Cannot delete: Already allocated. Pehle allocation reverse karo.')}`
+      if (existingLog.is_allocated) {
+        return redirect(
+          `/feed?error=${encodeURIComponent('Cannot delete: Already allocated. Pehle allocation reverse karo.')}`
+        )
+      }
+
+      const { error } = await supabaseClient
+        .from('feed_logs')
+        .delete()
+        .eq('id', logId)
+        .eq('farm_id', authFarm.id)
+
+      if (error) {
+        return redirect(`/feed?error=${encodeURIComponent(error.message)}`)
+      }
+
+      const logCost = Number(existingLog.total_cost) || 0
+      if ((existingLog.entry_type === 'Purchase' || !existingLog.entry_type) && logCost > 0) {
+        await supabaseClient.from('wallet_transactions').insert({
+          farm_id: authFarm.id,
+          wallet_type: 'OPERATING',
+          amount: Math.abs(logCost),
+          source_type: 'FEED_PURCHASE_REVERSAL',
+          description: `Reversed Feed Purchase - ${existingLog.target_species || 'Goat'} (${existingLog.feed_type}) - Rs. ${Math.abs(logCost)}`,
+        })
+      }
+
+      await syncFeedInventorySnapshot(
+        supabaseClient,
+        authFarm.id,
+        existingLog.feed_type,
+        existingLog.target_species || 'Goat',
+        String(existingLog.log_date || getKarachiDate()).split('T')[0],
+        null
       )
+
+      return redirect(`/feed?msg=${encodeURIComponent('Feed log entry deleted and inventory/wallet synced.')}`)
+    } catch (err: unknown) {
+      if (isNextRedirectError(err)) throw err
+      const msg = err instanceof Error ? err.message : 'Unexpected error deleting feed log.'
+      return redirect(`/feed?error=${encodeURIComponent(msg)}`)
     }
-
-    const { error } = await supabaseClient
-      .from('feed_logs')
-      .delete()
-      .eq('id', logId)
-      .eq('farm_id', authFarm.id)
-
-    if (error) {
-      return redirect(`/feed?error=${encodeURIComponent(error.message)}`)
-    }
-
-    const logCost = Number(existingLog.total_cost) || 0
-    if ((existingLog.entry_type === 'Purchase' || !existingLog.entry_type) && logCost > 0) {
-      await supabaseClient.from('wallet_transactions').insert({
-        farm_id: authFarm.id,
-        wallet_type: 'OPERATING',
-        amount: Math.abs(logCost),
-        source_type: 'FEED_PURCHASE_REVERSAL',
-        description: `Reversed Feed Purchase - ${existingLog.target_species || 'Goat'} (${existingLog.feed_type}) - Rs. ${Math.abs(logCost)}`,
-      })
-    }
-
-    await syncFeedInventorySnapshot(
-      supabaseClient,
-      authFarm.id,
-      existingLog.feed_type,
-      existingLog.target_species || 'Goat',
-      String(existingLog.log_date || getKarachiDate()).split('T')[0],
-      null
-    )
-
-    return redirect(`/feed?msg=${encodeURIComponent('Feed log entry deleted and inventory/wallet synced.')}`)
   }
 
   // SERVER ACTION 3: Stock Adjustment (Only 'Consumption' or 'Purchase' to satisfy feed_logs_entry_type_check)
@@ -696,11 +744,9 @@ export default async function FeedManagementPage({
           `Applied stock adjustment for ${adjustmentsToInsert.length} item(s)!`
         )}`
       )
-    } catch (err: any) {
-      if (err && typeof err === 'object' && 'digest' in err && String(err.digest).startsWith('NEXT_REDIRECT')) {
-        throw err
-      }
-      const message = err?.message || 'Unexpected server error during stock adjustment.'
+    } catch (err: unknown) {
+      if (isNextRedirectError(err)) throw err
+      const message = err instanceof Error ? err.message : 'Unexpected server error during stock adjustment.'
       return redirect(`/feed?error=${encodeURIComponent(message)}`)
     }
   }
@@ -708,166 +754,171 @@ export default async function FeedManagementPage({
   // SERVER ACTION 4: Allocate Pending Consumption Costs to Eligible Animals (Preserve feed_logs.notes)
   const allocateFeedCostToAnimals = async (formData: FormData) => {
     'use server'
-    const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
-    if (!authUser || !authFarm || authRole !== 'admin') {
-      return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Admin only')}`)
-    }
+    try {
+      const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
+      if (!authUser || !authFarm || authRole !== 'admin') {
+        return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Admin only')}`)
+      }
 
-    const targetSpecies = (formData.get('allocate_species') as string) || 'Goat'
-    const splitMethod = (formData.get('split_method') as string) || 'equal'
-    const allocationDate = (formData.get('allocation_date') as string) || getKarachiDate()
-    const periodLabel = (formData.get('period_label') as string) || 'Consumption Ration Allocation'
+      const targetSpecies = String(formData.get('allocate_species') || 'Goat').trim() || 'Goat'
+      const splitMethod = String(formData.get('split_method') || 'equal').trim() || 'equal'
+      const allocationDate = String(formData.get('allocation_date') || '').trim() || getKarachiDate()
+      const periodLabel = String(formData.get('period_label') || '').trim() || 'Consumption Ration Allocation'
 
-    const supabaseClient = await createClient()
+      const supabaseClient = await createClient()
 
-    let pendingQuery = supabaseClient
-      .from('feed_logs')
-      .select('id, total_cost, feed_type, log_date')
-      .eq('farm_id', authFarm.id)
-      .eq('entry_type', 'Consumption')
-      .eq('is_allocated', false)
-      .gt('total_cost', 0)
+      let pendingQuery = supabaseClient
+        .from('feed_logs')
+        .select('id, total_cost, feed_type, log_date')
+        .eq('farm_id', authFarm.id)
+        .eq('entry_type', 'Consumption')
+        .eq('is_allocated', false)
+        .gt('total_cost', 0)
 
-    if (targetSpecies !== 'Shared (All Species)') {
-      pendingQuery = pendingQuery.eq('target_species', targetSpecies)
-    }
+      if (targetSpecies !== 'Shared (All Species)') {
+        pendingQuery = pendingQuery.eq('target_species', targetSpecies)
+      }
 
-    const { data: pendingLogs } = await pendingQuery
+      const { data: pendingLogs } = await pendingQuery
 
-    if (!pendingLogs || pendingLogs.length === 0) {
+      if (!pendingLogs || pendingLogs.length === 0) {
+        return redirect(
+          `/feed?error=${encodeURIComponent(`No unallocated consumption costs found for ${targetSpecies}.`)}`
+        )
+      }
+
+      const totalPool = pendingLogs.reduce((sum, l) => sum + (Number(l.total_cost) || 0), 0)
+      const latestConsumptionDate = pendingLogs
+        .map(l => String(l.log_date || '').split('T')[0])
+        .filter(Boolean)
+        .sort()
+        .pop() || String(allocationDate).split('T')[0]
+
+      let animalQuery = supabaseClient
+        .from('livestock_master')
+        .select('id, tag_id, species, acquisition_date')
+        .eq('farm_id', authFarm.id)
+        .eq('status', 'Active')
+
+      if (targetSpecies !== 'Shared (All Species)') {
+        animalQuery = animalQuery.eq('species', targetSpecies)
+      }
+
+      const { data: rawAnimals } = await animalQuery
+
+      const animals = (rawAnimals || []).filter(a => {
+        if (!a.acquisition_date) return true
+        const acqDateStr = String(a.acquisition_date).split('T')[0]
+        return acqDateStr <= latestConsumptionDate
+      })
+
+      if (!animals || animals.length === 0) {
+        return redirect(
+          `/feed?error=${encodeURIComponent(
+            `No active ${targetSpecies} animals existed on or before ${formatDateDDMMYYYY(latestConsumptionDate)} to split costs.`
+          )}`
+        )
+      }
+
+      const weightsByAnimal: Record<string, number> = {}
+      if (splitMethod === 'weight') {
+        const { data: wLogs } = await supabaseClient
+          .from('animal_weight_logs')
+          .select('animal_id, weight_kg, recorded_date')
+          .eq('farm_id', authFarm.id)
+          .lte('recorded_date', latestConsumptionDate)
+          .order('recorded_date', { ascending: false })
+
+        ;(wLogs || []).forEach(w => {
+          if (w.animal_id && weightsByAnimal[w.animal_id] === undefined) {
+            weightsByAnimal[w.animal_id] = Number(w.weight_kg) || 0
+          }
+        })
+
+        for (const animal of animals) {
+          const w = weightsByAnimal[animal.id] ?? 0
+          if (w <= 0) {
+            return redirect(
+              `/feed?error=${encodeURIComponent(
+                `Weight missing for Tag #${animal.tag_id}, pehle weight enter karo.`
+              )}`
+            )
+          }
+        }
+      }
+
+      const logIds = pendingLogs.map(l => l.id)
+      const batchId = `${Date.now()}`
+
+      const { data: claimedLogs, error: claimErr } = await supabaseClient
+        .from('feed_logs')
+        .update({
+          is_allocated: true,
+          allocated_at: new Date().toISOString(),
+        })
+        .in('id', logIds)
+        .eq('farm_id', authFarm.id)
+        .eq('is_allocated', false)
+        .select('id')
+
+      if (claimErr || !claimedLogs || claimedLogs.length === 0) {
+        return redirect(
+          `/feed?error=${encodeURIComponent('Allocation already processed or in progress.')}`
+        )
+      }
+
+      const useWeightSplit = splitMethod === 'weight'
+      const weightArray = useWeightSplit
+        ? animals.map(a => weightsByAnimal[a.id] || 0)
+        : animals.map(() => 1)
+      const totalWeight = weightArray.reduce((s, w) => s + w, 0)
+      const shares = distributeExactShares(totalPool, weightArray)
+
+      const financialInserts = animals
+        .map((animal, idx) => {
+          const share = shares[idx]
+          const noteDetail = useWeightSplit
+            ? `${periodLabel} [${targetSpecies}] (${((weightArray[idx] / totalWeight) * 100).toFixed(1)}% weight share @ ${weightArray[idx]}kg, batch ${batchId})`
+            : `${periodLabel} [${targetSpecies}] (Equal split across ${animals.length} ${targetSpecies} on/before ${formatDateDDMMYYYY(latestConsumptionDate)}, batch ${batchId})`
+
+          return {
+            animal_id: animal.id,
+            farm_id: authFarm.id,
+            entry_type: 'Expense',
+            category: 'Feed & Ration',
+            amount: share,
+            transaction_date: allocationDate,
+            notes: noteDetail,
+          }
+        })
+        .filter(entry => entry.amount > 0)
+
+      if (financialInserts.length > 0) {
+        const { error: finErr } = await supabaseClient
+          .from('animal_financial_logs')
+          .insert(financialInserts)
+
+        if (finErr) {
+          await supabaseClient
+            .from('feed_logs')
+            .update({ is_allocated: false, allocated_at: null })
+            .in('id', claimedLogs.map(c => c.id))
+            .eq('farm_id', authFarm.id)
+
+          return redirect(`/feed?error=${encodeURIComponent('Allocation failed: ' + finErr.message)}`)
+        }
+      }
+
       return redirect(
-        `/feed?error=${encodeURIComponent(`No unallocated consumption costs found for ${targetSpecies}.`)}`
-      )
-    }
-
-    const totalPool = pendingLogs.reduce((sum, l) => sum + (Number(l.total_cost) || 0), 0)
-    const latestConsumptionDate = pendingLogs
-      .map(l => String(l.log_date || '').split('T')[0])
-      .filter(Boolean)
-      .sort()
-      .pop() || String(allocationDate).split('T')[0]
-
-    let animalQuery = supabaseClient
-      .from('livestock_master')
-      .select('id, tag_id, species, acquisition_date')
-      .eq('farm_id', authFarm.id)
-      .eq('status', 'Active')
-
-    if (targetSpecies !== 'Shared (All Species)') {
-      animalQuery = animalQuery.eq('species', targetSpecies)
-    }
-
-    const { data: rawAnimals } = await animalQuery
-
-    const animals = (rawAnimals || []).filter(a => {
-      if (!a.acquisition_date) return true
-      const acqDateStr = String(a.acquisition_date).split('T')[0]
-      return acqDateStr <= latestConsumptionDate
-    })
-
-    if (!animals || animals.length === 0) {
-      return redirect(
-        `/feed?error=${encodeURIComponent(
-          `No active ${targetSpecies} animals existed on or before ${formatDateDDMMYYYY(latestConsumptionDate)} to split costs.`
+        `/feed?species=${encodeURIComponent(targetSpecies)}&msg=${encodeURIComponent(
+          `Rs. ${totalPool.toLocaleString()} (${targetSpecies} Consumption Pool) allocated across ${financialInserts.length} eligible ${targetSpecies}(s)!`
         )}`
       )
+    } catch (err: unknown) {
+      if (isNextRedirectError(err)) throw err
+      const msg = err instanceof Error ? err.message : 'Unexpected error allocating feed cost.'
+      return redirect(`/feed?error=${encodeURIComponent(msg)}`)
     }
-
-    const weightsByAnimal: Record<string, number> = {}
-    if (splitMethod === 'weight') {
-      const { data: wLogs } = await supabaseClient
-        .from('animal_weight_logs')
-        .select('animal_id, weight_kg, recorded_date')
-        .eq('farm_id', authFarm.id)
-        .lte('recorded_date', latestConsumptionDate)
-        .order('recorded_date', { ascending: false })
-
-      ;(wLogs || []).forEach(w => {
-        if (w.animal_id && weightsByAnimal[w.animal_id] === undefined) {
-          weightsByAnimal[w.animal_id] = Number(w.weight_kg) || 0
-        }
-      })
-
-      for (const animal of animals) {
-        const w = weightsByAnimal[animal.id] ?? 0
-        if (w <= 0) {
-          return redirect(
-            `/feed?error=${encodeURIComponent(
-              `Weight missing for Tag #${animal.tag_id}, pehle weight enter karo.`
-            )}`
-          )
-        }
-      }
-    }
-
-    const logIds = pendingLogs.map(l => l.id)
-    const batchId = `${Date.now()}`
-
-    // Claim pending logs first without overwriting existing notes
-    const { data: claimedLogs, error: claimErr } = await supabaseClient
-      .from('feed_logs')
-      .update({
-        is_allocated: true,
-        allocated_at: new Date().toISOString(),
-      })
-      .in('id', logIds)
-      .eq('farm_id', authFarm.id)
-      .eq('is_allocated', false)
-      .select('id')
-
-    if (claimErr || !claimedLogs || claimedLogs.length === 0) {
-      return redirect(
-        `/feed?error=${encodeURIComponent('Allocation already processed or in progress.')}`
-      )
-    }
-
-    const useWeightSplit = splitMethod === 'weight'
-    const weightArray = useWeightSplit
-      ? animals.map(a => weightsByAnimal[a.id] || 0)
-      : animals.map(() => 1)
-    const totalWeight = weightArray.reduce((s, w) => s + w, 0)
-    const shares = distributeExactShares(totalPool, weightArray)
-
-    const financialInserts = animals
-      .map((animal, idx) => {
-        const share = shares[idx]
-        const noteDetail = useWeightSplit
-          ? `${periodLabel} [${targetSpecies}] (${((weightArray[idx] / totalWeight) * 100).toFixed(1)}% weight share @ ${weightArray[idx]}kg, batch ${batchId})`
-          : `${periodLabel} [${targetSpecies}] (Equal split across ${animals.length} ${targetSpecies} on/before ${formatDateDDMMYYYY(latestConsumptionDate)}, batch ${batchId})`
-
-        return {
-          animal_id: animal.id,
-          farm_id: authFarm.id,
-          entry_type: 'Expense',
-          category: 'Feed & Ration',
-          amount: share,
-          transaction_date: allocationDate,
-          notes: noteDetail,
-        }
-      })
-      .filter(entry => entry.amount > 0)
-
-    if (financialInserts.length > 0) {
-      const { error: finErr } = await supabaseClient
-        .from('animal_financial_logs')
-        .insert(financialInserts)
-
-      if (finErr) {
-        await supabaseClient
-          .from('feed_logs')
-          .update({ is_allocated: false, allocated_at: null })
-          .in('id', claimedLogs.map(c => c.id))
-          .eq('farm_id', authFarm.id)
-
-        return redirect(`/feed?error=${encodeURIComponent('Allocation failed: ' + finErr.message)}`)
-      }
-    }
-
-    return redirect(
-      `/feed?species=${encodeURIComponent(targetSpecies)}&msg=${encodeURIComponent(
-        `Rs. ${totalPool.toLocaleString()} (${targetSpecies} Consumption Pool) allocated across ${financialInserts.length} eligible ${targetSpecies}(s)!`
-      )}`
-    )
   }
 
   const matchingCount = matchingActiveAnimals.length
@@ -1033,7 +1084,7 @@ export default async function FeedManagementPage({
         {isAdmin && (
           <SplitEngineClient
             speciesOptions={SPECIES_OPTIONS}
-            activeAnimals={activeAnimals || []}
+            activeAnimals={activeAnimals}
             unallocatedBySpecies={unallocatedBySpecies}
             selectedSpeciesFilter={selectedSpeciesFilter}
             initialSplitDate={effectiveSplitDate}
@@ -1105,7 +1156,7 @@ export default async function FeedManagementPage({
                       : `${selectedSpeciesFilter} Feed Ledger`}
                   </h2>
                   <p className="text-[11px] text-slate-500">
-                    Page {safePage} of {totalDbPages} • Showing {filteredLedgerLogs.length} of {pagedFeedLogs?.length || 0} on page
+                    Page {safePage} of {totalDbPages} • Showing {filteredLedgerLogs.length} of {pagedFeedLogs.length} on page
                   </p>
                 </div>
 
