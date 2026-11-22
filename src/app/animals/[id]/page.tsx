@@ -14,6 +14,11 @@ import {
   ensureDefaultWallets,
 } from '@/utils/wallets'
 
+function isVoidText(val?: string | null): boolean {
+  const upper = String(val || '').trim().toUpperCase()
+  return upper.startsWith('[VOID]') || upper.startsWith('VOID:')
+}
+
 export default async function AnimalDetailPage({
   params,
   searchParams,
@@ -327,12 +332,15 @@ export default async function AnimalDetailPage({
   const initialWeight = weightLogs && weightLogs.length > 0 ? Number(weightLogs[weightLogs.length - 1].weight_kg) : null
   const netGain = latestWeight !== null && initialWeight !== null ? (latestWeight - initialWeight).toFixed(1) : null
 
+  // Exclude [VOID] entries from active financial totals, break-even, and burn rate
+  const activeFinancialLogs = (financialLogs || []).filter(f => !isVoidText(f.notes))
+
   // Financial & P&L Calculations
   const purchaseCost = Number(animal.cost_basis || 0)
-  const loggedExpenses = (financialLogs || [])
+  const loggedExpenses = activeFinancialLogs
     .filter(f => f.entry_type === 'Expense')
     .reduce((sum, f) => sum + Number(f.amount || 0), 0)
-  const loggedRevenue = (financialLogs || [])
+  const loggedRevenue = activeFinancialLogs
     .filter(f => f.entry_type === 'Revenue')
     .reduce((sum, f) => sum + Number(f.amount || 0), 0)
 
@@ -345,7 +353,7 @@ export default async function AnimalDetailPage({
   const acqDateStr = animal.acquisition_date ? String(animal.acquisition_date).split('T')[0] : null
   const activeDays = acqDateStr
     ? daysBetweenDateStrings(acqDateStr, todayStr, 1)
-    : Math.max(1, (financialLogs || []).length || 30)
+    : Math.max(1, activeFinancialLogs.length || 30)
 
   const adgKgPerDay = calculateAdgKgPerDay(weightLogs)
 
@@ -422,11 +430,12 @@ export default async function AnimalDetailPage({
   })
 
   ;(financialLogs || []).forEach(f => {
+    const voidFlag = isVoidText(f.notes)
     timelineEvents.push({
       date: String(f.transaction_date).split('T')[0],
-      title: `${f.entry_type}: Rs. ${Number(f.amount).toLocaleString()}`,
+      title: `${voidFlag ? '[VOID] ' : ''}${f.entry_type}: Rs. ${Number(f.amount).toLocaleString()}`,
       subtitle: f.category,
-      badgeColor: f.entry_type === 'Revenue' ? 'bg-emerald-600' : 'bg-rose-600',
+      badgeColor: voidFlag ? 'bg-slate-400' : f.entry_type === 'Revenue' ? 'bg-emerald-600' : 'bg-rose-600',
     })
   })
 
@@ -543,7 +552,7 @@ export default async function AnimalDetailPage({
                   <h2 className="text-sm font-bold">Break-Even Sale Price & Future Projection</h2>
                 </div>
                 <p className="text-[11px] text-slate-400 mt-0.5">
-                  Daily cost accumulation ({activeDays} days active) + mandi selling cost & per-kg benchmark
+                  Daily cost accumulation ({activeDays} days active) + mandi selling cost & per-kg benchmark (VOID entries excluded)
                 </p>
               </div>
               <div className="text-xs font-mono text-slate-300">
@@ -1194,7 +1203,7 @@ export default async function AnimalDetailPage({
               <div className="px-6 py-4 border-b border-slate-100 bg-slate-900 text-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                 <div>
                   <h3 className="font-bold text-sm">Automated Financial Ledger & P&L</h3>
-                  <p className="text-[11px] text-slate-400">Track per-animal expenses, Palai fees & real-time profitability</p>
+                  <p className="text-[11px] text-slate-400">Track per-animal expenses, Palai fees & real-time profitability (VOID excluded from totals)</p>
                 </div>
                 <div className="flex items-center gap-3 text-xs font-mono">
                   <span className="px-2.5 py-1 rounded-lg bg-slate-800 text-rose-300">
@@ -1295,39 +1304,53 @@ export default async function AnimalDetailPage({
                   </thead>
                   <tbody className="bg-white divide-y divide-slate-100">
                     {financialLogs && financialLogs.length > 0 ? (
-                      financialLogs.map((fin) => (
-                        <tr key={fin.id} className="hover:bg-slate-50 transition-colors">
-                          <td className="px-6 py-3.5 text-xs font-mono text-slate-700">
-                            {formatDateDDMMYYYY(fin.transaction_date)}
-                          </td>
-                          <td className="px-6 py-3.5">
-                            <span className={`inline-flex items-center px-2.5 py-0.5 text-[11px] font-semibold rounded-full ${
-                              fin.entry_type === 'Revenue'
-                                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                                : 'bg-rose-50 text-rose-700 border border-rose-200'
+                      financialLogs.map((fin) => {
+                        const isVoid = isVoidText(fin.notes)
+                        return (
+                          <tr key={fin.id} className={isVoid ? 'bg-slate-50/80 opacity-65' : 'hover:bg-slate-50 transition-colors'}>
+                            <td className="px-6 py-3.5 text-xs font-mono text-slate-700">
+                              {formatDateDDMMYYYY(fin.transaction_date)}
+                            </td>
+                            <td className="px-6 py-3.5">
+                              <div className="flex items-center gap-1.5">
+                                <span className={`inline-flex items-center px-2.5 py-0.5 text-[11px] font-semibold rounded-full ${
+                                  fin.entry_type === 'Revenue'
+                                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                    : 'bg-rose-50 text-rose-700 border border-rose-200'
+                                }`}>
+                                  {fin.category}
+                                </span>
+                                {isVoid && (
+                                  <span className="px-1.5 py-0.5 text-[10px] font-bold uppercase rounded bg-amber-100 text-amber-900 border border-amber-300">
+                                    VOID
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                            <td className={`px-6 py-3.5 text-xs font-bold font-mono ${
+                              isVoid
+                                ? 'line-through text-slate-400'
+                                : fin.entry_type === 'Revenue'
+                                ? 'text-emerald-700'
+                                : 'text-rose-700'
                             }`}>
-                              {fin.category}
-                            </span>
-                          </td>
-                          <td className={`px-6 py-3.5 text-xs font-bold font-mono ${
-                            fin.entry_type === 'Revenue' ? 'text-emerald-700' : 'text-rose-700'
-                          }`}>
-                            {fin.entry_type === 'Revenue' ? '+' : '-'} Rs. {Number(fin.amount).toLocaleString()}
-                          </td>
-                          <td className="px-6 py-3.5 text-xs text-slate-500">{fin.notes || '—'}</td>
-                          <td className="px-6 py-3.5 text-right">
-                            <form action={deleteFinancialLog} className="inline-block">
-                              <input type="hidden" name="finId" value={fin.id} />
-                              <button
-                                type="submit"
-                                className="px-2.5 py-1 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-xs font-medium transition"
-                              >
-                                Delete
-                              </button>
-                            </form>
-                          </td>
-                        </tr>
-                      ))
+                              {fin.entry_type === 'Revenue' ? '+' : '-'} Rs. {Number(fin.amount).toLocaleString()}
+                            </td>
+                            <td className="px-6 py-3.5 text-xs text-slate-500">{fin.notes || '—'}</td>
+                            <td className="px-6 py-3.5 text-right">
+                              <form action={deleteFinancialLog} className="inline-block">
+                                <input type="hidden" name="finId" value={fin.id} />
+                                <button
+                                  type="submit"
+                                  className="px-2.5 py-1 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-xs font-medium transition"
+                                >
+                                  Delete
+                                </button>
+                              </form>
+                            </td>
+                          </tr>
+                        )
+                      })
                     ) : (
                       <tr>
                         <td colSpan={5} className="px-6 py-8 text-center text-slate-400 text-xs">
