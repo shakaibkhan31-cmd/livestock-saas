@@ -9,6 +9,11 @@ import {
 } from '@/utils/breakeven'
 import AnimalsClientView, { type AnimalItem } from './AnimalsClientView'
 
+function isVoidText(val?: string | null): boolean {
+  const upper = String(val || '').trim().toUpperCase()
+  return upper.startsWith('[VOID]') || upper.startsWith('VOID:')
+}
+
 function normalizeDateToISO(rawDate?: string): string {
   const fallback = new Date().toISOString().split('T')[0]
   const val = (rawDate || '').trim()
@@ -73,7 +78,7 @@ export default async function AnimalsMasterPage({
       .order('recorded_date', { ascending: false }),
     supabase
       .from('animal_financial_logs')
-      .select('animal_id, entry_type, amount')
+      .select('animal_id, entry_type, amount, notes')
       .eq('farm_id', farm.id),
     supabase
       .from('animal_medical_logs')
@@ -97,7 +102,7 @@ export default async function AnimalsMasterPage({
 
   const expenseByAnimal: Record<string, number> = {}
   ;(financialLogs || []).forEach(f => {
-    if (!f.animal_id || f.entry_type !== 'Expense') return
+    if (!f.animal_id || f.entry_type !== 'Expense' || isVoidText(f.notes)) return
     expenseByAnimal[f.animal_id] = (expenseByAnimal[f.animal_id] || 0) + (Number(f.amount) || 0)
   })
 
@@ -317,12 +322,12 @@ export default async function AnimalsMasterPage({
 
     const { data: existingFinLogs } = await supabaseClient
       .from('animal_financial_logs')
-      .select('entry_type, amount')
+      .select('entry_type, amount, notes')
       .eq('animal_id', animalId)
       .eq('farm_id', farm.id)
 
     const loggedExpenses = (existingFinLogs || [])
-      .filter(f => f.entry_type === 'Expense')
+      .filter(f => f.entry_type === 'Expense' && !isVoidText(f.notes))
       .reduce((sum, f) => sum + (Number(f.amount) || 0), 0)
 
     const totalCostOutflow = (Number(animalRow.cost_basis) || 0) + loggedExpenses
