@@ -412,7 +412,7 @@ export default async function FeedManagementPage({
     }
   }
 
-  // SERVER ACTION 1: Record Bulk Purchase (Stock-In + OPERATING Wallet Deduction; No animal_financial_logs)
+  // SERVER ACTION 1: Record Bulk Purchase (Stock-In + OPERATING Wallet Deduction + Rollback on Wallet Fail)
   const addFeedLog = async (formData: FormData) => {
     'use server'
     const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
@@ -458,7 +458,11 @@ export default async function FeedManagementPage({
 
     const totalPurchaseCost = recordsToInsert.reduce((sum, r) => sum + (Number(r.total_cost) || 0), 0)
 
-    const { error } = await supabaseClient.from('feed_logs').insert(recordsToInsert)
+    const { data: insertedLogs, error } = await supabaseClient
+      .from('feed_logs')
+      .insert(recordsToInsert)
+      .select('id')
+
     if (error) {
       return redirect(`/feed?error=${encodeURIComponent(error.message)}`)
     }
@@ -472,7 +476,16 @@ export default async function FeedManagementPage({
     })
 
     if (walletErr) {
-      return redirect(`/feed?error=${encodeURIComponent('Purchase saved, wallet error: ' + walletErr.message)}`)
+      if (insertedLogs && insertedLogs.length > 0) {
+        await supabaseClient
+          .from('feed_logs')
+          .delete()
+          .in('id', insertedLogs.map(l => l.id))
+          .eq('farm_id', authFarm.id)
+      }
+      return redirect(
+        `/feed?error=${encodeURIComponent('Purchase failed, wallet error: ' + walletErr.message)}`
+      )
     }
 
     await Promise.all(
@@ -549,7 +562,7 @@ export default async function FeedManagementPage({
     return redirect(`/feed?msg=${encodeURIComponent('Feed log entry deleted and inventory/wallet synced.')}`)
   }
 
-  // SERVER ACTION 3: Stock Adjustment (Downward -> Consumption pending split; Upward -> Stock correction)
+  // SERVER ACTION 3: Stock Adjustment (Downward -> Consumption pending split; Upward -> Stock correction at avg rate)
   const adjustFeedStock = async (formData: FormData) => {
     'use server'
     const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
@@ -615,13 +628,14 @@ export default async function FeedManagementPage({
         })
       } else if (diff < 0) {
         const upQty = Math.abs(diff)
+        const correctionCost = avgRatePerKg > 0 ? Math.round(avgRatePerKg * upQty) : 0
         adjustmentsToInsert.push({
           farm_id: authFarm.id,
           target_species,
           entry_type: 'Purchase',
           feed_type: ft,
           quantity_kg: upQty,
-          total_cost: 0,
+          total_cost: correctionCost,
           log_date,
           notes: `${notes} [Stock Correction +${upQty.toFixed(1)}kg: ${currentRemaining.toFixed(1)}kg -> ${targetRemainingKg.toFixed(1)}kg]`,
           is_allocated: true,
@@ -653,7 +667,7 @@ export default async function FeedManagementPage({
     )
   }
 
-  // SERVER ACTION 4: Allocate Pending Consumption Costs to Eligible Animals (Admin Only, No Wallet Touch)
+  // SERVER ACTION 4: Allocate Pending Consumption Costs to Eligible Animals (Preserve feed_logs.notes)
   const allocateFeedCostToAnimals = async (formData: FormData) => {
     'use server'
     const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
@@ -751,13 +765,12 @@ export default async function FeedManagementPage({
     const logIds = pendingLogs.map(l => l.id)
     const batchId = `${Date.now()}`
 
-    // Claim pending logs first to prevent duplicate allocation on double-click
+    // Claim pending logs first without overwriting existing notes
     const { data: claimedLogs, error: claimErr } = await supabaseClient
       .from('feed_logs')
       .update({
         is_allocated: true,
         allocated_at: new Date().toISOString(),
-        notes: `${batchId}`,
       })
       .in('id', logIds)
       .eq('farm_id', authFarm.id)
