@@ -42,6 +42,17 @@ const SPECIES_OPTIONS = [
   'Shared (All Species)',
 ]
 
+const OVERHEAD_SHARE_CATEGORY = 'Farm Overhead / Deficit Share'
+
+function isFeedCategory(category?: string | null): boolean {
+  const c = String(category || '').trim().toLowerCase()
+  return c.includes('feed') || c.includes('ration')
+}
+
+function isOverheadShareCategory(category?: string | null): boolean {
+  return String(category || '').trim() === OVERHEAD_SHARE_CATEGORY
+}
+
 function isVoidText(val?: string | null): boolean {
   const upper = String(val || '').trim().toUpperCase()
   return upper.startsWith('[VOID]') || upper.startsWith('VOID:')
@@ -477,7 +488,7 @@ export default async function FinancesPage({
   const activeLedgerItems = unifiedList.filter(item => !item.isVoid)
 
   const cashItemsForAnalytics = activeLedgerItems
-    .filter(item => !item.isAutoBill)
+    .filter(item => !item.isAutoBill && !isOverheadShareCategory(item.category))
     .map(item => ({
       date: item.date,
       type: item.type,
@@ -613,13 +624,37 @@ export default async function FinancesPage({
   const startIndex = (safePage - 1) * pageSize
   const paginatedLedger = filteredLedger.slice(startIndex, startIndex + pageSize)
 
-  const totalIncome = activeLedgerItems.filter(t => t.type === 'Income').reduce((acc, t) => acc + t.amount, 0)
-  const totalExpense = activeLedgerItems.filter(t => t.type === 'Expense').reduce((acc, t) => acc + t.amount, 0)
-  const unallocatedExpense = activeLedgerItems
-    .filter(t => t.type === 'Expense' && t.category !== 'Farm Overhead / Deficit Share')
+  // Farm-level Income & Expense:
+  // Exclude Farm Overhead / Deficit Share so allocating overhead to animals does NOT inflate farm expense or reduce Net Profit twice.
+  const totalIncome = activeLedgerItems
+    .filter(t => t.type === 'Income')
     .reduce((acc, t) => acc + t.amount, 0)
+
+  const totalExpense = activeLedgerItems
+    .filter(t => t.type === 'Expense' && !isOverheadShareCategory(t.category))
+    .reduce((acc, t) => acc + t.amount, 0)
+
   const netBalance = totalIncome - totalExpense
-  const unrecoveredDeficit = Math.max(0, unallocatedExpense - totalIncome)
+
+  // Non-Feed Expense Pool Calculation (excludes Feed & Ration and excludes Farm Overhead / Deficit Share):
+  // Already allocated overhead amounts are subtracted so previously allocated non-feed expenses are NOT counted again.
+  const totalNonFeedExpense = activeLedgerItems
+    .filter(
+      t =>
+        t.type === 'Expense' &&
+        !isFeedCategory(t.category) &&
+        !isOverheadShareCategory(t.category)
+    )
+    .reduce((acc, t) => acc + t.amount, 0)
+
+  const alreadyAllocatedNonFeedExpense = activeLedgerItems
+    .filter(t => t.type === 'Expense' && isOverheadShareCategory(t.category))
+    .reduce((acc, t) => acc + t.amount, 0)
+
+  const pendingNonFeedAllocationPool = Math.max(
+    0,
+    Math.round(totalNonFeedExpense - alreadyAllocatedNonFeedExpense)
+  )
 
   // Preview for default Goat species using shared breakeven pool helper
   const defaultGoatSelfAnimals = (selfAnimals || []).filter(a => (a.species || 'Goat') === 'Goat')
@@ -858,7 +893,7 @@ export default async function FinancesPage({
     )
   }
 
-  // Server Action: One-Click Species-Scoped Weight & Acquisition-Based Overhead Allocation
+  // Server Action: One-Click Species-Scoped Non-Feed Overhead Share Allocation
   const allocateDeficitByWeight = async (formData: FormData) => {
     'use server'
     const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
@@ -867,7 +902,7 @@ export default async function FinancesPage({
     }
     const targetSpecies = ((formData.get('allocate_species') as string) || 'Goat').trim()
     const allocationDate = ((formData.get('allocation_date') as string) || '').trim() || getPakistanDateString()
-    const periodLabel = ((formData.get('period_label') as string) || '').trim() || `${targetSpecies} Overhead Split`
+    const periodLabel = ((formData.get('period_label') as string) || '').trim() || `${targetSpecies} Non-Feed Split`
     const customAmountRaw = ((formData.get('custom_amount') as string) || '').trim()
     const parsedCustomAmount = customAmountRaw ? parseFloat(customAmountRaw) : NaN
 
@@ -879,7 +914,7 @@ export default async function FinancesPage({
       { data: liveSelfAnimals },
       { data: liveWeightLogs },
     ] = await Promise.all([
-      supabaseClient.from('transactions').select('type, amount, target_species, description').eq('farm_id', farm.id),
+      supabaseClient.from('transactions').select('type, category, amount, target_species, description').eq('farm_id', farm.id),
       supabaseClient.from('animal_financial_logs').select('entry_type, category, amount, notes, livestock_master(species)').eq('farm_id', farm.id),
       supabaseClient
         .from('livestock_master')
@@ -896,48 +931,62 @@ export default async function FinancesPage({
 
     const isSharedPool = targetSpecies === 'Shared (All Species)'
 
-    let speciesIncome = 0
-    let speciesExpense = 0
+    let speciesNonFeedExpense = 0
+    let speciesAllocatedOverhead = 0
 
     ;(liveGlobalTxns || []).forEach((t: any) => {
       if (isVoidText(t.description)) return
+      if (t.type === 'Income') return
       const txnSp = extractSpeciesFromTxn(t)
       if (!isSharedPool && txnSp !== targetSpecies && txnSp !== 'Shared (All Species)') return
       const amt = Number(t.amount) || 0
-      if (t.type === 'Income') speciesIncome += amt
-      else speciesExpense += amt
+      if (isOverheadShareCategory(t.category)) {
+        speciesAllocatedOverhead += amt
+      } else if (!isFeedCategory(t.category)) {
+        speciesNonFeedExpense += amt
+      }
     })
 
     ;(liveAnimalLogs || []).forEach((f: any) => {
       if (isVoidText(f.notes)) return
-      if (f.category === 'Farm Overhead / Deficit Share') return
+      if (f.entry_type === 'Revenue') return
       const animalInfo = Array.isArray(f.livestock_master) ? f.livestock_master[0] : f.livestock_master
       const finSp = animalInfo?.species || 'Goat'
       if (!isSharedPool && finSp !== targetSpecies) return
       const amt = Number(f.amount) || 0
-      if (f.entry_type === 'Revenue') speciesIncome += amt
-      else speciesExpense += amt
+      if (isOverheadShareCategory(f.category)) {
+        speciesAllocatedOverhead += amt
+      } else if (!isFeedCategory(f.category)) {
+        speciesNonFeedExpense += amt
+      }
     })
 
-    let overallIncome = 0
-    let overallExpense = 0
+    let overallNonFeedExpense = 0
+    let overallAllocatedOverhead = 0
     ;(liveGlobalTxns || []).forEach((t: any) => {
       if (isVoidText(t.description)) return
+      if (t.type === 'Income') return
       const amt = Number(t.amount) || 0
-      if (t.type === 'Income') overallIncome += amt
-      else overallExpense += amt
+      if (isOverheadShareCategory(t.category)) {
+        overallAllocatedOverhead += amt
+      } else if (!isFeedCategory(t.category)) {
+        overallNonFeedExpense += amt
+      }
     })
     ;(liveAnimalLogs || []).forEach((f: any) => {
       if (isVoidText(f.notes)) return
-      if (f.category === 'Farm Overhead / Deficit Share') return
+      if (f.entry_type === 'Revenue') return
       const amt = Number(f.amount) || 0
-      if (f.entry_type === 'Revenue') overallIncome += amt
-      else overallExpense += amt
+      if (isOverheadShareCategory(f.category)) {
+        overallAllocatedOverhead += amt
+      } else if (!isFeedCategory(f.category)) {
+        overallNonFeedExpense += amt
+      }
     })
 
-    const speciesDeficit = Math.max(0, speciesExpense - speciesIncome)
-    const overallDeficit = Math.max(0, overallExpense - overallIncome)
-    const suggestedPool = speciesDeficit > 0 ? speciesDeficit : overallDeficit
+    const speciesPendingNonFeed = Math.max(0, speciesNonFeedExpense - speciesAllocatedOverhead)
+    const overallPendingNonFeed = Math.max(0, overallNonFeedExpense - overallAllocatedOverhead)
+    const suggestedPool = speciesPendingNonFeed > 0 ? speciesPendingNonFeed : overallPendingNonFeed
 
     const poolToAllocate =
       !isNaN(parsedCustomAmount) && parsedCustomAmount > 0
@@ -945,7 +994,11 @@ export default async function FinancesPage({
         : Math.round(suggestedPool)
 
     if (poolToAllocate <= 0) {
-      return redirect(`/finances?error=${encodeURIComponent(`No unrecovered deficit available to allocate for ${targetSpecies}.`)}`)
+      return redirect(
+        `/finances?error=${encodeURIComponent(
+          `No new unallocated non-feed expense available to allocate for ${targetSpecies}.`
+        )}`
+      )
     }
 
     const matchingSelfAnimals = (liveSelfAnimals || []).filter(a => {
@@ -979,7 +1032,7 @@ export default async function FinancesPage({
     }
 
     const sumEffectiveWeight = weightedAnimals.reduce((sum, a) => sum + a.effectiveWeight, 0)
-    const allocationTag = `Farm Overhead Share [${targetSpecies}] (${periodLabel} @ ${allocationDate})`
+    const allocationTag = `Non-Feed Overhead Share [${targetSpecies}] (${periodLabel} @ ${allocationDate})`
 
     const insertsToApply: Array<{
       animal_id: string
@@ -995,7 +1048,7 @@ export default async function FinancesPage({
       .from('animal_financial_logs')
       .select('id, animal_id, notes')
       .eq('farm_id', farm.id)
-      .eq('category', 'Farm Overhead / Deficit Share')
+      .eq('category', OVERHEAD_SHARE_CATEGORY)
       .ilike('notes', `${allocationTag}%`)
 
     if (existingAllocationErr) {
@@ -1025,7 +1078,7 @@ export default async function FinancesPage({
           animal_id: animal.id,
           farm_id: farm.id,
           entry_type: 'Expense',
-          category: 'Farm Overhead / Deficit Share',
+          category: OVERHEAD_SHARE_CATEGORY,
           amount: shareAmount,
           transaction_date: allocationDate,
           notes: `${allocationTag} — ${(shareRatio * 100).toFixed(1)}% (${animal.basisNote})`,
@@ -1036,7 +1089,7 @@ export default async function FinancesPage({
     if (insertsToApply.length === 0) {
       return redirect(
         `/finances?msg=${encodeURIComponent(
-          `Overhead share for ${targetSpecies} (${periodLabel} @ ${allocationDate}) was already allocated.`
+          `Non-feed overhead share for ${targetSpecies} (${periodLabel} @ ${allocationDate}) was already allocated.`
         )}`
       )
     }
@@ -1051,7 +1104,7 @@ export default async function FinancesPage({
 
     return redirect(
       `/finances?msg=${encodeURIComponent(
-        `Allocated Rs. ${poolToAllocate.toLocaleString()} (${targetSpecies}) overhead share across ${insertsToApply.length} Self animal(s).`
+        `Allocated Rs. ${poolToAllocate.toLocaleString()} (${targetSpecies}) non-feed overhead share across ${insertsToApply.length} Self animal(s).`
       )}`
     )
   }
@@ -2221,23 +2274,24 @@ export default async function FinancesPage({
           </div>
         </div>
 
-        {/* One-Click Species-Scoped Weight & Acquisition-Based Overhead Allocation */}
+        {/* One-Click Species-Scoped Non-Feed Overhead Share Allocation */}
         <div id="breakeven-sync" className="bg-white p-6 rounded-2xl border border-amber-200 shadow-sm space-y-4 scroll-mt-6">
           <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
             <div className="space-y-1">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-amber-100 text-amber-900 border border-amber-300">
-                  Separate Overhead Pool (Audit-Safe)
+                  Non-Feed Overhead Pool (Already Allocated Excluded)
                 </span>
                 <span className="text-xs font-mono text-slate-500">
                   Goat Self Preview: <strong>{previewWeightedAnimals.length}</strong> animals • Total Weightage: <strong>{previewTotalWeight.toFixed(1)}</strong>
                 </span>
               </div>
               <h2 className="text-base font-bold text-slate-900">
-                Optional Deficit / Overhead Share Allocation (Tagged Separately from Direct Cost)
+                Non-Feed Overhead Share Allocation (Excludes Feed &amp; Already Allocated Shares)
               </h2>
               <p className="text-xs text-slate-500 max-w-2xl">
-                Unrecovered deficit (excludes allocated overhead): <strong className="font-mono text-rose-700">Rs. {unrecoveredDeficit.toLocaleString()}</strong>. Logged under <code className="text-slate-700">Farm Overhead / Deficit Share</code> so direct purchase &amp; care costs stay clearly separated from shared overhead.
+                Pending unallocated non-feed expenses: <strong className="font-mono text-rose-700">Rs. {pendingNonFeedAllocationPool.toLocaleString()}</strong>{' '}
+                (Non-feed total: <span className="font-mono">Rs. {totalNonFeedExpense.toLocaleString()}</span> − Already allocated: <span className="font-mono">Rs. {alreadyAllocatedNonFeedExpense.toLocaleString()}</span>). Allocation does not increase farm-level expenses or reduce Net Profit again.
               </p>
             </div>
 
@@ -2261,8 +2315,8 @@ export default async function FinancesPage({
                   type="number"
                   min="1"
                   step="1"
-                  defaultValue={unrecoveredDeficit > 0 ? unrecoveredDeficit : ''}
-                  placeholder={String(unrecoveredDeficit || 0)}
+                  defaultValue={pendingNonFeedAllocationPool > 0 ? pendingNonFeedAllocationPool : ''}
+                  placeholder={String(pendingNonFeedAllocationPool || 0)}
                   className="w-28 px-2.5 py-1.5 bg-white border border-amber-300 rounded-lg text-xs font-mono font-bold text-slate-900"
                 />
               </div>
@@ -2271,7 +2325,7 @@ export default async function FinancesPage({
                 <input
                   name="period_label"
                   type="text"
-                  defaultValue="Jul-Nov 2026 Overhead"
+                  defaultValue="Non-Feed Overhead Nov 2026"
                   className="w-36 px-2.5 py-1.5 bg-white border border-amber-300 rounded-lg text-xs text-slate-900"
                 />
               </div>
@@ -2287,10 +2341,10 @@ export default async function FinancesPage({
               </div>
               <button
                 type="submit"
-                disabled={(selfAnimals || []).length === 0}
+                disabled={(selfAnimals || []).length === 0 || pendingNonFeedAllocationPool <= 0}
                 className="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:bg-slate-300 text-white font-bold rounded-lg text-xs shadow-xs transition"
               >
-                ⚖️ Allocate Overhead Share
+                ⚖️ Allocate Non-Feed Share
               </button>
             </form>
           </div>
@@ -2299,7 +2353,7 @@ export default async function FinancesPage({
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2 border-t border-slate-100">
               {previewWeightedAnimals.map(a => {
                 const ratio = previewTotalWeight > 0 ? a.effectiveWeight / previewTotalWeight : 0
-                const previewShare = Math.round(unrecoveredDeficit * ratio)
+                const previewShare = Math.round(pendingNonFeedAllocationPool * ratio)
                 return (
                   <div key={a.id} className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-200/80 flex items-center justify-between text-xs">
                     <div>
@@ -2323,7 +2377,7 @@ export default async function FinancesPage({
           )}
         </div>
 
-        {/* Summary Cards (Active Entries Only) */}
+        {/* Summary Cards (Active Entries Only, Allocated Overhead Excluded from Double-Counting) */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
           <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-emerald-500">
             <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Active Income</p>
@@ -2376,7 +2430,8 @@ export default async function FinancesPage({
             {sortedExpenseCategories.length > 0 ? (
               <div className="space-y-3">
                 {sortedExpenseCategories.map(([category, amount]) => {
-                  const percentage = totalExpense > 0 ? Math.round((amount / totalExpense) * 100) : 0
+                  const totalBreakdownBase = sortedExpenseCategories.reduce((s, [, v]) => s + v, 0)
+                  const percentage = totalBreakdownBase > 0 ? Math.round((amount / totalBreakdownBase) * 100) : 0
                   return (
                     <div key={category} className="space-y-1">
                       <div className="flex items-center justify-between text-xs">
