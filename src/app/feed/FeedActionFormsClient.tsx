@@ -21,7 +21,7 @@ interface FeedActionFormsClientProps {
   todayStr: string
   isAdmin: boolean
   addFeedLogAction: (formData: FormData) => void | Promise<void>
-  adjustFeedStockAction: (formData: FormData) => void | Promise<void>
+  adjustFeedStockAction?: (formData: FormData) => void | Promise<void>
 }
 
 export default function FeedActionFormsClient({
@@ -30,7 +30,6 @@ export default function FeedActionFormsClient({
   todayStr,
   isAdmin,
   addFeedLogAction,
-  adjustFeedStockAction,
 }: FeedActionFormsClientProps) {
   const [purchaseRows, setPurchaseRows] = useState<PurchaseRowItem[]>([
     { id: 1, feed_type: '', quantity_kg: '', total_cost: '' },
@@ -251,7 +250,7 @@ export default function FeedActionFormsClient({
             </button>
           </div>
 
-          <form action={adjustFeedStockAction} className="space-y-3.5">
+          <form action="/api/feed/adjust-stock" method="POST" className="space-y-3.5">
             <div className="grid grid-cols-2 gap-2.5">
               <div>
                 <label className="block text-[11px] font-semibold text-slate-700 mb-1">
