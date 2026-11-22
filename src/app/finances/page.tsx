@@ -29,6 +29,30 @@ function getPakistanDateString(): string {
   }).format(new Date())
 }
 
+function addDaysToDateString(dateStr: string, daysToAdd: number): string {
+  const clean = String(dateStr).split('T')[0]
+  const parts = clean.split('-').map(Number)
+  if (parts.length !== 3 || parts.some(n => isNaN(n))) return clean
+  const [y, m, d] = parts
+  const base = new Date(y, m - 1, d + daysToAdd)
+  return `${base.getFullYear()}-${String(base.getMonth() + 1).padStart(2, '0')}-${String(
+    base.getDate()
+  ).padStart(2, '0')}`
+}
+
+function distributeExactShares(totalPool: number, weights: number[]): number[] {
+  const n = weights.length
+  if (n === 0 || totalPool <= 0) return weights.map(() => 0)
+  const weightSum = weights.reduce((s, w) => s + w, 0)
+  if (weightSum <= 0) return weights.map(() => 0)
+
+  const shares = weights.map(w => Math.floor((totalPool * w) / weightSum))
+  const allocatedSum = shares.reduce((s, v) => s + v, 0)
+  const remainder = totalPool - allocatedSum
+  shares[n - 1] = Math.max(0, shares[n - 1] + remainder)
+  return shares
+}
+
 const SPECIES_OPTIONS = [
   'Goat',
   'Sheep',
@@ -41,6 +65,13 @@ const SPECIES_OPTIONS = [
   'Quail',
   'Shared (All Species)',
 ]
+
+const WALLET_FUND_SOURCE_TYPES = [
+  'OWNER_CONTRIBUTION',
+  'BANK_TRANSFER',
+  'WALLET_TRANSFER',
+  'ADJUSTMENT',
+] as const
 
 const OVERHEAD_SHARE_CATEGORY = 'Farm Overhead / Deficit Share'
 
@@ -75,7 +106,7 @@ function extractSpeciesFromTxn(txn: { target_species?: string | null; descriptio
   if (match && match[1]) {
     return match[1].trim()
   }
-  return 'Goat'
+  return 'Shared (All Species)'
 }
 
 function stripSpeciesTag(description?: string | null): string {
@@ -193,17 +224,24 @@ export default async function FinancesPage({
   }
 
   const supabase = await createClient()
+  const todayStr = getPakistanDateString()
 
-  // Ensure default 4 wallets exist & load parallel data
+  const rangeFrom = (currentPage - 1) * pageSize
+  const rangeTo = rangeFrom + pageSize - 1
+
+  // Ensure default 4 wallets exist & load parallel data (with DB range pagination on ledger & audit tables)
   const [
     wallets,
     { data: palaiAnimals },
     { data: selfAnimals },
     { data: weightLogs },
-    { data: globalTxns },
-    { data: animalFinLogs },
+    { data: pagedGlobalTxns, count: pagedGlobalCount },
+    { data: allGlobalTxnsForTotals },
+    { data: pagedAnimalFinLogs, count: pagedAnimalFinCount },
+    { data: allAnimalFinLogsForTotals },
     { data: contactsList },
-    { data: walletAuditRows },
+    { data: pagedWalletAuditRows, count: pagedWalletAuditCount },
+    { data: allWalletAuditRowsForTotals },
   ] = await Promise.all([
     ensureDefaultWallets(supabase, farm.id),
     supabase
@@ -225,12 +263,18 @@ export default async function FinancesPage({
       .order('recorded_date', { ascending: false }),
     supabase
       .from('transactions')
-      .select('id, txn_date, type, category, amount, description, target_species')
+      .select('id, txn_date, type, category, amount, description, target_species', { count: 'exact' })
       .eq('farm_id', farm.id)
-      .order('txn_date', { ascending: false }),
+      .order('txn_date', { ascending: false })
+      .range(rangeFrom, rangeTo),
+    supabase
+      .from('transactions')
+      .select('id, txn_date, type, category, amount, description, target_species')
+      .eq('farm_id', farm.id),
     supabase
       .from('animal_financial_logs')
-      .select(`
+      .select(
+        `
         id,
         animal_id,
         entry_type,
@@ -243,16 +287,39 @@ export default async function FinancesPage({
           tag_id,
           species
         )
-      `)
+      `,
+        { count: 'exact' }
+      )
       .eq('farm_id', farm.id)
-      .order('transaction_date', { ascending: false }),
+      .order('transaction_date', { ascending: false })
+      .range(rangeFrom, rangeTo),
+    supabase
+      .from('animal_financial_logs')
+      .select(
+        `
+        id,
+        animal_id,
+        entry_type,
+        category,
+        amount,
+        transaction_date,
+        notes,
+        livestock_master (
+          id,
+          tag_id,
+          species
+        )
+      `
+      )
+      .eq('farm_id', farm.id),
     supabase
       .from('contacts')
       .select('id, name, phone')
       .eq('farm_id', farm.id),
     supabase
       .from('wallet_transactions')
-      .select(`
+      .select(
+        `
         id,
         wallet_id,
         animal_id,
@@ -263,13 +330,36 @@ export default async function FinancesPage({
         txn_date,
         notes,
         created_at
-      `)
+      `,
+        { count: 'exact' }
+      )
       .eq('farm_id', farm.id)
       .order('txn_date', { ascending: false })
-      .order('created_at', { ascending: false }),
+      .order('created_at', { ascending: false })
+      .range(0, 29),
+    supabase
+      .from('wallet_transactions')
+      .select(
+        `
+        id,
+        wallet_id,
+        animal_id,
+        reference_key,
+        entry_type,
+        amount,
+        source_type,
+        txn_date,
+        notes,
+        created_at
+      `
+      )
+      .eq('farm_id', farm.id),
   ])
 
-  const todayStr = getPakistanDateString()
+  const globalTxns = allGlobalTxnsForTotals || []
+  const animalFinLogs = allAnimalFinLogsForTotals || []
+  const walletAuditRows = allWalletAuditRowsForTotals || []
+
   const currentMonthStr = todayStr.slice(0, 7)
 
   const walletByType: Partial<Record<WalletType, (typeof wallets)[number]>> = {}
@@ -304,6 +394,12 @@ export default async function FinancesPage({
 
   // Phase 4 Metrics: Active (non-VOID) Sale Split Totals & Mortality Claims from wallet_transactions
   const allAuditRows = ((walletAuditRows || []) as Array<any>).map(r => ({
+    ...r,
+    isVoid: isVoidText(r.notes),
+    splitRole: parseSplitRoleFromNotes(r.notes),
+  }))
+
+  const displayedAuditRows = ((pagedWalletAuditRows || []) as Array<any>).map(r => ({
     ...r,
     isVoid: isVoidText(r.notes),
     splitRole: parseSplitRoleFromNotes(r.notes),
@@ -357,9 +453,7 @@ export default async function FinancesPage({
     // BUSINESS RULE: Palai is billed in non-refundable 30-day advance blocks.
     const billedMonths = Math.max(1, Math.ceil(daysBoarded / 30))
     const billedDays = billedMonths * 30
-    const nextBillingDate = new Date(`${acqStr}T00:00:00Z`)
-    nextBillingDate.setUTCDate(nextBillingDate.getUTCDate() + billedDays)
-    const nextBillingDateStr = nextBillingDate.toISOString().slice(0, 10)
+    const nextBillingDateStr = addDaysToDateString(acqStr, billedDays)
     const accruedBoarding = rate * billedMonths
 
     const animalRevenueLogs = (animalFinLogs || []).filter(
@@ -444,13 +538,11 @@ export default async function FinancesPage({
     isVoid?: boolean
   }
 
-  const unifiedList: UnifiedLedgerItem[] = []
-
-  ;(globalTxns || []).forEach((t: any) => {
+  const mapGlobalTxn = (t: any): UnifiedLedgerItem => {
     const voidFlag = isVoidText(t.description)
     const sp = extractSpeciesFromTxn(t)
     const cleanDesc = stripSpeciesTag(t.description)
-    unifiedList.push({
+    return {
       id: t.id,
       source: 'global',
       date: String(t.txn_date).split('T')[0],
@@ -460,14 +552,14 @@ export default async function FinancesPage({
       description: cleanDesc,
       targetSpecies: sp,
       isVoid: voidFlag,
-    })
-  })
+    }
+  }
 
-  ;(animalFinLogs || []).forEach((f: any) => {
+  const mapAnimalFinLog = (f: any): UnifiedLedgerItem => {
     const animalInfo = Array.isArray(f.livestock_master) ? f.livestock_master[0] : f.livestock_master
     const noteStr = String(f.notes || '')
     const voidFlag = isVoidText(noteStr)
-    unifiedList.push({
+    return {
       id: f.id,
       source: 'animal',
       date: String(f.transaction_date).split('T')[0],
@@ -480,10 +572,18 @@ export default async function FinancesPage({
       tagId: animalInfo?.tag_id || 'Animal',
       isAutoBill: noteStr.startsWith('Auto-Bill'),
       isVoid: voidFlag,
-    })
-  })
+    }
+  }
 
-  unifiedList.sort((a, b) => b.date.localeCompare(a.date))
+  const unifiedList: UnifiedLedgerItem[] = [
+    ...(globalTxns || []).map(mapGlobalTxn),
+    ...(animalFinLogs || []).map(mapAnimalFinLog),
+  ].sort((a, b) => b.date.localeCompare(a.date))
+
+  const pagedUnifiedList: UnifiedLedgerItem[] = [
+    ...(pagedGlobalTxns || []).map(mapGlobalTxn),
+    ...(pagedAnimalFinLogs || []).map(mapAnimalFinLog),
+  ].sort((a, b) => b.date.localeCompare(a.date))
 
   const activeLedgerItems = unifiedList.filter(item => !item.isVoid)
 
@@ -580,7 +680,7 @@ export default async function FinancesPage({
       ? 100
       : 0
 
-  const filteredLedger = unifiedList.filter(item => {
+  const applyLedgerFilter = (item: UnifiedLedgerItem) => {
     if (filterType === 'Income' && item.type !== 'Income') return false
     if (filterType === 'Expense' && item.type !== 'Expense') return false
     if (!normalizedQuery) return true
@@ -599,7 +699,10 @@ export default async function FinancesPage({
       .toLowerCase()
 
     return haystack.includes(normalizedQuery)
-  })
+  }
+
+  const filteredLedger = unifiedList.filter(applyLedgerFilter)
+  const paginatedLedger = pagedUnifiedList.filter(applyLedgerFilter).slice(0, pageSize)
 
   const exportableRows: ExportableTxn[] = filteredLedger.map(item => ({
     date: item.date,
@@ -618,17 +721,22 @@ export default async function FinancesPage({
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')}-finances-${filterType.toLowerCase()}-${todayStr}.csv`
 
+  const totalDbLedgerCount = (pagedGlobalCount ?? 0) + (pagedAnimalFinCount ?? 0)
   const totalFilteredCount = filteredLedger.length
-  const totalPages = Math.max(1, Math.ceil(totalFilteredCount / pageSize))
+  const totalPages = Math.max(1, Math.ceil(totalDbLedgerCount / pageSize))
   const safePage = Math.min(currentPage, totalPages)
-  const startIndex = (safePage - 1) * pageSize
-  const paginatedLedger = filteredLedger.slice(startIndex, startIndex + pageSize)
 
-  // Farm-level Income & Expense:
-  // Exclude Farm Overhead / Deficit Share so allocating overhead to animals does NOT inflate farm expense or reduce Net Profit twice.
-  const totalIncome = activeLedgerItems
+  // Cash / Billed separation:
+  // Auto-Bill is Billed (receivable), NOT Cash received. Cash comes via payments/income excluding isAutoBill.
+  const totalBilledIncome = activeLedgerItems
     .filter(t => t.type === 'Income')
     .reduce((acc, t) => acc + t.amount, 0)
+
+  const totalCashReceived = activeLedgerItems
+    .filter(t => t.type === 'Income' && !t.isAutoBill)
+    .reduce((acc, t) => acc + t.amount, 0)
+
+  const totalIncome = totalCashReceived
 
   const totalExpense = activeLedgerItems
     .filter(t => t.type === 'Expense' && !isOverheadShareCategory(t.category))
@@ -711,7 +819,7 @@ export default async function FinancesPage({
     )
   }
 
-  // Server Action: Fund / Adjust a Wallet (4 Wallets Discipline)
+  // Server Action: Fund / Adjust a Wallet (4 Wallets Discipline + Explicit Audit Source)
   const fundWalletAction = async (formData: FormData) => {
     'use server'
     const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
@@ -720,6 +828,7 @@ export default async function FinancesPage({
     }
     const walletType = ((formData.get('wallet_type') as string) || 'OPERATING_CASH') as WalletType
     const entryType = ((formData.get('entry_type') as string) || 'IN') === 'OUT' ? 'OUT' : 'IN'
+    const rawSourceType = ((formData.get('source_type') as string) || 'WALLET_TRANSFER').trim()
     const amount = parseFloat((formData.get('amount') as string) || '0')
     const txnDate = ((formData.get('txn_date') as string) || '').trim() || getPakistanDateString()
     const notes = ((formData.get('notes') as string) || '').trim() || 'Wallet Funding / Adjustment'
@@ -736,11 +845,14 @@ export default async function FinancesPage({
       return redirect(`/finances?error=${encodeURIComponent('Target wallet not found.')}`)
     }
 
+    const validSources = new Set<string>(WALLET_FUND_SOURCE_TYPES)
     const sourceType =
       walletType === 'EMERGENCY_MORTALITY' && entryType === 'OUT'
         ? 'MORTALITY_CLAIM'
         : walletType === 'OWNER_PROFIT' && entryType === 'OUT'
         ? 'PROFIT_DRAW'
+        : validSources.has(rawSourceType)
+        ? rawSourceType
         : 'WALLET_TRANSFER'
 
     const { error: wtErr } = await supabaseClient.from('wallet_transactions').insert([
@@ -763,7 +875,7 @@ export default async function FinancesPage({
 
     return redirect(
       `/finances?msg=${encodeURIComponent(
-        `${targetWallet.name}: ${entryType === 'IN' ? '+' : '-'}Rs. ${amount.toLocaleString()} recorded.`
+        `${targetWallet.name} [${sourceType}]: ${entryType === 'IN' ? '+' : '-'}Rs. ${amount.toLocaleString()} recorded.`
       )}`
     )
   }
@@ -813,7 +925,7 @@ export default async function FinancesPage({
     return redirect(`/finances?msg=${encodeURIComponent('Wallet audit entry marked as VOID and balance recalculated.')}`)
   }
 
-  // Server Action: Log Palai Client Boarding Payment (credits Operating Cash Wallet)
+  // Server Action: Log Palai Client Boarding Payment (credits Operating Cash Wallet + Rollback on Wallet Fail)
   const logPalaiPaymentAction = async (formData: FormData) => {
     'use server'
     const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
@@ -858,15 +970,15 @@ export default async function FinancesPage({
       .select('id')
       .single()
 
-    if (payErr) {
-      return redirect(`/finances?error=${encodeURIComponent(payErr.message)}`)
+    if (payErr || !insertedPayLog) {
+      return redirect(`/finances?error=${encodeURIComponent(payErr?.message || 'Failed to log Palai payment.')}`)
     }
 
     // Credit Palai client payment into Wallet 1: Operating Cash with linked reference_key
     const farmWallets = await ensureDefaultWallets(supabaseClient, farm.id)
     const opWallet = farmWallets.find(w => w.wallet_type === 'OPERATING_CASH')
     if (opWallet) {
-      const refKey = insertedPayLog?.id ? `PALAI_LOG:${insertedPayLog.id}` : null
+      const refKey = `PALAI_LOG:${insertedPayLog.id}`
       const { error: wtErr } = await supabaseClient.from('wallet_transactions').insert([
         {
           farm_id: farm.id,
@@ -881,7 +993,14 @@ export default async function FinancesPage({
         },
       ])
       if (wtErr) {
-        return redirect(`/finances?error=${encodeURIComponent(`Payment logged, but wallet sync failed: ${wtErr.message}`)}`)
+        await supabaseClient
+          .from('animal_financial_logs')
+          .delete()
+          .eq('id', insertedPayLog.id)
+          .eq('farm_id', farm.id)
+        return redirect(
+          `/finances?error=${encodeURIComponent('Palai payment failed, wallet error: ' + wtErr.message)}`
+        )
       }
       await recalculateWalletBalance(supabaseClient, farm.id, opWallet.id)
     }
@@ -993,10 +1112,18 @@ export default async function FinancesPage({
         ? Math.round(parsedCustomAmount)
         : Math.round(suggestedPool)
 
+    if (!isNaN(parsedCustomAmount) && poolToAllocate > suggestedPool) {
+      return redirect(
+        `/finances?error=${encodeURIComponent(
+          `Custom amount Rs. ${poolToAllocate} asal pending Rs. ${suggestedPool} se zyada hai.`
+        )}`
+      )
+    }
+
     if (poolToAllocate <= 0) {
       return redirect(
         `/finances?error=${encodeURIComponent(
-          `No new unallocated non-feed expense available to allocate for ${targetSpecies}.`
+          `No new unallocated expense.`
         )}`
       )
     }
@@ -1060,18 +1187,15 @@ export default async function FinancesPage({
       return redirect(`/finances?msg=${encodeURIComponent(`Allocation tag already exists for ${targetSpecies} (${periodLabel} @ ${allocationDate}). No new entries created to avoid double allocation.`)}`)
     }
 
-    let allocatedSum = 0
+    const exactShares = distributeExactShares(
+      poolToAllocate,
+      weightedAnimals.map(a => a.effectiveWeight)
+    )
 
     for (let idx = 0; idx < weightedAnimals.length; idx++) {
       const animal = weightedAnimals[idx]
-
-      const shareRatio = animal.effectiveWeight / sumEffectiveWeight
-      const isLast = idx === weightedAnimals.length - 1
-      const shareAmount = isLast
-        ? Math.max(0, poolToAllocate - allocatedSum)
-        : Math.round(poolToAllocate * shareRatio)
-
-      allocatedSum += shareAmount
+      const shareRatio = sumEffectiveWeight > 0 ? animal.effectiveWeight / sumEffectiveWeight : 0
+      const shareAmount = exactShares[idx]
 
       if (shareAmount > 0) {
         insertsToApply.push({
@@ -1109,7 +1233,7 @@ export default async function FinancesPage({
     )
   }
 
-  // Server Action: Run Monthly Palai Auto-Billing
+  // Server Action: Run Monthly Palai Auto-Billing (Billed Receivable only; does NOT credit Cash/Wallet)
   const runMonthlyPalaiBilling = async (formData: FormData) => {
     'use server'
     const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
@@ -1181,12 +1305,12 @@ export default async function FinancesPage({
 
     return redirect(
       `/finances?msg=${encodeURIComponent(
-        `Generated monthly Palai bills for ${billedCount} animal(s) for ${billingMonth}.`
+        `Generated monthly Palai bills for ${billedCount} animal(s) for ${billingMonth} (Billed receivable only; cash recorded when client pays).`
       )}`
     )
   }
 
-  // Server Action: Add Global Farm Transaction (with Target Species, Wallet Guardrail & Linked Sale Split)
+  // Server Action: Add Global Farm Transaction (with Target Species, Wallet Guardrail, Linked Sale Split & Rollback)
   const addTransaction = async (formData: FormData) => {
     'use server'
     const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
@@ -1195,7 +1319,7 @@ export default async function FinancesPage({
     }
     const rawType = ((formData.get('type') as string) || 'Expense').trim()
     const type = rawType === 'Income' ? 'Income' : 'Expense'
-    const targetSpecies = ((formData.get('target_species') as string) || 'Goat').trim()
+    const targetSpecies = ((formData.get('target_species') as string) || 'Shared (All Species)').trim()
     const category = ((formData.get('category') as string) || '').trim()
     const parsedAmount = parseFloat((formData.get('amount') as string) || '0')
     const txn_date = ((formData.get('txn_date') as string) || '').trim() || getPakistanDateString()
@@ -1271,9 +1395,14 @@ export default async function FinancesPage({
           txnDate: txn_date,
         })
       } catch (splitErr: any) {
+        await supabaseClient
+          .from('transactions')
+          .delete()
+          .eq('id', sourceTxnId)
+          .eq('farm_id', farm.id)
         return redirect(
           `/finances?error=${encodeURIComponent(
-            `Sale recorded (ID: ${sourceTxnId}), but 60/20/20 wallet split failed: ${splitErr?.message || 'Unknown error'}.`
+            `Sale failed, wallet split error: ${splitErr?.message || 'Unknown error'}.`
           )}`
         )
       }
@@ -1304,9 +1433,14 @@ export default async function FinancesPage({
           },
         ])
         if (walletInsertErr) {
+          await supabaseClient
+            .from('transactions')
+            .delete()
+            .eq('id', sourceTxnId)
+            .eq('farm_id', farm.id)
           return redirect(
             `/finances?error=${encodeURIComponent(
-              `Transaction saved (ID: ${sourceTxnId}), but wallet sync failed: ${walletInsertErr.message}.`
+              `Transaction failed, wallet error: ${walletInsertErr.message}.`
             )}`
           )
         }
@@ -1823,6 +1957,18 @@ export default async function FinancesPage({
                 </select>
               </div>
               <div>
+                <label className="block text-[10px] font-bold uppercase text-slate-600 mb-1">Source Type</label>
+                <select
+                  name="source_type"
+                  defaultValue="WALLET_TRANSFER"
+                  className="px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-900"
+                >
+                  {WALLET_FUND_SOURCE_TYPES.map(src => (
+                    <option key={src} value={src}>{src}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
                 <label className="block text-[10px] font-bold uppercase text-slate-600 mb-1">Amount (PKR)</label>
                 <input
                   name="amount"
@@ -1951,8 +2097,8 @@ export default async function FinancesPage({
                       </span>
                     </div>
                     <div className="flex items-center justify-between text-[11px] text-slate-500 font-mono">
-                      <span>In: Rs. {mRow.cashIn.toLocaleString()}</span>
-                      <span>Out: Rs. {mRow.cashOut.toLocaleString()}</span>
+                      <span>Cash In: Rs. {mRow.cashIn.toLocaleString()}</span>
+                      <span>Cash Out: Rs. {mRow.cashOut.toLocaleString()}</span>
                     </div>
                     {(mRow.capitalIn60 > 0 || mRow.retainedProfit20 > 0 || mRow.mortalityClaimed > 0) && (
                       <div className="flex flex-wrap gap-2 pt-1 text-[10px] font-mono">
@@ -1990,7 +2136,9 @@ export default async function FinancesPage({
                   Every IN/OUT movement across Operating Cash, Animal Buying Capital, Emergency Fund &amp; Owner Draw Wallet (VOID entries excluded from balances)
                 </p>
               </div>
-              <span className="text-xs font-mono text-slate-500">{allAuditRows.length} entries</span>
+              <span className="text-xs font-mono text-slate-500">
+                {displayedAuditRows.length} of {pagedWalletAuditCount ?? allAuditRows.length} entries
+              </span>
             </div>
 
             <div className="overflow-x-auto max-h-96 overflow-y-auto">
@@ -2005,8 +2153,8 @@ export default async function FinancesPage({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {allAuditRows.length > 0 ? (
-                    allAuditRows.slice(0, 30).map((wt: any) => {
+                  {displayedAuditRows.length > 0 ? (
+                    displayedAuditRows.map((wt: any) => {
                       const wInfo = walletById[wt.wallet_id]
                       const isIn = wt.entry_type === 'IN'
                       const isVoid = Boolean(wt.isVoid)
@@ -2082,7 +2230,7 @@ export default async function FinancesPage({
           <div className="space-y-1">
             <div className="flex items-center gap-2">
               <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-indigo-500/30 border border-indigo-400/40 rounded-md">
-                Automated Billing
+                Automated Billing (Receivable Only)
               </span>
               <span className="text-xs text-indigo-200">
                 Active Palai Animals: <strong>{palaiAnimals?.length || 0}</strong>
@@ -2090,7 +2238,7 @@ export default async function FinancesPage({
             </div>
             <h2 className="text-lg font-bold">Monthly Palai Auto-Billing Generator</h2>
             <p className="text-xs text-slate-300 max-w-xl">
-              Generate monthly boarding fees for all active client animals in one click. Automatically logs revenue in non-refundable 30-day blocks for WhatsApp reminders.
+              Generate monthly boarding bills (receivables) for active client animals in non-refundable 30-day blocks. Billing creates dues—cash is only recorded when payment is logged.
             </p>
           </div>
 
@@ -2132,15 +2280,15 @@ export default async function FinancesPage({
                 Palai Client Billing &amp; Statement Ledger
               </h2>
               <p className="text-xs text-slate-500">
-                Accrued boarding charges (30-day blocks) vs. client payments received, with 1-click WhatsApp reminders for overdue dues
+                Total Billed (30-day blocks) vs. Total Cash Received from client payments, with 1-click WhatsApp reminders for overdue dues
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
               <span className="px-2.5 py-1 rounded-lg bg-slate-100 text-slate-800 font-semibold">
-                Billed: Rs. {totalPalaiBilled.toLocaleString()}
+                Total Billed: Rs. {totalPalaiBilled.toLocaleString()}
               </span>
               <span className="px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
-                Paid: Rs. {totalPalaiPaid.toLocaleString()}
+                Total Cash Received: Rs. {totalPalaiPaid.toLocaleString()}
               </span>
               <span
                 className={`px-2.5 py-1 rounded-lg font-bold border ${
@@ -2161,7 +2309,7 @@ export default async function FinancesPage({
                   <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Client &amp; Tag</th>
                   <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Rate / Tenure</th>
                   <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Total Billed</th>
-                  <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Paid</th>
+                  <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Total Cash Received</th>
                   <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500 uppercase">Balance Due</th>
                   <th className="px-5 py-3 text-right text-xs font-semibold text-slate-500 uppercase">
                     WhatsApp &amp; Payment
@@ -2377,18 +2525,22 @@ export default async function FinancesPage({
           )}
         </div>
 
-        {/* Summary Cards (Active Entries Only, Allocated Overhead Excluded from Double-Counting) */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+        {/* Summary Cards (Active Cash Only; Auto-Bill Receivables & Allocated Overhead Excluded) */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-sky-500">
+            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Billed (Incl. Auto-Bill)</p>
+            <p className="text-2xl font-bold text-sky-700 mt-1">Rs. {totalBilledIncome.toLocaleString()}</p>
+          </div>
           <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-emerald-500">
-            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Active Income</p>
-            <p className="text-2xl font-bold text-emerald-600 mt-1">Rs. {totalIncome.toLocaleString()}</p>
+            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Cash Received</p>
+            <p className="text-2xl font-bold text-emerald-600 mt-1">Rs. {totalCashReceived.toLocaleString()}</p>
           </div>
           <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-rose-500">
             <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Active Expenses</p>
             <p className="text-2xl font-bold text-rose-600 mt-1">Rs. {totalExpense.toLocaleString()}</p>
           </div>
           <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-indigo-500">
-            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Net Profit / Balance</p>
+            <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Net Cash Balance</p>
             <p className={`text-2xl font-bold mt-1 ${netBalance >= 0 ? 'text-indigo-600' : 'text-rose-600'}`}>
               Rs. {netBalance.toLocaleString()}
             </p>
@@ -2398,12 +2550,12 @@ export default async function FinancesPage({
         {/* Analytics Section */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
-            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">Income vs Expense Ratio</h2>
+            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">Cash In vs Cash Out Ratio</h2>
             {totalIncome + totalExpense > 0 ? (
               <div className="space-y-3">
                 <div className="flex items-center justify-between text-xs font-semibold">
-                  <span className="text-emerald-600">Income: {Math.round((totalIncome / (totalIncome + totalExpense || 1)) * 100)}%</span>
-                  <span className="text-rose-600">Expense: {Math.round((totalExpense / (totalIncome + totalExpense || 1)) * 100)}%</span>
+                  <span className="text-emerald-600">Cash In: {Math.round((totalIncome / (totalIncome + totalExpense || 1)) * 100)}%</span>
+                  <span className="text-rose-600">Cash Out: {Math.round((totalExpense / (totalIncome + totalExpense || 1)) * 100)}%</span>
                 </div>
                 <div className="w-full h-3 bg-slate-100 rounded-full overflow-hidden flex">
                   <div
@@ -2416,12 +2568,12 @@ export default async function FinancesPage({
                   ></div>
                 </div>
                 <div className="pt-2 flex items-center justify-between text-[11px] text-slate-400">
-                  <span>Inflows: Rs. {totalIncome.toLocaleString()}</span>
-                  <span>Outflows: Rs. {totalExpense.toLocaleString()}</span>
+                  <span>Cash Inflows: Rs. {totalIncome.toLocaleString()}</span>
+                  <span>Cash Outflows: Rs. {totalExpense.toLocaleString()}</span>
                 </div>
               </div>
             ) : (
-              <p className="text-xs text-slate-400 py-4 text-center">No active financial data available for ratio analysis yet.</p>
+              <p className="text-xs text-slate-400 py-4 text-center">No active cash flow data available for ratio analysis yet.</p>
             )}
           </div>
 
@@ -2464,7 +2616,7 @@ export default async function FinancesPage({
                 <div>
                   <h2 className="font-bold text-slate-800 text-sm">Unified Transaction History</h2>
                   <p className="text-[11px] text-slate-400">
-                    Showing {paginatedLedger.length} of {totalFilteredCount} matching entries (Active: {activeLedgerItems.length} / Total: {unifiedList.length})
+                    Page {safePage} of {totalPages} • Showing {paginatedLedger.length} on page ({totalFilteredCount} matching in ledger; Active: {activeLedgerItems.length} / Total: {unifiedList.length})
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-1.5">
@@ -2554,13 +2706,18 @@ export default async function FinancesPage({
                               </Link>
                             ) : (
                               <span className="inline-flex items-center px-2 py-0.5 text-[11px] font-semibold rounded-md bg-slate-100 text-slate-700 border border-slate-200">
-                                {txn.targetSpecies || 'Goat'}
+                                {txn.targetSpecies || 'Shared (All Species)'}
                               </span>
                             )}
                           </td>
                           <td className="px-5 py-4 whitespace-nowrap text-xs font-bold text-slate-900">
-                            <div className="flex items-center gap-1.5">
+                            <div className="flex items-center gap-1.5 flex-wrap">
                               <span>{txn.category}</span>
+                              {txn.isAutoBill && (
+                                <span className="px-1.5 py-0.2 text-[10px] font-bold uppercase rounded bg-sky-50 text-sky-800 border border-sky-200">
+                                  BILLED
+                                </span>
+                              )}
                               {isVoid && (
                                 <span className="px-1.5 py-0.2 text-[10px] font-bold uppercase rounded bg-amber-100 text-amber-900 border border-amber-300">
                                   VOID
@@ -2611,7 +2768,7 @@ export default async function FinancesPage({
             </div>
 
             {/* Pagination Controls */}
-            {totalFilteredCount > 0 && (
+            {totalDbLedgerCount > 0 && (
               <div className="px-6 py-3.5 border-t border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
                 <span className="text-slate-500">
                   Page <strong className="text-slate-800">{safePage}</strong> of <strong className="text-slate-800">{totalPages}</strong>
@@ -2672,7 +2829,7 @@ export default async function FinancesPage({
                   <select
                     name="target_species"
                     required
-                    defaultValue="Goat"
+                    defaultValue="Shared (All Species)"
                     className="w-full px-3 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-semibold text-slate-900"
                   >
                     {SPECIES_OPTIONS.map(sp => (
