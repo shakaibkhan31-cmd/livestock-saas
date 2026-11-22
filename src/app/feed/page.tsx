@@ -282,12 +282,8 @@ export default async function FeedManagementPage({
 
   const effectiveSplitDate = (params.splitDate || todayStr).split('T')[0]
 
-  const dateEligibleAnimals = (activeAnimals || []).filter(a => {
-    if (!a.acquisition_date) return true
-    return String(a.acquisition_date).split('T')[0] <= effectiveSplitDate
-  })
-
-  const matchingActiveAnimals = dateEligibleAnimals.filter(a => {
+  // Split across all currently Active matching animals (including newly onboarded / Palai animals)
+  const matchingActiveAnimals = (activeAnimals || []).filter(a => {
     if (selectedSpeciesFilter === 'All' || selectedSpeciesFilter === 'Shared (All Species)') return true
     return a.species === selectedSpeciesFilter
   })
@@ -546,7 +542,7 @@ export default async function FeedManagementPage({
     )
   }
 
-  // SERVER ACTION 4: Species-Specific Automated Cost Split (Admin Only, Date-Aware)
+  // SERVER ACTION 4: Species-Specific Automated Cost Split Across Current Active Animals (Admin Only)
   const allocateFeedCostToAnimals = async (formData: FormData) => {
     'use server'
     const targetSpecies = (formData.get('allocate_species') as string) || 'Goat'
@@ -561,6 +557,7 @@ export default async function FeedManagementPage({
       .select('id, total_cost, feed_type, log_date')
       .eq('farm_id', farm.id)
       .eq('target_species', targetSpecies)
+      .eq('entry_type', 'Purchase')
       .eq('is_allocated', false)
       .gt('total_cost', 0)
 
@@ -580,20 +577,15 @@ export default async function FeedManagementPage({
       animalQuery = animalQuery.eq('species', targetSpecies)
     }
 
-    const { data: rawAnimals } = await animalQuery
-
-    const cutoffDateStr = String(allocationDate).split('T')[0]
-    const animals = (rawAnimals || []).filter(a => {
-      if (!a.acquisition_date) return true
-      const acqDateStr = String(a.acquisition_date).split('T')[0]
-      return acqDateStr <= cutoffDateStr
-    })
+    const { data: animals } = await animalQuery
 
     if (!animals || animals.length === 0) {
       return redirect(
-        `/feed?error=${encodeURIComponent(`No active ${targetSpecies} animals existed on or before ${formatDateDDMMYYYY(cutoffDateStr)} to split costs.`)}`
+        `/feed?error=${encodeURIComponent(`No active ${targetSpecies} animals currently in shed to split costs.`)}`
       )
     }
+
+    const splitDateLabel = formatDateDDMMYYYY(String(allocationDate).split('T')[0])
 
     let weightsByAnimal: Record<string, number> = {}
     if (splitMethod === 'weight') {
@@ -601,7 +593,6 @@ export default async function FeedManagementPage({
         .from('animal_weight_logs')
         .select('animal_id, weight_kg, recorded_date')
         .eq('farm_id', farm.id)
-        .lte('recorded_date', cutoffDateStr)
         .order('recorded_date', { ascending: false })
 
       ;(wLogs || []).forEach(w => {
@@ -622,10 +613,10 @@ export default async function FeedManagementPage({
         const w = weightsByAnimal[animal.id] || 0
         const ratio = w / totalWeight
         share = Math.round(totalPool * ratio)
-        noteDetail = `${periodLabel} [${targetSpecies}] (${(ratio * 100).toFixed(1)}% weight share @ ${w}kg as of ${formatDateDDMMYYYY(cutoffDateStr)})`
+        noteDetail = `${periodLabel} [${targetSpecies}] (${(ratio * 100).toFixed(1)}% weight share @ ${w}kg across ${animals.length} active ${targetSpecies})`
       } else {
         share = Math.round(totalPool / animals.length)
-        noteDetail = `${periodLabel} [${targetSpecies}] (Equal split across ${animals.length} ${targetSpecies} on/before ${formatDateDDMMYYYY(cutoffDateStr)})`
+        noteDetail = `${periodLabel} [${targetSpecies}] (Equal split across ${animals.length} active ${targetSpecies} as of ${splitDateLabel})`
       }
 
       return {
@@ -657,7 +648,7 @@ export default async function FeedManagementPage({
 
     return redirect(
       `/feed?species=${encodeURIComponent(targetSpecies)}&msg=${encodeURIComponent(
-        `Rs. ${totalPool.toLocaleString()} (${targetSpecies} Feed Pool) allocated across ${financialInserts.length} ${targetSpecies}(s) present on ${formatDateDDMMYYYY(cutoffDateStr)}!`
+        `Rs. ${totalPool.toLocaleString()} (${targetSpecies} Feed Pool) allocated across ${financialInserts.length} currently active ${targetSpecies}(s)!`
       )}`
     )
   }
@@ -816,7 +807,7 @@ export default async function FeedManagementPage({
             <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Est. Share / Head</p>
             <p className="text-2xl font-bold text-indigo-600 mt-1 font-mono">Rs. {estimatedShare.toLocaleString()}</p>
             <p className="text-[11px] text-slate-400 mt-0.5">
-              {matchingCount} eligible {selectedSpeciesFilter === 'All' ? 'head(s)' : `${selectedSpeciesFilter}(s)`} • {formatDateDDMMYYYY(effectiveSplitDate)}
+              {matchingCount} active {selectedSpeciesFilter === 'All' ? 'head(s)' : `${selectedSpeciesFilter}(s)`}
             </p>
           </div>
         </div>
