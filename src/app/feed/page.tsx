@@ -5,6 +5,15 @@ import { getUserFarmAndRole } from '@/utils/rbac'
 import SplitEngineClient from './SplitEngineClient'
 import FeedActionFormsClient from './FeedActionFormsClient'
 
+type ActiveAnimalRow = {
+  id: string
+  tag_id: string
+  species: string
+  ownership?: string | null
+  client_name?: string | null
+  acquisition_date?: string | null
+}
+
 function getKarachiDate(): string {
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Karachi',
@@ -151,16 +160,11 @@ export default async function FeedManagementPage({
   let pagedFeedLogs: Array<Record<string, any>> = []
   let pagedTotalCount: number | null = 0
   let allFeedLogs: Array<Record<string, any>> = []
-  let activeAnimals: Array<Record<string, any>> = []
+  let activeAnimals: ActiveAnimalRow[] = []
   let inventoryRows: Array<Record<string, any>> = []
 
   try {
-    const [
-      pagedRes,
-      summaryRes,
-      animalsRes,
-      invRes,
-    ] = await Promise.all([
+    const [pagedRes, summaryRes, animalsRes, invRes] = await Promise.all([
       supabase
         .from('feed_logs')
         .select('id, target_species, entry_type, feed_type, quantity_kg, total_cost, log_date, notes, is_allocated', {
@@ -200,7 +204,7 @@ export default async function FeedManagementPage({
     if (animalsRes.error) {
       loadErrorMsg = loadErrorMsg || animalsRes.error.message
     } else {
-      activeAnimals = animalsRes.data || []
+      activeAnimals = (animalsRes.data || []) as ActiveAnimalRow[]
     }
 
     if (!invRes.error) {
@@ -683,7 +687,6 @@ export default async function FeedManagementPage({
         const avgRatePerKg = totalPurchasedKg > 0 ? totalPurchasedCost / totalPurchasedKg : 0
 
         if (diff > 0) {
-          // Target < Current -> Stock kam karna hai -> Consumption
           const adjustedCost = avgRatePerKg > 0 ? Math.round(avgRatePerKg * diff) : 0
           adjustmentsToInsert.push({
             farm_id: authFarm.id,
@@ -697,7 +700,6 @@ export default async function FeedManagementPage({
             is_allocated: false,
           })
         } else if (diff < 0) {
-          // Target > Current -> Stock barhana hai -> Purchase
           const upQty = Math.abs(diff)
           const correctionCost = avgRatePerKg > 0 ? Math.round(avgRatePerKg * upQty) : 0
           adjustmentsToInsert.push({
