@@ -338,17 +338,23 @@ export default async function FeedManagementPage({
     dateStr: string,
     noteText: string | null
   ) => {
+    const cleanFeedName = String(feedName || '').trim()
+    if (!cleanFeedName) return
+
     let logsQuery = supabaseClient
       .from('feed_logs')
       .select('quantity_kg, total_cost, entry_type')
       .eq('farm_id', farmId)
-      .ilike('feed_type', feedName)
+      .ilike('feed_type', cleanFeedName)
 
     if (category && category !== 'Shared (All Species)') {
       logsQuery = logsQuery.eq('target_species', category)
     }
 
-    const { data: logsForName } = await logsQuery
+    const { data: logsForName, error: logsErr } = await logsQuery
+    if (logsErr) {
+      throw new Error(`Failed reading feed_logs for snapshot: ${logsErr.message}`)
+    }
 
     let purchKg = 0
     let purchCost = 0
@@ -367,20 +373,24 @@ export default async function FeedManagementPage({
     const closingBalanceKg = Number((purchKg - consKg).toFixed(2))
     const weightedAvgRate = purchKg > 0 ? Number((purchCost / purchKg).toFixed(2)) : 0
 
-    const { data: existingInv } = await supabaseClient
+    const { data: existingInv, error: selInvErr } = await supabaseClient
       .from('feed_inventory')
       .select('id, low_stock_threshold_kg')
       .eq('farm_id', farmId)
       .eq('category', category)
-      .ilike('feed_name', feedName)
+      .ilike('feed_name', cleanFeedName)
       .limit(1)
 
+    if (selInvErr) {
+      throw new Error(`Failed querying feed_inventory: ${selInvErr.message}`)
+    }
+
     if (existingInv && existingInv.length > 0) {
-      await supabaseClient
+      const { error: updErr } = await supabaseClient
         .from('feed_inventory')
         .update({
-          feed_name: feedName,
-          item_name: feedName,
+          feed_name: cleanFeedName,
+          item_name: cleanFeedName,
           category,
           purchase_kg: purchKg,
           closing_kg: closingBalanceKg,
@@ -392,12 +402,16 @@ export default async function FeedManagementPage({
         })
         .eq('id', existingInv[0].id)
         .eq('farm_id', farmId)
+
+      if (updErr) {
+        throw new Error(`Failed updating feed_inventory: ${updErr.message}`)
+      }
     } else {
-      await supabaseClient.from('feed_inventory').insert([
+      const { error: insErr } = await supabaseClient.from('feed_inventory').insert([
         {
           farm_id: farmId,
-          feed_name: feedName,
-          item_name: feedName,
+          feed_name: cleanFeedName,
+          item_name: cleanFeedName,
           category,
           opening_kg: 0,
           purchase_kg: purchKg,
@@ -410,6 +424,10 @@ export default async function FeedManagementPage({
           notes: noteText,
         },
       ])
+
+      if (insErr) {
+        throw new Error(`Failed inserting feed_inventory: ${insErr.message}`)
+      }
     }
   }
 
@@ -566,106 +584,131 @@ export default async function FeedManagementPage({
   // SERVER ACTION 3: Stock Adjustment (Downward -> Consumption pending split; Upward -> Stock correction at avg rate)
   const adjustFeedStock = async (formData: FormData) => {
     'use server'
-    const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
-    if (!authUser || !authFarm || authRole !== 'admin') {
-      return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Admin only')}`)
-    }
-
-    const target_species = (formData.get('target_species') as string) || 'Goat'
-    const log_date = (formData.get('log_date') as string) || getKarachiDate()
-    const notes = (formData.get('notes') as string) || 'Closing Stock Adjustment'
-
-    const feedTypes = formData.getAll('feed_type') as string[]
-    const targetQuantities = formData.getAll('target_remaining_kg') as string[]
-
-    const supabaseClient = await createClient()
-    const adjustmentsToInsert: Array<Record<string, any>> = []
-
-    for (let i = 0; i < feedTypes.length; i++) {
-      const ft = (feedTypes[i] || '').trim()
-      if (!ft) continue
-
-      const targetRemainingKg = parseFloat(targetQuantities[i] ?? '0')
-      if (isNaN(targetRemainingKg) || targetRemainingKg < 0) continue
-
-      const { data: itemLogs } = await supabaseClient
-        .from('feed_logs')
-        .select('quantity_kg, total_cost, entry_type')
-        .eq('farm_id', authFarm.id)
-        .eq('target_species', target_species)
-        .eq('feed_type', ft)
-
-      let totalPurchasedKg = 0
-      let totalPurchasedCost = 0
-      let totalConsumedKg = 0
-
-      ;(itemLogs || []).forEach(l => {
-        const q = Number(l.quantity_kg) || 0
-        const c = Number(l.total_cost) || 0
-        if (l.entry_type === 'Purchase' || !l.entry_type) {
-          totalPurchasedKg += q
-          totalPurchasedCost += c
-        } else {
-          totalConsumedKg += q
-        }
-      })
-
-      const currentRemaining = totalPurchasedKg - totalConsumedKg
-      const diff = Number((currentRemaining - targetRemainingKg).toFixed(3))
-      const avgRatePerKg = totalPurchasedKg > 0 ? totalPurchasedCost / totalPurchasedKg : 0
-
-      if (diff > 0) {
-        const adjustedCost = avgRatePerKg > 0 ? Math.round(avgRatePerKg * diff) : 0
-        adjustmentsToInsert.push({
-          farm_id: authFarm.id,
-          target_species,
-          entry_type: 'Consumption',
-          feed_type: ft,
-          quantity_kg: diff,
-          total_cost: adjustedCost,
-          log_date,
-          notes: `${notes} (${currentRemaining.toFixed(1)}kg -> ${targetRemainingKg.toFixed(1)}kg)`,
-          is_allocated: false,
-        })
-      } else if (diff < 0) {
-        const upQty = Math.abs(diff)
-        const correctionCost = avgRatePerKg > 0 ? Math.round(avgRatePerKg * upQty) : 0
-        adjustmentsToInsert.push({
-          farm_id: authFarm.id,
-          target_species,
-          entry_type: 'Purchase',
-          feed_type: ft,
-          quantity_kg: upQty,
-          total_cost: correctionCost,
-          log_date,
-          notes: `${notes} [Stock Correction +${upQty.toFixed(1)}kg: ${currentRemaining.toFixed(1)}kg -> ${targetRemainingKg.toFixed(1)}kg]`,
-          is_allocated: true,
-        })
+    try {
+      const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
+      if (!authUser || !authFarm || authRole !== 'admin') {
+        return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Admin only')}`)
       }
-    }
 
-    if (adjustmentsToInsert.length === 0) {
+      const target_species = String(formData.get('target_species') || 'Goat').trim() || 'Goat'
+      const rawDate = String(formData.get('log_date') || '').trim()
+      const log_date = /^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? rawDate : getKarachiDate()
+      const notes = String(formData.get('notes') || '').trim() || 'Closing Stock Adjustment'
+
+      const feedTypes = formData.getAll('feed_type').map(v => String(v || ''))
+      const targetQuantities = formData.getAll('target_remaining_kg').map(v => String(v || ''))
+
+      const supabaseClient = await createClient()
+      const adjustmentsToInsert: Array<Record<string, any>> = []
+
+      for (let i = 0; i < feedTypes.length; i++) {
+        const ft = feedTypes[i].trim()
+        if (!ft) continue
+
+        const targetRemainingKg = parseFloat(targetQuantities[i] ?? '')
+        if (!Number.isFinite(targetRemainingKg) || targetRemainingKg < 0) continue
+
+        let logsQuery = supabaseClient
+          .from('feed_logs')
+          .select('quantity_kg, total_cost, entry_type')
+          .eq('farm_id', authFarm.id)
+          .ilike('feed_type', ft)
+
+        if (target_species !== 'Shared (All Species)') {
+          logsQuery = logsQuery.eq('target_species', target_species)
+        }
+
+        const { data: itemLogs, error: itemLogsErr } = await logsQuery
+        if (itemLogsErr) {
+          return redirect(`/feed?error=${encodeURIComponent(itemLogsErr.message)}`)
+        }
+
+        let totalPurchasedKg = 0
+        let totalPurchasedCost = 0
+        let totalConsumedKg = 0
+
+        ;(itemLogs || []).forEach(l => {
+          const q = Number(l.quantity_kg) || 0
+          const c = Number(l.total_cost) || 0
+          if (l.entry_type === 'Purchase' || !l.entry_type) {
+            totalPurchasedKg += q
+            totalPurchasedCost += c
+          } else {
+            totalConsumedKg += q
+          }
+        })
+
+        const currentRemaining = totalPurchasedKg - totalConsumedKg
+        const diff = Number((currentRemaining - targetRemainingKg).toFixed(3))
+        const avgRatePerKg = totalPurchasedKg > 0 ? totalPurchasedCost / totalPurchasedKg : 0
+
+        if (diff > 0) {
+          const adjustedCost = avgRatePerKg > 0 ? Math.round(avgRatePerKg * diff) : 0
+          adjustmentsToInsert.push({
+            farm_id: authFarm.id,
+            target_species,
+            entry_type: 'Consumption',
+            feed_type: ft,
+            quantity_kg: diff,
+            total_cost: adjustedCost,
+            log_date,
+            notes: `${notes} (${currentRemaining.toFixed(1)}kg -> ${targetRemainingKg.toFixed(1)}kg)`,
+            is_allocated: false,
+          })
+        } else if (diff < 0) {
+          const upQty = Math.abs(diff)
+          const correctionCost = avgRatePerKg > 0 ? Math.round(avgRatePerKg * upQty) : 0
+          adjustmentsToInsert.push({
+            farm_id: authFarm.id,
+            target_species,
+            entry_type: 'Purchase',
+            feed_type: ft,
+            quantity_kg: upQty,
+            total_cost: correctionCost,
+            log_date,
+            notes: `${notes} [Stock Correction +${upQty.toFixed(1)}kg: ${currentRemaining.toFixed(1)}kg -> ${targetRemainingKg.toFixed(1)}kg]`,
+            is_allocated: true,
+          })
+        }
+      }
+
+      if (adjustmentsToInsert.length === 0) {
+        return redirect(
+          `/feed?error=${encodeURIComponent('No stock difference detected between physical stock and ledger stock.')}`
+        )
+      }
+
+      const { error: insertErr } = await supabaseClient
+        .from('feed_logs')
+        .insert(adjustmentsToInsert)
+
+      if (insertErr) {
+        return redirect(`/feed?error=${encodeURIComponent(insertErr.message)}`)
+      }
+
+      for (const adj of adjustmentsToInsert) {
+        await syncFeedInventorySnapshot(
+          supabaseClient,
+          authFarm.id,
+          adj.feed_type,
+          target_species,
+          log_date,
+          adj.notes
+        )
+      }
+
       return redirect(
-        `/feed?error=${encodeURIComponent('No stock difference detected between physical stock and ledger stock.')}`
+        `/feed?species=${encodeURIComponent(target_species)}&msg=${encodeURIComponent(
+          `Applied stock adjustment for ${adjustmentsToInsert.length} item(s)!`
+        )}`
       )
+    } catch (err: any) {
+      if (err && typeof err === 'object' && 'digest' in err && String(err.digest).startsWith('NEXT_REDIRECT')) {
+        throw err
+      }
+      const message = err?.message || 'Unexpected server error during stock adjustment.'
+      return redirect(`/feed?error=${encodeURIComponent(message)}`)
     }
-
-    const { error } = await supabaseClient.from('feed_logs').insert(adjustmentsToInsert)
-    if (error) {
-      return redirect(`/feed?error=${encodeURIComponent(error.message)}`)
-    }
-
-    await Promise.all(
-      adjustmentsToInsert.map(adj =>
-        syncFeedInventorySnapshot(supabaseClient, authFarm.id, adj.feed_type, target_species, log_date, adj.notes)
-      )
-    )
-
-    return redirect(
-      `/feed?species=${encodeURIComponent(target_species)}&msg=${encodeURIComponent(
-        `Applied stock adjustment for ${adjustmentsToInsert.length} item(s)!`
-      )}`
-    )
   }
 
   // SERVER ACTION 4: Allocate Pending Consumption Costs to Eligible Animals (Preserve feed_logs.notes)
