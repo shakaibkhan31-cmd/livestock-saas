@@ -625,7 +625,7 @@ export default async function FeedManagementPage({
     }
   }
 
-  // SERVER ACTION 3: Stock Adjustment (Only 'Consumption' or 'Purchase' to satisfy feed_logs_entry_type_check)
+  // SERVER ACTION 3: Stock Adjustment (Decrease / Write-off Only -> Consumption; Increase Blocked)
   const adjustFeedStock = async (formData: FormData) => {
     'use server'
     try {
@@ -637,7 +637,7 @@ export default async function FeedManagementPage({
       const target_species = String(formData.get('target_species') || 'Goat').trim() || 'Goat'
       const rawDate = String(formData.get('log_date') || '').trim()
       const log_date = /^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? rawDate : getKarachiDate()
-      const notes = String(formData.get('notes') || '').trim() || 'Closing Stock Adjustment'
+      const notes = String(formData.get('notes') || '').trim() || 'Stock Adjustment - Physical Count'
 
       const feedTypes = formData.getAll('feed_type').map(v => String(v || ''))
       const targetQuantities = formData.getAll('target_remaining_kg').map(v => String(v || ''))
@@ -684,6 +684,13 @@ export default async function FeedManagementPage({
 
         const currentRemaining = totalPurchasedKg - totalConsumedKg
         const diff = Number((currentRemaining - targetRemainingKg).toFixed(3))
+
+        if (diff < 0) {
+          throw new Error(
+            `Stock increase not allowed via Adjustment for ${ft}. Stock sirf Purchase se barh sakta hai. Agar stock waqai barha hai to Purchase entry karo.`
+          )
+        }
+
         const avgRatePerKg = totalPurchasedKg > 0 ? totalPurchasedCost / totalPurchasedKg : 0
 
         if (diff > 0) {
@@ -699,26 +706,12 @@ export default async function FeedManagementPage({
             notes: `${notes} (${currentRemaining.toFixed(1)}kg -> ${targetRemainingKg.toFixed(1)}kg)`,
             is_allocated: false,
           })
-        } else if (diff < 0) {
-          const upQty = Math.abs(diff)
-          const correctionCost = avgRatePerKg > 0 ? Math.round(avgRatePerKg * upQty) : 0
-          adjustmentsToInsert.push({
-            farm_id: authFarm.id,
-            target_species,
-            entry_type: 'Purchase',
-            feed_type: ft,
-            quantity_kg: upQty,
-            total_cost: correctionCost,
-            log_date,
-            notes: `${notes} [Stock Correction +${upQty.toFixed(1)}kg: ${currentRemaining.toFixed(1)}kg -> ${targetRemainingKg.toFixed(1)}kg]`,
-            is_allocated: true,
-          })
         }
       }
 
       if (adjustmentsToInsert.length === 0) {
         return redirect(
-          `/feed?error=${encodeURIComponent('No stock difference detected between physical stock and ledger stock.')}`
+          `/feed?error=${encodeURIComponent('No stock decrease detected between physical stock and ledger stock.')}`
         )
       }
 
