@@ -990,13 +990,13 @@ export default function FeedCommandCenterClient({
                         </span>
                       )}
                     </div>
-                  </div>
-                  {isAdmin && item.avgRatePerKg > 0 && (
+                    {isAdmin && item.avgRatePerKg > 0 && (
   <div className="mt-1 text-[11px] text-emerald-700 font-semibold flex items-center justify-between">
     <span>Stock Value</span>
     <span>Rs. {Math.round(Math.max(0, item.remainingKg) * item.avgRatePerKg).toLocaleString('en-PK')}</span>
   </div>
 )}
+                  </div>
                 )
               })}
             </div>
