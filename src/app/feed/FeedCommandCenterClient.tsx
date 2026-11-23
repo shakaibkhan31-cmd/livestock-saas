@@ -1,7 +1,9 @@
 'use client'
 
-import React, { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
+import SplitEngineClient from './SplitEngineClient'
 import FeedActionFormsClient from './FeedActionFormsClient'
 
 type ActiveAnimalRow = {
@@ -13,6 +15,8 @@ type ActiveAnimalRow = {
   acquisition_date?: string | null
 }
 
+type FeedLogRow = Record<string, any>
+
 interface FeedCommandCenterClientProps {
   farmName: string
   role: string
@@ -20,7 +24,7 @@ interface FeedCommandCenterClientProps {
   todayStr: string
   speciesOptions: string[]
   dynamicFeedSuggestions: string[]
-  allFeedLogs: Array<Record<string, any>>
+  allFeedLogs: FeedLogRow[]
   activeAnimals: ActiveAnimalRow[]
   thresholdByFeedName: Record<string, number>
   initialSpeciesFilter: string
@@ -34,25 +38,11 @@ interface FeedCommandCenterClientProps {
   statusMsg: string
   errorMsg: string
   undoPayload: string
-  addFeedLogAction: (formData: FormData) => void | Promise<void>
-  deleteFeedLogAction: (formData: FormData) => void | Promise<void>
-  restoreFeedLogAction: (formData: FormData) => void | Promise<void>
-  adjustFeedStockAction: (formData: FormData) => void | Promise<void>
-  allocateFeedCostAction: (formData: FormData) => void | Promise<void>
-  updateFeedThresholdAction: (formData: FormData) => void | Promise<void>
-}
-
-interface FeedStockSummaryItem {
-  key: string
-  feedName: string
-  species: string
-  purchasedKg: number
-  consumedKg: number
-  remainingKg: number
-  avgRatePerKg: number
-  remainingValue: number
-  thresholdKg: number
-  isLow: boolean
+  addFeedLogAction: (formData: FormData) => Promise<void>
+  deleteFeedLogAction: (formData: FormData) => Promise<void>
+  restoreFeedLogAction: (formData: FormData) => Promise<void>
+  adjustFeedStockAction: (formData: FormData) => Promise<void>
+  allocateFeedCostAction: (formData: FormData) => Promise<void>
 }
 
 function formatDateDDMMYYYY(dateInput?: string | null): string {
@@ -69,6 +59,37 @@ function formatDateDDMMYYYY(dateInput?: string | null): string {
   const month = String(d.getMonth() + 1).padStart(2, '0')
   const year = d.getFullYear()
   return `${day}/${month}/${year}`
+}
+
+function formatDateTimeDDMMYYYY(dateInput?: string | null): string {
+  if (!dateInput) return 'N/A'
+  const d = new Date(dateInput)
+  if (isNaN(d.getTime())) return formatDateDDMMYYYY(dateInput)
+  const dateStr = formatDateDDMMYYYY(d.toISOString())
+  const timeStr = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Karachi',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  }).format(d)
+  return `${dateStr} at ${timeStr}`
+}
+
+function getWhatToDoNextHint(err: string): string {
+  const lower = err.toLowerCase()
+  if (lower.includes('increase') || lower.includes('purchase')) {
+    return 'Record a New Purchase entry with the invoice cost so wallet and inventory stay balanced.'
+  }
+  if (lower.includes('weight')) {
+    return 'Open Livestock Master, record the latest live weight for that tag, and retry the split.'
+  }
+  if (lower.includes('allocated')) {
+    return 'Reverse the cost allocation from the animal financial ledger before deleting this log.'
+  }
+  if (lower.includes('unallocated') || lower.includes('consumption')) {
+    return 'Log a stock consumption/write-off first so there is a pending consumption cost pool to split.'
+  }
+  return 'Review your input values and try again, or refresh the page to sync the latest ledger state.'
 }
 
 export default function FeedCommandCenterClient({
@@ -97,889 +118,1410 @@ export default function FeedCommandCenterClient({
   restoreFeedLogAction,
   adjustFeedStockAction,
   allocateFeedCostAction,
-  updateFeedThresholdAction,
 }: FeedCommandCenterClientProps) {
   const router = useRouter()
 
-  const [speciesFilter, setSpeciesFilter] = useState<string>(initialSpeciesFilter || 'All')
-  const [entryTypeFilter, setEntryTypeFilter] = useState<string>(initialEntryType || 'All')
-  const [allocFilter, setAllocFilter] = useState<string>(initialAllocFilter || 'All')
-  const [searchQuery, setSearchQuery] = useState<string>(initialSearchQuery || '')
-  const [fromDate, setFromDate] = useState<string>(initialFromDate || '')
-  const [toDate, setToDate] = useState<string>(initialToDate || '')
-  const [lowOnly, setLowOnly] = useState<boolean>(Boolean(initialLowOnly))
-  const [currentPage, setCurrentPage] = useState<number>(1)
+  // Filters & Table State
+  const [selectedSpeciesFilter, setSelectedSpeciesFilter] = useState(initialSpeciesFilter)
+  const [selectedEntryType, setSelectedEntryType] = useState(initialEntryType)
+  const [selectedAllocFilter, setSelectedAllocFilter] = useState(initialAllocFilter)
+  const [searchQuery, setSearchQuery] = useState(initialSearchQuery)
+  const [fromDate, setFromDate] = useState(initialFromDate)
+  const [toDate, setToDate] = useState(initialToDate)
+  const [lowStockOnly, setLowStockOnly] = useState(initialLowOnly)
+  const [sortBy, setSortBy] = useState<'date' | 'qty' | 'cost'>('date')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+  const [currentPage, setCurrentPage] = useState(1)
+  const [expandedRowId, setExpandedRowId] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [restoringUndo, setRestoringUndo] = useState(false)
   const pageSize = 15
 
-  const defaultAllocSpecies =
-    speciesFilter !== 'All' ? speciesFilter : speciesOptions[0] || 'Goat'
-  const [allocateSpecies, setAllocateSpecies] = useState<string>(defaultAllocSpecies)
-  const [splitMethod, setSplitMethod] = useState<'equal' | 'weight'>('equal')
-  const [allocationDate, setAllocationDate] = useState<string>(initialSplitDate || todayStr)
-  const [periodLabel, setPeriodLabel] = useState<string>('Consumption Ration Allocation')
-  const [isAllocating, setIsAllocating] = useState<boolean>(false)
-
-  const thresholdFeedList = useMemo(() => {
-    const names = new Set<string>(dynamicFeedSuggestions)
-    allFeedLogs.forEach(l => {
-      const n = String(l.feed_type || '').trim()
-      if (n) names.add(n)
-    })
-    return Array.from(names).sort()
-  }, [dynamicFeedSuggestions, allFeedLogs])
-
-  const [selectedThresholdFeed, setSelectedThresholdFeed] = useState<string>(
-    thresholdFeedList[0] || 'Mineral Mixture & DCP'
-  )
-  const [thresholdInputKg, setThresholdInputKg] = useState<string>(() => {
-    const initialFeed = thresholdFeedList[0] || 'Mineral Mixture & DCP'
-    const val = thresholdByFeedName[initialFeed.trim().toLowerCase()]
-    return val !== undefined ? String(val) : ''
+  // Toast State (5-second auto-dismiss for normal toasts, 10-second for Undo delete toast)
+  const [toast, setToast] = useState<{
+    type: 'success' | 'error'
+    message: string
+    undo?: string
+  } | null>(() => {
+    if (errorMsg) return { type: 'error', message: errorMsg }
+    if (statusMsg) return { type: 'success', message: statusMsg, undo: undoPayload || undefined }
+    return null
   })
-  const [isSavingThreshold, setIsSavingThreshold] = useState<boolean>(false)
 
-  const handleSelectThresholdFeed = (feedName: string) => {
-    setSelectedThresholdFeed(feedName)
-    const val = thresholdByFeedName[feedName.trim().toLowerCase()]
-    setThresholdInputKg(val !== undefined ? String(val) : '')
+  useEffect(() => {
+    if (errorMsg) {
+      setToast({ type: 'error', message: errorMsg })
+    } else if (statusMsg) {
+      setToast({ type: 'success', message: statusMsg, undo: undoPayload || undefined })
+    }
+  }, [statusMsg, errorMsg, undoPayload])
+
+  useEffect(() => {
+    if (!toast) return
+    const duration = toast.undo ? 10000 : 5000
+    const timer = setTimeout(() => {
+      setToast(null)
+    }, duration)
+    return () => clearTimeout(timer)
+  }, [toast])
+
+  // Sync URL cleanly when filters change without full reload
+  const updateUrlQuery = (overrides?: {
+    species?: string
+    entryType?: string
+    alloc?: string
+    q?: string
+    from?: string
+    to?: string
+    lowOnly?: boolean
+  }) => {
+    const sp = new URLSearchParams()
+    const s = overrides?.species ?? selectedSpeciesFilter
+    const et = overrides?.entryType ?? selectedEntryType
+    const al = overrides?.alloc ?? selectedAllocFilter
+    const qVal = overrides?.q ?? searchQuery
+    const fVal = overrides?.from ?? fromDate
+    const tVal = overrides?.to ?? toDate
+    const lVal = overrides?.lowOnly ?? lowStockOnly
+
+    if (s && s !== 'All') sp.set('species', s)
+    if (et && et !== 'All') sp.set('entryType', et)
+    if (al && al !== 'All') sp.set('alloc', al)
+    if (qVal.trim()) sp.set('q', qVal.trim())
+    if (fVal) sp.set('from', fVal)
+    if (tVal) sp.set('to', tVal)
+    if (lVal) sp.set('lowOnly', '1')
+    const qs = sp.toString()
+    router.replace(qs ? `/feed?${qs}` : '/feed', { scroll: false })
   }
 
-  const stockSummaryList = useMemo<FeedStockSummaryItem[]>(() => {
-    const grouped: Record<
-      string,
-      {
-        key: string
-        feedName: string
-        species: string
-        purchasedKg: number
-        purchasedCost: number
-        consumedKg: number
-      }
-    > = {}
+  // Species-level logs for KPIs & Live Shed Stock
+  const speciesFeedLogs = useMemo(() => {
+    return allFeedLogs.filter(log => {
+      if (selectedSpeciesFilter === 'All') return true
+      return (log.target_species || 'Goat') === selectedSpeciesFilter
+    })
+  }, [allFeedLogs, selectedSpeciesFilter])
 
-    for (const log of allFeedLogs) {
-      const feedName = String(log.feed_type || '').trim()
-      if (!feedName) continue
-      const species = String(log.target_species || 'Goat').trim() || 'Goat'
-      if (speciesFilter !== 'All' && species !== speciesFilter) continue
+  // Today's Checklist Status (1. Purchase -> 2. Consumption -> 3. Split)
+  const hasTodayPurchase = useMemo(
+    () =>
+      allFeedLogs.some(
+        l =>
+          (l.entry_type === 'Purchase' || !l.entry_type) &&
+          String(l.log_date || '').split('T')[0] === todayStr
+      ),
+    [allFeedLogs, todayStr]
+  )
 
-      const key = `${species.toLowerCase()}::${feedName.toLowerCase()}`
-      if (!grouped[key]) {
-        grouped[key] = {
-          key,
-          feedName,
-          species,
-          purchasedKg: 0,
-          purchasedCost: 0,
-          consumedKg: 0,
+  const hasTodayConsumption = useMemo(
+    () =>
+      allFeedLogs.some(
+        l =>
+          l.entry_type === 'Consumption' &&
+          String(l.log_date || '').split('T')[0] === todayStr
+      ),
+    [allFeedLogs, todayStr]
+  )
+
+  const hasTodaySplit = useMemo(
+    () =>
+      allFeedLogs.some(
+        l =>
+          l.entry_type === 'Consumption' &&
+          l.is_allocated &&
+          String(l.allocated_at || l.log_date || '').split('T')[0] === todayStr
+      ),
+    [allFeedLogs, todayStr]
+  )
+
+  // Pending Consumption Cost Pool grouped by Species
+  const unallocatedBySpecies = useMemo(() => {
+    const map: Record<string, { amount: number; billCount: number }> = {}
+    allFeedLogs.forEach(l => {
+      if (!l.is_allocated && l.entry_type === 'Consumption' && Number(l.total_cost) > 0) {
+        const sp = String(l.target_species || 'Goat').trim()
+        if (!map[sp]) {
+          map[sp] = { amount: 0, billCount: 0 }
         }
+        map[sp].amount += Number(l.total_cost) || 0
+        map[sp].billCount += 1
       }
+    })
+    return map
+  }, [allFeedLogs])
 
-      const qty = Number(log.quantity_kg) || 0
-      const cost = Number(log.total_cost) || 0
+  const filteredUnallocatedPool = useMemo(
+    () =>
+      speciesFeedLogs
+        .filter(l => !l.is_allocated && l.entry_type === 'Consumption' && Number(l.total_cost) > 0)
+        .reduce((sum, l) => sum + (Number(l.total_cost) || 0), 0),
+    [speciesFeedLogs]
+  )
 
-      if (log.entry_type === 'Purchase' || !log.entry_type) {
-        grouped[key].purchasedKg += qty
-        grouped[key].purchasedCost += cost
-      } else {
-        grouped[key].consumedKg += qty
-      }
+  const filteredUnallocatedBillsCount = useMemo(
+    () =>
+      speciesFeedLogs.filter(
+        l => !l.is_allocated && l.entry_type === 'Consumption' && Number(l.total_cost) > 0
+      ).length,
+    [speciesFeedLogs]
+  )
+
+  const totalPurchasedSpend = useMemo(
+    () =>
+      speciesFeedLogs
+        .filter(l => l.entry_type === 'Purchase' || !l.entry_type)
+        .reduce((sum, l) => sum + (Number(l.total_cost) || 0), 0),
+    [speciesFeedLogs]
+  )
+
+  // Live Shed Ration Stock (sorted with Low / Out of Stock first)
+  const inventoryList = useMemo(() => {
+    type StockSummary = {
+      key: string
+      species: string
+      feedType: string
+      purchasedKg: number
+      consumedKg: number
+      remainingKg: number
+      totalPurchasedCost: number
+      avgRatePerKg: number
+      thresholdKg: number
     }
 
-    return Object.values(grouped)
+    const stockMap: Record<string, StockSummary> = {}
+    speciesFeedLogs.forEach(log => {
+      const sp = String(log.target_species || 'Goat').trim()
+      const ft = String(log.feed_type || 'General Feed').trim()
+      const key = `${sp}__${ft}`
+
+      if (!stockMap[key]) {
+        stockMap[key] = {
+          key,
+          species: sp,
+          feedType: ft,
+          purchasedKg: 0,
+          consumedKg: 0,
+          remainingKg: 0,
+          totalPurchasedCost: 0,
+          avgRatePerKg: 0,
+          thresholdKg: thresholdByFeedName[ft.toLowerCase()] ?? 50,
+        }
+      }
+      const qty = Number(log.quantity_kg) || 0
+      const cost = Number(log.total_cost) || 0
+      const type = log.entry_type || 'Purchase'
+
+      if (type === 'Purchase') {
+        stockMap[key].purchasedKg += qty
+        stockMap[key].totalPurchasedCost += cost
+      } else {
+        stockMap[key].consumedKg += qty
+      }
+    })
+
+    return Object.values(stockMap)
       .map(item => {
         const remainingKg = Number((item.purchasedKg - item.consumedKg).toFixed(2))
-        const avgRatePerKg =
-          item.purchasedKg > 0 ? Number((item.purchasedCost / item.purchasedKg).toFixed(2)) : 0
-        const remainingValue = Math.round(Math.max(0, remainingKg) * avgRatePerKg)
-        const feedKey = item.feedName.trim().toLowerCase()
-        const thresholdKg = thresholdByFeedName[feedKey] ?? 0
-        const isLow = remainingKg <= thresholdKg
-
+        const avgRatePerKg = item.purchasedKg > 0 ? item.totalPurchasedCost / item.purchasedKg : 0
         return {
-          key: item.key,
-          feedName: item.feedName,
-          species: item.species,
-          purchasedKg: Number(item.purchasedKg.toFixed(2)),
-          consumedKg: Number(item.consumedKg.toFixed(2)),
+          ...item,
           remainingKg,
           avgRatePerKg,
-          remainingValue,
-          thresholdKg,
-          isLow,
         }
       })
-      .sort((a, b) => a.feedName.localeCompare(b.feedName))
-  }, [allFeedLogs, speciesFilter, thresholdByFeedName])
+      .sort((a, b) => {
+        const aLow = a.remainingKg <= a.thresholdKg ? 0 : 1
+        const bLow = b.remainingKg <= b.thresholdKg ? 0 : 1
+        if (aLow !== bLow) return aLow - bLow
+        return a.remainingKg - b.remainingKg
+      })
+  }, [speciesFeedLogs, thresholdByFeedName])
 
-  const lowStockItems = useMemo(
-    () => stockSummaryList.filter(item => item.isLow),
-    [stockSummaryList]
+  const displayedInventory = useMemo(() => {
+    if (!lowStockOnly) return inventoryList
+    return inventoryList.filter(i => i.remainingKg <= i.thresholdKg)
+  }, [inventoryList, lowStockOnly])
+
+  const lowStockCount = useMemo(
+    () => inventoryList.filter(i => i.remainingKg <= i.thresholdKg).length,
+    [inventoryList]
   )
 
-  const displayedStockCards = useMemo(
-    () => (lowOnly ? lowStockItems : stockSummaryList),
-    [lowOnly, lowStockItems, stockSummaryList]
+  const totalRemainingStockKg = useMemo(
+    () => inventoryList.reduce((sum, i) => sum + Math.max(i.remainingKg, 0), 0),
+    [inventoryList]
   )
 
-  const pendingPoolLogs = useMemo(() => {
-    return allFeedLogs.filter(l => {
-      if (l.entry_type !== 'Consumption') return false
-      if (Boolean(l.is_allocated)) return false
-      const cost = Number(l.total_cost) || 0
-      if (cost <= 0) return false
-      if (allocateSpecies !== 'Shared (All Species)') {
-        return String(l.target_species || 'Goat') === allocateSpecies
-      }
-      return true
-    })
-  }, [allFeedLogs, allocateSpecies])
-
-  const pendingPoolTotalCost = useMemo(
-    () => pendingPoolLogs.reduce((sum, l) => sum + (Number(l.total_cost) || 0), 0),
-    [pendingPoolLogs]
+  // Active Animals per Species
+  const activeSpeciesTabs = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          ...activeAnimals.map(a => String(a.species || '')),
+          ...allFeedLogs.map(l => String(l.target_species || 'Goat')),
+        ])
+      ).filter(Boolean),
+    [activeAnimals, allFeedLogs]
   )
 
-  const eligibleAnimalsForSplit = useMemo(() => {
-    const latestConsDate =
-      pendingPoolLogs
-        .map(l => String(l.log_date || '').split('T')[0])
-        .filter(Boolean)
-        .sort()
-        .pop() || allocationDate
+  const matchingActiveAnimals = useMemo(
+    () =>
+      activeAnimals.filter(a => {
+        if (selectedSpeciesFilter === 'All' || selectedSpeciesFilter === 'Shared (All Species)') {
+          return true
+        }
+        return a.species === selectedSpeciesFilter
+      }),
+    [activeAnimals, selectedSpeciesFilter]
+  )
 
-    return activeAnimals.filter(a => {
-      const matchesSpecies =
-        allocateSpecies === 'Shared (All Species)' || a.species === allocateSpecies
-      if (!matchesSpecies) return false
-      if (!a.acquisition_date) return true
-      const acqStr = String(a.acquisition_date).split('T')[0]
-      return acqStr <= latestConsDate
-    })
-  }, [activeAnimals, allocateSpecies, pendingPoolLogs, allocationDate])
+  const matchingCount = matchingActiveAnimals.length
+  const estimatedShare = matchingCount > 0 ? Math.floor(filteredUnallocatedPool / matchingCount) : 0
 
-  const filteredLogs = useMemo(() => {
-    const qLower = searchQuery.trim().toLowerCase()
-    const lowStockNames = new Set(lowStockItems.map(i => i.feedName.trim().toLowerCase()))
-
-    return allFeedLogs.filter(log => {
-      const sp = String(log.target_species || 'Goat')
-      if (speciesFilter !== 'All' && sp !== speciesFilter) return false
-
-      const eType = log.entry_type === 'Consumption' ? 'Consumption' : 'Purchase'
-      if (entryTypeFilter !== 'All' && eType !== entryTypeFilter) return false
-
-      if (eType === 'Consumption') {
-        const isAlloc = Boolean(log.is_allocated)
-        if (allocFilter === 'Pending' && isAlloc) return false
-        if (allocFilter === 'Allocated' && !isAlloc) return false
-      } else if (allocFilter !== 'All') {
+  // Filtered + Sorted Ledger Logs
+  const filteredAndSortedLogs = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    const filtered = allFeedLogs.filter(log => {
+      if (selectedSpeciesFilter !== 'All' && (log.target_species || 'Goat') !== selectedSpeciesFilter) {
         return false
       }
+      const isPurchase = log.entry_type === 'Purchase' || !log.entry_type
 
-      const logDateStr = String(log.log_date || '').split('T')[0]
-      if (fromDate && logDateStr && logDateStr < fromDate) return false
-      if (toDate && logDateStr && logDateStr > toDate) return false
+      if (selectedEntryType === 'Purchase' && !isPurchase) return false
+      if (selectedEntryType === 'Consumption' && isPurchase) return false
 
-      if (lowOnly) {
-        const fKey = String(log.feed_type || '').trim().toLowerCase()
-        if (!lowStockNames.has(fKey)) return false
+      if (selectedAllocFilter === 'Pending' && log.is_allocated) return false
+      if (selectedAllocFilter === 'Allocated' && !log.is_allocated) return false
+
+      const logDateOnly = String(log.log_date || '').split('T')[0]
+      if (fromDate && logDateOnly < fromDate) return false
+      if (toDate && logDateOnly > toDate) return false
+
+      if (!q) return true
+
+      const haystack = [
+        log.feed_type || '',
+        log.target_species || 'Goat',
+        log.notes || '',
+        isPurchase ? 'stock in purchase' : 'stock out consumption',
+        formatDateDDMMYYYY(log.log_date),
+        String(log.quantity_kg || ''),
+        String(log.total_cost || ''),
+      ]
+        .join(' ')
+        .toLowerCase()
+
+      return haystack.includes(q)
+    })
+
+    return [...filtered].sort((a, b) => {
+      let cmp = 0
+      if (sortBy === 'date') {
+        const da = String(a.log_date || '')
+        const db = String(b.log_date || '')
+        cmp = da.localeCompare(db)
+      } else if (sortBy === 'qty') {
+        cmp = (Number(a.quantity_kg) || 0) - (Number(b.quantity_kg) || 0)
+      } else if (sortBy === 'cost') {
+        cmp = (Number(a.total_cost) || 0) - (Number(b.total_cost) || 0)
       }
-
-      if (qLower) {
-        const haystack = [
-          log.feed_type,
-          log.target_species,
-          log.entry_type,
-          log.notes,
-        ]
-          .map(v => String(v || '').toLowerCase())
-          .join(' ')
-        if (!haystack.includes(qLower)) return false
-      }
-
-      return true
+      return sortDir === 'asc' ? cmp : -cmp
     })
   }, [
     allFeedLogs,
-    speciesFilter,
-    entryTypeFilter,
-    allocFilter,
+    selectedSpeciesFilter,
+    selectedEntryType,
+    selectedAllocFilter,
     fromDate,
     toDate,
-    lowOnly,
-    lowStockItems,
     searchQuery,
+    sortBy,
+    sortDir,
   ])
 
-  const totalPages = Math.max(1, Math.ceil(filteredLogs.length / pageSize))
+  const totalFilteredCount = filteredAndSortedLogs.length
+  const totalPages = Math.max(1, Math.ceil(totalFilteredCount / pageSize))
   const safePage = Math.min(currentPage, totalPages)
   const paginatedLogs = useMemo(() => {
     const start = (safePage - 1) * pageSize
-    return filteredLogs.slice(start, start + pageSize)
-  }, [filteredLogs, safePage])
+    return filteredAndSortedLogs.slice(start, start + pageSize)
+  }, [filteredAndSortedLogs, safePage])
 
-  const totalRemainingStockKg = useMemo(
-    () =>
-      Number(
-        stockSummaryList.reduce((s, item) => s + Math.max(0, item.remainingKg), 0).toFixed(2)
-      ),
-    [stockSummaryList]
+  const pageTotalCost = useMemo(
+    () => paginatedLogs.reduce((sum, l) => sum + (Number(l.total_cost) || 0), 0),
+    [paginatedLogs]
   )
 
-  const totalRemainingStockValue = useMemo(
-    () => stockSummaryList.reduce((s, item) => s + item.remainingValue, 0),
-    [stockSummaryList]
+  const filterTotalCost = useMemo(
+    () => filteredAndSortedLogs.reduce((sum, l) => sum + (Number(l.total_cost) || 0), 0),
+    [filteredAndSortedLogs]
   )
 
-  const totalPendingPoolAllSpecies = useMemo(
-    () =>
-      allFeedLogs
-        .filter(
-          l =>
-            l.entry_type === 'Consumption' &&
-            !Boolean(l.is_allocated) &&
-            (Number(l.total_cost) || 0) > 0
-        )
-        .reduce((s, l) => s + (Number(l.total_cost) || 0), 0),
-    [allFeedLogs]
-  )
+  const toggleSort = (col: 'date' | 'qty' | 'cost') => {
+    if (sortBy === col) {
+      setSortDir(prev => (prev === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortBy(col)
+      setSortDir('desc')
+    }
+    setCurrentPage(1)
+  }
 
-  const defaultFormSpecies =
-    speciesFilter !== 'All' ? speciesFilter : speciesOptions[0] || 'Goat'
+  // Quick Date Range Helpers
+  const applyQuickDateRange = (preset: 'today' | 'week' | 'month') => {
+    const base = new Date(`${todayStr}T00:00:00`)
+    let from = todayStr
+    if (preset === 'week') {
+      const d = new Date(base)
+      d.setDate(d.getDate() - 6)
+      from = d.toISOString().split('T')[0]
+    } else if (preset === 'month') {
+      from = `${todayStr.slice(0, 8)}01`
+    }
+    setFromDate(from)
+    setToDate(todayStr)
+    setCurrentPage(1)
+    updateUrlQuery({ from, to: todayStr })
+  }
+
+  const resetAllLedgerFilters = () => {
+    setSelectedEntryType('All')
+    setSelectedAllocFilter('All')
+    setSearchQuery('')
+    setFromDate('')
+    setToDate('')
+    setCurrentPage(1)
+    updateUrlQuery({ entryType: 'All', alloc: 'All', q: '', from: '', to: '' })
+  }
+
+  // CSV Export for Filtered Ledger
+  const handleExportCSV = () => {
+    const headers = [
+      'Date (DD/MM/YYYY)',
+      'Feed Item',
+      'Species',
+      'Entry Type',
+      'Quantity (kg)',
+      'Total Cost (Rs.)',
+      'Allocation Status',
+      'Notes',
+    ]
+
+    const escapeCell = (val: unknown) => {
+      const str = String(val ?? '')
+      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        return `"${str.replace(/"/g, '""')}"`
+      }
+      return str
+    }
+
+    const rows = filteredAndSortedLogs.map(log => {
+      const isPurchase = log.entry_type === 'Purchase' || !log.entry_type
+      return [
+        formatDateDDMMYYYY(log.log_date),
+        log.feed_type || '',
+        log.target_species || 'Goat',
+        isPurchase ? 'Purchase' : 'Consumption',
+        Number(log.quantity_kg || 0).toFixed(1),
+        Number(log.total_cost || 0),
+        isPurchase ? 'N/A' : log.is_allocated ? 'Allocated' : 'Pending Split',
+        log.notes || '',
+      ]
+        .map(escapeCell)
+        .join(',')
+    })
+
+    const csvContent = [headers.join(','), ...rows].join('\n')
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.setAttribute('download', `feed-ledger-${selectedSpeciesFilter.toLowerCase()}-${todayStr}.csv`)
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+  }
+
+  const hasLedgerFilters =
+    selectedEntryType !== 'All' ||
+    selectedAllocFilter !== 'All' ||
+    searchQuery.length > 0 ||
+    fromDate.length > 0 ||
+    toDate.length > 0
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 p-4 sm:p-6">
+    <div className="min-h-screen bg-slate-50/80 py-7 px-4 sm:px-6 lg:px-8">
       <datalist id="common-feeds">
         {dynamicFeedSuggestions.map(item => (
           <option key={item} value={item} />
         ))}
       </datalist>
 
-      <div className="max-w-7xl mx-auto space-y-6">
-        {/* Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-white p-5 rounded-2xl border border-slate-200/90 shadow-xs">
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-xl font-bold text-slate-900">
-                Feed &amp; Ration Command Center
-              </h1>
-              <span className="text-[11px] font-semibold px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-                {farmName}
-              </span>
-              <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 uppercase">
-                {role}
-              </span>
-            </div>
-            <p className="text-xs text-slate-500 mt-1">
-              Manage bulk ration purchases, physical stock adjustments, low-stock thresholds, and animal cost splits.
-            </p>
-          </div>
-        </div>
-
-        {/* Status & Error Banners */}
-        {statusMsg && (
-          <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs sm:text-sm flex flex-wrap items-center justify-between gap-3">
-            <span className="font-medium">{statusMsg}</span>
-            {undoPayload && isAdmin && (
-              <form action={restoreFeedLogAction}>
-                <input type="hidden" name="undoPayload" value={undoPayload} />
-                <button
-                  type="submit"
-                  className="px-3 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold transition"
-                >
-                  Undo Delete
-                </button>
-              </form>
-            )}
-          </div>
-        )}
-
-        {errorMsg && (
-          <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-xs sm:text-sm font-medium">
-            {errorMsg}
-          </div>
-        )}
-
-        {/* Low Stock Alert Banner */}
-        {lowStockItems.length > 0 && (
-          <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div className="space-y-1">
-              <p className="text-xs font-bold text-amber-900 uppercase tracking-wider">
-                Low Stock Alert ({lowStockItems.length} item{lowStockItems.length > 1 ? 's' : ''})
+      {/* P0: Auto-Dismiss Top-Right Toast Notifications */}
+      {toast && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={`fixed top-5 right-5 z-50 w-full max-w-md rounded-2xl border p-4 shadow-xl transition-all ${
+            toast.type === 'error'
+              ? 'bg-rose-950 text-rose-50 border-rose-700'
+              : 'bg-slate-900 text-white border-emerald-500/60'
+          }`}
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="space-y-1 text-xs">
+              <p className="font-bold uppercase tracking-wider text-[10px] text-emerald-400">
+                {toast.type === 'error' ? 'Action Required' : 'Operation Completed'}
               </p>
-              <p className="text-xs text-amber-800">
-                {lowStockItems
-                  .map(i => `${i.feedName} (${i.remainingKg} kg / Min ${i.thresholdKg} kg)`)
-                  .join(' • ')}
-              </p>
+              <p className="text-sm font-medium leading-snug">{toast.message}</p>
+              {toast.type === 'error' && (
+                <p className="text-[11px] text-rose-200 pt-1">
+                  <strong>What to do next:</strong> {getWhatToDoNextHint(toast.message)}
+                </p>
+              )}
+              <div className="flex flex-wrap items-center gap-2 pt-2">
+                {toast.type === 'success' && (
+                  <a
+                    href="#feed-ledger-section"
+                    onClick={() => setToast(null)}
+                    className="px-2.5 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-[11px] transition"
+                  >
+                    View Ledger
+                  </a>
+                )}
+                {toast.undo && isAdmin && (
+                  <form action={restoreFeedLogAction} onSubmit={() => setRestoringUndo(true)}>
+                    <input type="hidden" name="undoPayload" value={toast.undo} />
+                    <button
+                      type="submit"
+                      disabled={restoringUndo}
+                      className="px-2.5 py-1 rounded-lg bg-amber-400 hover:bg-amber-300 disabled:opacity-50 text-slate-950 font-bold text-[11px] transition"
+                    >
+                      {restoringUndo ? 'Restoring...' : 'Undo Delete (10s)'}
+                    </button>
+                  </form>
+                )}
+              </div>
             </div>
             <button
               type="button"
-              onClick={() => {
-                setLowOnly(prev => !prev)
-                setCurrentPage(1)
-              }}
-              className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold transition shrink-0"
+              onClick={() => setToast(null)}
+              aria-label="Dismiss notification"
+              className="text-slate-400 hover:text-white font-bold text-base leading-none px-1"
             >
-              {lowOnly ? 'Show All Stock' : 'Filter Low Stock'}
+              ×
             </button>
           </div>
-        )}
+        </div>
+      )}
 
-        {/* Top Summary KPIs */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div className="bg-white p-4 rounded-2xl border border-slate-200/90 shadow-xs">
-            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
-              Live Ration Stock
-            </p>
-            <p className="text-xl font-bold font-mono text-slate-900 mt-1">
-              {totalRemainingStockKg.toLocaleString()} kg
-            </p>
-            <p className="text-[11px] text-slate-500 mt-0.5">
-              Est. Value: Rs. {totalRemainingStockValue.toLocaleString()}
-            </p>
+      <div className="max-w-7xl mx-auto space-y-5">
+        {/* Top Bar: Brand Header + Quick Jump Actions */}
+        <div className="bg-white rounded-2xl border border-slate-200/90 shadow-xs p-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-emerald-800 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+                {farmName} • {role.toUpperCase()}
+              </span>
+              <span className="text-[11px] text-slate-400 font-medium">
+                Feed Inventory &amp; Cost Allocation
+              </span>
+            </div>
+            <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">
+              Feed Command Center
+            </h1>
           </div>
 
-          <div className="bg-white p-4 rounded-2xl border border-slate-200/90 shadow-xs">
-            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
-              Pending Split Pool (All Species)
-            </p>
-            <p className="text-xl font-bold font-mono text-amber-700 mt-1">
-              Rs. {totalPendingPoolAllSpecies.toLocaleString()}
-            </p>
-            <p className="text-[11px] text-slate-500 mt-0.5">
-              Unallocated consumption costs ready to split
-            </p>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <a
+              href="#purchase-panel"
+              className="inline-flex items-center justify-center px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-xl shadow-xs transition text-xs"
+            >
+              + New Purchase
+            </a>
+            {isAdmin && (
+              <a
+                href="#adjustment-panel"
+                className="inline-flex items-center justify-center px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-semibold rounded-xl shadow-xs transition text-xs"
+              >
+                Stock Write-off
+              </a>
+            )}
+            <Link
+              href="/animals"
+              className="inline-flex items-center justify-center px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl border border-slate-200 transition text-xs"
+            >
+              ← Livestock Master
+            </Link>
+          </div>
+        </div>
+
+        {/* P1 #5: Today's Checklist Banner */}
+        <div className="bg-white rounded-2xl border border-slate-200/90 shadow-xs px-4 py-3 flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+              Today&apos;s Workflow ({formatDateDDMMYYYY(todayStr)}):
+            </span>
           </div>
 
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <a
+              href="#purchase-panel"
+              className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-xl border font-semibold transition ${
+                hasTodayPurchase
+                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                  : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+              }`}
+            >
+              <span>{hasTodayPurchase ? '✓' : '1.'}</span>
+              <span>1. Purchase</span>
+            </a>
+
+            <span className="text-slate-300">→</span>
+
+            <a
+              href="#adjustment-panel"
+              className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-xl border font-semibold transition ${
+                hasTodayConsumption
+                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                  : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+              }`}
+            >
+              <span>{hasTodayConsumption ? '✓' : '2.'}</span>
+              <span>2. Consumption</span>
+            </a>
+
+            <span className="text-slate-300">→</span>
+
+            <a
+              href="#split-engine-section"
+              className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-xl border font-semibold transition ${
+                filteredUnallocatedPool > 0
+                  ? 'bg-amber-50 text-amber-900 border-amber-300 ring-2 ring-amber-400/40'
+                  : hasTodaySplit
+                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                  : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+              }`}
+            >
+              <span>{filteredUnallocatedPool > 0 ? '!' : hasTodaySplit ? '✓' : '3.'}</span>
+              <span>3. Split</span>
+              {filteredUnallocatedPool > 0 && (
+                <span className="ml-1 px-1.5 py-0.2 rounded bg-amber-400 text-slate-950 text-[10px] font-bold">
+                  Action Required
+                </span>
+              )}
+            </a>
+          </div>
+        </div>
+
+        {/* P1 #9: Species Filter Bar with Active Head Count + Pending Rs. */}
+        <div className="bg-white px-3 py-2.5 rounded-2xl border border-slate-200/90 shadow-xs flex flex-wrap items-center gap-1.5">
+          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider px-2.5">
+            Species:
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedSpeciesFilter('All')
+              setCurrentPage(1)
+              updateUrlQuery({ species: 'All' })
+            }}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
+              selectedSpeciesFilter === 'All'
+                ? 'bg-slate-900 text-white shadow-xs'
+                : 'text-slate-600 hover:bg-slate-100'
+            }`}
+          >
+            All • {activeAnimals.length} heads
+          </button>
+
+          {activeSpeciesTabs.map(sp => {
+            const headCount = activeAnimals.filter(a => a.species === sp).length
+            const pendingAmt = unallocatedBySpecies[sp]?.amount || 0
+            const isSelected = selectedSpeciesFilter === sp
+            return (
+              <button
+                key={sp}
+                type="button"
+                onClick={() => {
+                  setSelectedSpeciesFilter(sp)
+                  setCurrentPage(1)
+                  updateUrlQuery({ species: sp })
+                }}
+                className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 ${
+                  isSelected
+                    ? 'bg-emerald-600 text-white shadow-xs'
+                    : 'bg-slate-50 text-slate-700 hover:bg-slate-100 border border-slate-200/70'
+                }`}
+              >
+                <span>
+                  {sp} • {headCount} heads
+                  {pendingAmt > 0 ? ` • Rs. ${pendingAmt.toLocaleString()} pending` : ''}
+                </span>
+              </button>
+            )
+          })}
+        </div>
+
+        {/* P1 #7: Clickable Executive KPI Row */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedEntryType('Purchase')
+              setSelectedAllocFilter('All')
+              setCurrentPage(1)
+              updateUrlQuery({ entryType: 'Purchase', alloc: 'All' })
+              document.getElementById('feed-ledger-section')?.scrollIntoView({ behavior: 'smooth' })
+            }}
+            className="text-left bg-white p-4 rounded-2xl border border-slate-200/90 hover:border-slate-300 shadow-xs transition"
+          >
+            <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+              {selectedSpeciesFilter === 'All' ? 'Bulk Spend' : `${selectedSpeciesFilter} Spend`}
+            </p>
+            <p className="text-2xl font-bold text-slate-900 mt-1 font-mono">
+              Rs. {totalPurchasedSpend.toLocaleString()}
+            </p>
+            <p className="text-[11px] text-slate-400 mt-0.5">Click to filter purchase bills</p>
+          </button>
+
+          <div className="bg-white p-4 rounded-2xl border border-slate-200/90 shadow-xs flex flex-col justify-between">
+            <button
+              type="button"
+              onClick={() => {
+                setLowStockOnly(false)
+                updateUrlQuery({ lowOnly: false })
+                document.getElementById('live-stock-strip')?.scrollIntoView({ behavior: 'smooth' })
+              }}
+              className="text-left"
+            >
+              <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                Shed Stock
+              </p>
+              <p className="text-2xl font-bold text-emerald-600 mt-1 font-mono">
+                {totalRemainingStockKg.toFixed(1)}{' '}
+                <span className="text-xs font-sans font-semibold text-slate-400">kg</span>
+              </p>
+            </button>
+            <div className="mt-1 flex items-center justify-between gap-2">
+              <span className="text-[11px] text-slate-400">
+                Across {inventoryList.length} item(s)
+              </span>
+              {lowStockCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !lowStockOnly
+                    setLowStockOnly(next)
+                    updateUrlQuery({ lowOnly: next })
+                    document.getElementById('live-stock-strip')?.scrollIntoView({ behavior: 'smooth' })
+                  }}
+                  className={`text-[10px] font-bold px-2 py-0.5 rounded-full border transition ${
+                    lowStockOnly
+                      ? 'bg-rose-600 text-white border-rose-600'
+                      : 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100'
+                  }`}
+                >
+                  {lowStockCount} Low Stock
+                </button>
+              )}
+            </div>
+          </div>
+
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedEntryType('Consumption')
+                setSelectedAllocFilter('Pending')
+                setCurrentPage(1)
+                updateUrlQuery({ entryType: 'Consumption', alloc: 'Pending' })
+                document.getElementById('feed-ledger-section')?.scrollIntoView({ behavior: 'smooth' })
+              }}
+              className="text-left bg-amber-50/60 p-4 rounded-2xl border border-amber-200/90 hover:border-amber-400 shadow-xs transition"
+            >
+              <p className="text-[11px] font-bold text-amber-800 uppercase tracking-wider">
+                Pending Consumption Pool
+              </p>
+              <p className="text-2xl font-bold text-amber-700 mt-1 font-mono">
+                Rs. {filteredUnallocatedPool.toLocaleString()}
+              </p>
+              <p className="text-[11px] text-amber-700/80 mt-0.5">
+                {filteredUnallocatedPool === 0
+                  ? 'All caught up. No pending Consumption to split.'
+                  : `${filteredUnallocatedBillsCount} consumption item(s) • Click to view`}
+              </p>
+            </button>
+          )}
+
           <div className="bg-white p-4 rounded-2xl border border-slate-200/90 shadow-xs">
-            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
-              Low Stock Items
+            <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+              Est. Share / Head
             </p>
-            <p className="text-xl font-bold font-mono text-rose-700 mt-1">
-              {lowStockItems.length}
+            <p className="text-2xl font-bold text-indigo-600 mt-1 font-mono">
+              Rs. {estimatedShare.toLocaleString()}
             </p>
-            <p className="text-[11px] text-slate-500 mt-0.5">
-              At or below configured minimum stock threshold
+            <p className="text-[11px] text-slate-400 mt-0.5">
+              {matchingCount} active{' '}
+              {selectedSpeciesFilter === 'All' ? 'head(s)' : `${selectedSpeciesFilter}(s)`}
             </p>
           </div>
         </div>
 
-        {/* Main 12-Column Grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          {/* Left 5 Columns: Purchase & Stock Adjustment Forms */}
-          <FeedActionFormsClient
-            speciesOptions={speciesOptions}
-            defaultSpecies={defaultFormSpecies}
-            todayStr={todayStr}
-            isAdmin={isAdmin}
-            addFeedLogAction={addFeedLogAction}
-            adjustFeedStockAction={adjustFeedStockAction}
-          />
+        {/* Tier 2: Automated Cost Split Engine */}
+        {isAdmin && (
+          <div id="split-engine-section">
+            <SplitEngineClient
+              speciesOptions={SPECIES_OPTIONS}
+              activeAnimals={activeAnimals}
+              unallocatedBySpecies={unallocatedBySpecies}
+              selectedSpeciesFilter={selectedSpeciesFilter}
+              initialSplitDate={initialSplitDate}
+              allocateAction={allocateFeedCostAction}
+            />
+          </div>
+        )}
 
-          {/* Right 7 Columns: Live Shed Ration Stock, Thresholds, Allocation & Ledger */}
-          <div className="lg:col-span-7 space-y-6">
-            {/* Live Shed Ration Stock Cards */}
-            <div className="bg-white rounded-2xl border border-slate-200/90 shadow-xs p-5 space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
-                <div>
-                  <h2 className="text-sm font-bold text-slate-900">Live Shed Ration Stock</h2>
-                  <p className="text-[11px] text-slate-500">
-                    Remaining physical balance per feed item vs. configured minimum stock
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <select
-                    value={speciesFilter}
-                    onChange={e => {
-                      setSpeciesFilter(e.target.value)
-                      setCurrentPage(1)
-                    }}
-                    className="px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold text-slate-800"
-                  >
-                    <option value="All">All Species</option>
-                    {speciesOptions.map(sp => (
-                      <option key={sp} value={sp}>
-                        {sp}
-                      </option>
-                    ))}
-                  </select>
-
+        {/* P1 #8: Live Shed Ration Stock with Progress Bar & Low-Stock First Sorting */}
+        {inventoryList.length > 0 && (
+          <div
+            id="live-stock-strip"
+            className="bg-white rounded-2xl border border-slate-200/90 shadow-xs p-4 sm:p-5"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3.5">
+              <div>
+                <h2 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
+                  Live Shed Ration Stock
+                </h2>
+                <p className="text-[11px] text-slate-500">
+                  Real-time balance per species &amp; ration item (Purchase minus Consumption)
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {lowStockOnly && (
                   <button
                     type="button"
                     onClick={() => {
-                      setLowOnly(prev => !prev)
-                      setCurrentPage(1)
+                      setLowStockOnly(false)
+                      updateUrlQuery({ lowOnly: false })
                     }}
-                    className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold border transition ${
-                      lowOnly
-                        ? 'bg-rose-600 text-white border-rose-600'
-                        : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
+                    className="text-[11px] font-semibold px-2.5 py-1 rounded-lg bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100"
+                  >
+                    Showing Low Stock Only ×
+                  </button>
+                )}
+                <span className="text-[11px] font-mono text-slate-400">
+                  {displayedInventory.length} of {inventoryList.length} items
+                </span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2.5">
+              {displayedInventory.map(item => {
+                const isOut = item.remainingKg <= 0
+                const isLow = item.remainingKg <= item.thresholdKg
+                const pct =
+                  item.thresholdKg > 0
+                    ? Math.min(100, Math.max(0, (item.remainingKg / item.thresholdKg) * 100))
+                    : 100
+
+                return (
+                  <div
+                    key={item.key}
+                    className={`p-3 rounded-xl border transition ${
+                      isOut
+                        ? 'bg-rose-50/80 border-rose-400'
+                        : isLow
+                        ? 'bg-rose-50/50 border-rose-300'
+                        : 'bg-slate-50/80 border-slate-200/80'
                     }`}
                   >
-                    Low Only
-                  </button>
-                </div>
-              </div>
-
-              {displayedStockCards.length === 0 ? (
-                <p className="text-xs text-slate-500 py-4 text-center">
-                  No ration stock items match the selected filter.
-                </p>
-              ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  {displayedStockCards.map(item => (
-                    <div
-                      key={item.key}
-                      className={`p-3.5 rounded-xl border transition ${
-                        item.isLow
-                          ? 'bg-rose-50/70 border-rose-200'
-                          : 'bg-slate-50 border-slate-200/90'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <p className="text-xs font-bold text-slate-900">{item.feedName}</p>
-                          <p className="text-[11px] text-slate-500">{item.species}</p>
-                        </div>
-                        <span
-                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                            item.isLow
-                              ? 'bg-rose-100 text-rose-800 border border-rose-200'
-                              : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                          }`}
-                        >
-                          {item.isLow ? 'LOW STOCK' : 'OK'}
-                        </span>
-                      </div>
-
-                      <div className="mt-2.5 flex items-baseline justify-between">
-                        <span className="text-base font-bold font-mono text-slate-900">
-                          {item.remainingKg.toLocaleString()} kg
-                        </span>
-                        <span className="text-[11px] font-mono text-slate-600">
-                          Min: {item.thresholdKg} kg
-                        </span>
-                      </div>
-
-                      <div className="mt-1.5 flex items-center justify-between text-[11px] text-slate-500">
-                        <span>Avg Rate: Rs. {item.avgRatePerKg.toLocaleString()}/kg</span>
-                        <span>Val: Rs. {item.remainingValue.toLocaleString()}</span>
-                      </div>
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-slate-900 text-white">
+                        {item.species}
+                      </span>
+                      <span
+                        className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${
+                          isOut
+                            ? 'bg-rose-600 text-white'
+                            : isLow
+                            ? 'bg-rose-100 text-rose-700'
+                            : 'bg-emerald-100 text-emerald-700'
+                        }`}
+                      >
+                        {isOut ? 'OUT OF STOCK' : isLow ? 'LOW' : 'OK'}
+                      </span>
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
 
-            {/* Low Stock Thresholds Section (Admin Editable / Staff Read-Only) */}
-            <div
-              id="thresholds-panel"
-              className="bg-white rounded-2xl border border-slate-200/90 shadow-xs p-5 space-y-4"
-            >
-              <div className="border-b border-slate-100 pb-3">
-                <h2 className="text-sm font-bold text-slate-900">Low Stock Thresholds</h2>
-                <p className="text-[11px] text-slate-500">
-                  {isAdmin
-                    ? 'Configure minimum stock (kg) per feed item. Alerts and low-stock filters use these thresholds.'
-                    : 'View minimum stock (kg) thresholds configured for each feed item.'}
-                </p>
-              </div>
-
-              {isAdmin && (
-                <form
-                  action={updateFeedThresholdAction}
-                  onSubmit={() => setIsSavingThreshold(true)}
-                  className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end bg-slate-50 p-3.5 rounded-xl border border-slate-200"
-                >
-                  <div className="sm:col-span-6">
-                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                      Feed Item
-                    </label>
-                    <select
-                      name="feed_name"
-                      value={selectedThresholdFeed}
-                      disabled={isSavingThreshold}
-                      onChange={e => handleSelectThresholdFeed(e.target.value)}
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold text-slate-900"
-                    >
-                      {thresholdFeedList.map(feedName => (
-                        <option key={feedName} value={feedName}>
-                          {feedName}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="sm:col-span-3">
-                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                      Min Stock (kg)
-                    </label>
-                    <input
-                      name="min_stock_kg"
-                      type="number"
-                      step="0.1"
-                      min="0"
-                      required
-                      value={thresholdInputKg}
-                      disabled={isSavingThreshold}
-                      onChange={e => setThresholdInputKg(e.target.value)}
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-mono text-slate-900"
-                    />
-                  </div>
-
-                  <div className="sm:col-span-3">
-                    <button
-                      type="submit"
-                      disabled={isSavingThreshold}
-                      className="w-full py-2 px-3 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-semibold transition"
-                    >
-                      {isSavingThreshold ? 'Saving...' : 'Save'}
-                    </button>
-                  </div>
-                </form>
-              )}
-
-              <div className="max-h-60 overflow-y-auto divide-y divide-slate-100 border border-slate-200/80 rounded-xl">
-                {thresholdFeedList.map(feedName => {
-                  const key = feedName.trim().toLowerCase()
-                  const minKg = thresholdByFeedName[key] ?? 0
-                  return (
-                    <div
-                      key={feedName}
-                      className="px-3.5 py-2 flex items-center justify-between text-xs bg-white hover:bg-slate-50"
-                    >
-                      <span className="font-medium text-slate-800">{feedName}</span>
-                      <div className="flex items-center gap-3">
-                        <span className="font-mono font-semibold text-slate-900">
-                          {minKg} kg
-                        </span>
-                        {isAdmin && (
-                          <button
-                            type="button"
-                            onClick={() => handleSelectThresholdFeed(feedName)}
-                            className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-800"
-                          >
-                            Edit
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-
-            {/* Pending Consumption Pool & Split Form */}
-            {isAdmin && (
-              <div className="bg-white rounded-2xl border border-slate-200/90 shadow-xs p-5 space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
-                  <div>
-                    <h2 className="text-sm font-bold text-slate-900">
-                      Split Pending Consumption Pool
-                    </h2>
-                    <p className="text-[11px] text-slate-500">
-                      Allocate unallocated consumption costs to active eligible animals
+                    <p className="font-bold text-xs text-slate-900 mt-1.5 truncate" title={item.feedType}>
+                      {item.feedType}
                     </p>
-                  </div>
-                  <span className="text-xs font-bold font-mono px-3 py-1 rounded-xl bg-amber-50 text-amber-800 border border-amber-200">
-                    Pool: Rs. {pendingPoolTotalCost.toLocaleString()}
-                  </span>
-                </div>
 
-                <form
-                  action={allocateFeedCostAction}
-                  onSubmit={() => setIsAllocating(true)}
-                  className="space-y-3"
-                >
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                        Species
-                      </label>
-                      <select
-                        name="allocate_species"
-                        value={allocateSpecies}
-                        disabled={isAllocating}
-                        onChange={e => setAllocateSpecies(e.target.value)}
-                        className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold text-slate-900"
-                      >
-                        {speciesOptions.map(sp => (
-                          <option key={sp} value={sp}>
-                            {sp}
-                          </option>
-                        ))}
-                      </select>
+                    <div className="flex items-baseline justify-between mt-0.5">
+                      <p className="text-base font-bold font-mono text-slate-900">
+                        {item.remainingKg.toFixed(1)}{' '}
+                        <span className="text-[10px] font-sans font-normal text-slate-500">kg</span>
+                      </p>
+                      <span className="text-[10px] font-mono text-slate-400">
+                        / {item.thresholdKg} kg min
+                      </span>
                     </div>
 
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                        Split Method
-                      </label>
-                      <select
-                        name="split_method"
-                        value={splitMethod}
-                        disabled={isAllocating}
-                        onChange={e =>
-                          setSplitMethod(e.target.value === 'weight' ? 'weight' : 'equal')
-                        }
-                        className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold text-slate-900"
-                      >
-                        <option value="equal">Equal Per Head</option>
-                        <option value="weight">By Live Weight (kg)</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                        Allocation Date
-                      </label>
-                      <input
-                        name="allocation_date"
-                        type="date"
-                        required
-                        value={allocationDate}
-                        disabled={isAllocating}
-                        onChange={e => setAllocationDate(e.target.value)}
-                        className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
+                    {/* Progress Bar: Remaining / Threshold */}
+                    <div className="w-full h-1.5 bg-slate-200 rounded-full overflow-hidden mt-1.5">
+                      <div
+                        className={`h-full rounded-full transition-all ${
+                          isOut ? 'bg-rose-600' : isLow ? 'bg-rose-500' : 'bg-emerald-500'
+                        }`}
+                        style={{ width: `${pct}%` }}
                       />
                     </div>
+
+                    <div className="mt-1.5 pt-1.5 border-t border-slate-200/70 flex items-center justify-between text-[10px] text-slate-500 font-mono">
+                      <span>
+                        +{item.purchasedKg} / -{item.consumedKg}
+                      </span>
+                      {isAdmin && item.avgRatePerKg > 0 && (
+                        <span className="font-semibold text-slate-700">
+                          Rs.{Math.round(item.avgRatePerKg)}/kg
+                        </span>
+                      )}
+                    </div>
                   </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
 
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                      Period / Batch Label
-                    </label>
-                    <input
-                      name="period_label"
-                      type="text"
-                      value={periodLabel}
-                      disabled={isAllocating}
-                      onChange={e => setPeriodLabel(e.target.value)}
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
-                    />
-                  </div>
-
-                  <div className="flex items-center justify-between text-[11px] text-slate-600 bg-slate-50 px-3 py-2 rounded-xl border border-slate-200">
-                    <span>Eligible Active Animals: {eligibleAnimalsForSplit.length}</span>
-                    <span>
-                      Est. Share:{' '}
-                      {eligibleAnimalsForSplit.length > 0
-                        ? `~Rs. ${Math.round(
-                            pendingPoolTotalCost / eligibleAnimalsForSplit.length
-                          ).toLocaleString()}/head`
-                        : 'Rs. 0'}
-                    </span>
-                  </div>
-
-                  <button
-                    type="submit"
-                    disabled={isAllocating || pendingPoolTotalCost <= 0}
-                    className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-semibold transition"
-                  >
-                    {isAllocating ? 'Splitting...' : 'Split Pending Consumption Pool'}
-                  </button>
-                </form>
-              </div>
-            )}
-
-            {/* Feed Ledger Table */}
-            <div className="bg-white rounded-2xl border border-slate-200/90 shadow-xs p-5 space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+        {/* Main Workspace: Left Ledger + Right Sticky Action Forms */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          {/* Left 7 Cols: Searchable, Filterable, Sortable & Responsive Transaction Ledger */}
+          <div
+            id="feed-ledger-section"
+            className="lg:col-span-7 bg-white rounded-2xl shadow-xs border border-slate-200/90 overflow-hidden"
+          >
+            <div className="px-5 py-3.5 border-b border-slate-100 bg-slate-50/70 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <div>
-                  <h2 className="text-sm font-bold text-slate-900">Feed Ledger</h2>
+                  <h2 className="font-bold text-slate-900 text-sm">
+                    {selectedSpeciesFilter === 'All'
+                      ? 'Purchase & Stock-Out Ledger'
+                      : `${selectedSpeciesFilter} Feed Ledger`}
+                  </h2>
                   <p className="text-[11px] text-slate-500">
-                    Showing {filteredLogs.length} entr{filteredLogs.length === 1 ? 'y' : 'ies'}
+                    Page {safePage} of {totalPages} • {totalFilteredCount} matching record(s)
                   </p>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2">
-                  <select
-                    value={entryTypeFilter}
-                    onChange={e => {
-                      setEntryTypeFilter(e.target.value)
-                      setCurrentPage(1)
-                    }}
-                    className="px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-medium text-slate-800"
+                {/* Export CSV & Print Buttons */}
+                <div className="flex flex-wrap items-center gap-1.5 print:hidden">
+                  <button
+                    type="button"
+                    onClick={handleExportCSV}
+                    disabled={filteredAndSortedLogs.length === 0}
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 disabled:opacity-40 transition"
                   >
-                    <option value="All">All Types</option>
-                    <option value="Purchase">Purchase</option>
-                    <option value="Consumption">Consumption</option>
-                  </select>
-
-                  <select
-                    value={allocFilter}
-                    onChange={e => {
-                      setAllocFilter(e.target.value)
-                      setCurrentPage(1)
-                    }}
-                    className="px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-medium text-slate-800"
+                    Export CSV
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => window.print()}
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 transition"
                   >
-                    <option value="All">All Split Status</option>
-                    <option value="Pending">Pending Split</option>
-                    <option value="Allocated">Allocated / Write-off</option>
-                  </select>
+                    Print
+                  </button>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              {/* Type & Allocation Filter Pills */}
+              <div className="flex flex-wrap items-center gap-1.5 print:hidden">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedEntryType('All')
+                    setSelectedAllocFilter('All')
+                    setCurrentPage(1)
+                    updateUrlQuery({ entryType: 'All', alloc: 'All' })
+                  }}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
+                    selectedEntryType === 'All' && selectedAllocFilter === 'All'
+                      ? 'bg-slate-900 text-white'
+                      : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  All
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedEntryType('Purchase')
+                    setSelectedAllocFilter('All')
+                    setCurrentPage(1)
+                    updateUrlQuery({ entryType: 'Purchase', alloc: 'All' })
+                  }}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
+                    selectedEntryType === 'Purchase'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  Stock In
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedEntryType('Consumption')
+                    setSelectedAllocFilter('All')
+                    setCurrentPage(1)
+                    updateUrlQuery({ entryType: 'Consumption', alloc: 'All' })
+                  }}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
+                    selectedEntryType === 'Consumption' && selectedAllocFilter === 'All'
+                      ? 'bg-purple-600 text-white'
+                      : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  Stock Out
+                </button>
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const nextAlloc = selectedAllocFilter === 'Pending' ? 'All' : 'Pending'
+                      setSelectedEntryType('Consumption')
+                      setSelectedAllocFilter(nextAlloc)
+                      setCurrentPage(1)
+                      updateUrlQuery({ entryType: 'Consumption', alloc: nextAlloc })
+                    }}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
+                      selectedAllocFilter === 'Pending'
+                        ? 'bg-amber-600 text-white'
+                        : 'bg-white border border-amber-200 text-amber-800 hover:bg-amber-50'
+                    }`}
+                  >
+                    Pending Split
+                  </button>
+                )}
+              </div>
+
+              {/* P2 #12: Date Range Filter + Quick Presets */}
+              <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-end print:hidden">
+                <div className="sm:col-span-4">
+                  <label className="block text-[10px] font-semibold text-slate-500 mb-0.5">
+                    From Date
+                  </label>
+                  <input
+                    type="date"
+                    value={fromDate}
+                    onChange={e => {
+                      setFromDate(e.target.value)
+                      setCurrentPage(1)
+                      updateUrlQuery({ from: e.target.value })
+                    }}
+                    className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-xl text-xs text-slate-900"
+                  />
+                </div>
+                <div className="sm:col-span-4">
+                  <label className="block text-[10px] font-semibold text-slate-500 mb-0.5">
+                    To Date
+                  </label>
+                  <input
+                    type="date"
+                    value={toDate}
+                    onChange={e => {
+                      setToDate(e.target.value)
+                      setCurrentPage(1)
+                      updateUrlQuery({ to: e.target.value })
+                    }}
+                    className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-xl text-xs text-slate-900"
+                  />
+                </div>
+                <div className="sm:col-span-4 flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => applyQuickDateRange('today')}
+                    className="flex-1 px-2 py-1.5 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl text-[11px] font-semibold text-slate-700"
+                  >
+                    Today
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyQuickDateRange('week')}
+                    className="flex-1 px-2 py-1.5 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl text-[11px] font-semibold text-slate-700"
+                  >
+                    Week
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyQuickDateRange('month')}
+                    className="flex-1 px-2 py-1.5 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl text-[11px] font-semibold text-slate-700"
+                  >
+                    Month
+                  </button>
+                </div>
+              </div>
+
+              {/* Search Bar */}
+              <div className="flex items-center gap-2 print:hidden">
                 <input
                   type="text"
                   value={searchQuery}
                   onChange={e => {
                     setSearchQuery(e.target.value)
                     setCurrentPage(1)
+                    updateUrlQuery({ q: e.target.value })
                   }}
-                  placeholder="Search item or notes..."
-                  className="px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
+                  placeholder="Search ration item, vendor/notes, date (DD/MM/YYYY), or cost..."
+                  className="flex-1 px-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs text-slate-900 focus:ring-2 focus:ring-emerald-600"
                 />
-                <input
-                  type="date"
-                  value={fromDate}
-                  onChange={e => {
-                    setFromDate(e.target.value)
-                    setCurrentPage(1)
-                  }}
-                  className="px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
-                />
-                <input
-                  type="date"
-                  value={toDate}
-                  onChange={e => {
-                    setToDate(e.target.value)
-                    setCurrentPage(1)
-                  }}
-                  className="px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
-                />
+                {hasLedgerFilters && (
+                  <button
+                    type="button"
+                    onClick={resetAllLedgerFilters}
+                    className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition"
+                  >
+                    Reset
+                  </button>
+                )}
               </div>
+            </div>
 
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="border-b border-slate-200 text-[11px] font-semibold text-slate-500 uppercase">
-                      <th className="py-2 pr-2">Date</th>
-                      <th className="py-2 px-2">Item</th>
-                      <th className="py-2 px-2">Type</th>
-                      <th className="py-2 px-2 text-right">Qty</th>
-                      <th className="py-2 px-2 text-right">Cost</th>
-                      <th className="py-2 px-2">Status / Notes</th>
-                      {isAdmin && <th className="py-2 pl-2 text-right">Action</th>}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {paginatedLogs.length === 0 ? (
-                      <tr>
-                        <td
-                          colSpan={isAdmin ? 7 : 6}
-                          className="py-6 text-center text-slate-500"
-                        >
-                          No feed log entries found.
-                        </td>
-                      </tr>
-                    ) : (
-                      paginatedLogs.map(row => {
-                        const isCons = row.entry_type === 'Consumption'
-                        const notesStr = String(row.notes || '')
-                        const isWriteOffRow =
-                          isCons && notesStr.toLowerCase().startsWith('write-off:')
-                        const statusLabel = !isCons
-                          ? 'Stock In'
-                          : isWriteOffRow
-                          ? 'Stock Out — Write-off'
-                          : row.is_allocated
-                          ? 'Allocated'
-                          : 'Pending Split'
+            {/* P1 #6: Guided Empty State */}
+            {paginatedLogs.length === 0 ? (
+              <div className="px-6 py-12 text-center space-y-3">
+                <p className="text-sm font-semibold text-slate-700">
+                  {allFeedLogs.length === 0
+                    ? 'No feed entries yet. Add your first Purchase.'
+                    : 'No feed records match the selected filters.'}
+                </p>
+                <div className="flex items-center justify-center gap-2">
+                  {allFeedLogs.length === 0 ? (
+                    <a
+                      href="#purchase-panel"
+                      className="inline-flex items-center justify-center px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-xl text-xs shadow-xs transition"
+                    >
+                      + New Purchase
+                    </a>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={resetAllLedgerFilters}
+                      className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-semibold rounded-xl text-xs transition"
+                    >
+                      Clear Filters
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <>
+                {/* P2 #14: Mobile Cards (<768px) */}
+                <div className="md:hidden divide-y divide-slate-100">
+                  {paginatedLogs.map(log => {
+                    const isPurchase = log.entry_type === 'Purchase' || !log.entry_type
+                    const speciesLabel = log.target_species || 'Goat'
+                    const costNum = Number(log.total_cost || 0)
+                    const qtyNum = Number(log.quantity_kg || 0)
+                    const isExpanded = expandedRowId === log.id
 
-                        return (
-                          <tr key={row.id} className="hover:bg-slate-50/80">
-                            <td className="py-2.5 pr-2 font-mono text-[11px] text-slate-600 whitespace-nowrap">
-                              {formatDateDDMMYYYY(row.log_date)}
-                            </td>
-                            <td className="py-2.5 px-2">
-                              <div className="font-semibold text-slate-900">{row.feed_type}</div>
-                              <div className="text-[10px] text-slate-500">
-                                {row.target_species || 'Goat'}
-                              </div>
-                            </td>
-                            <td className="py-2.5 px-2 whitespace-nowrap">
+                    return (
+                      <div key={log.id} className="p-4 space-y-2 bg-white">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-xs font-bold text-slate-900">{log.feed_type}</span>
+                              <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase rounded bg-slate-900 text-white">
+                                {speciesLabel}
+                              </span>
                               <span
-                                className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                                  isCons
-                                    ? 'bg-amber-50 text-amber-800 border border-amber-200'
-                                    : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                                className={`px-1.5 py-0.5 text-[9px] font-semibold rounded-full ${
+                                  isPurchase
+                                    ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                                    : 'bg-purple-50 text-purple-700 border border-purple-200'
                                 }`}
                               >
-                                {row.entry_type || 'Purchase'}
+                                {isPurchase ? 'Stock In' : 'Stock Out'}
                               </span>
+                            </div>
+                            <p className="text-[11px] font-mono text-slate-500 mt-0.5">
+                              {formatDateDDMMYYYY(log.log_date)}
+                            </p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-xs font-bold font-mono text-slate-900">
+                              Rs. {costNum.toLocaleString()}
+                            </p>
+                            <p className="text-[11px] font-mono text-slate-600">
+                              {qtyNum.toFixed(1)} kg
+                            </p>
+                          </div>
+                        </div>
+
+                        {log.notes && <p className="text-[11px] text-slate-500">{log.notes}</p>}
+
+                        <div className="flex items-center justify-between pt-1">
+                          <div className="flex items-center gap-2">
+                            {!isPurchase && isAdmin && (
+                              <span
+                                className={`text-[10px] font-semibold ${
+                                  log.is_allocated ? 'text-emerald-600' : 'text-amber-600'
+                                }`}
+                              >
+                                {log.is_allocated ? '✓ Allocated' : '• Pending Split'}
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => setExpandedRowId(isExpanded ? null : log.id)}
+                              className="text-[10px] font-semibold text-slate-500 underline"
+                            >
+                              {isExpanded ? 'Hide audit' : 'Audit info'}
+                            </button>
+                          </div>
+
+                          {isAdmin && (
+                            <form
+                              action={deleteFeedLogAction}
+                              onSubmit={e => {
+                                const confirmed = window.confirm(
+                                  `Delete ${log.feed_type} — ${qtyNum.toFixed(1)}kg — Rs. ${costNum.toLocaleString()}? ${
+                                    isPurchase
+                                      ? `Rs. ${costNum.toLocaleString()} will be refunded to OPERATING wallet. `
+                                      : ''
+                                  }This cannot be undone.`
+                                )
+                                if (!confirmed) {
+                                  e.preventDefault()
+                                  return
+                                }
+                                setDeletingId(log.id)
+                              }}
+                            >
+                              <input type="hidden" name="logId" value={log.id} />
+                              <button
+                                type="submit"
+                                disabled={deletingId === log.id}
+                                className="px-2.5 py-1 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 disabled:opacity-50 border border-rose-200 text-[11px] font-semibold transition"
+                              >
+                                {deletingId === log.id ? 'Deleting...' : 'Delete'}
+                              </button>
+                            </form>
+                          )}
+                        </div>
+
+                        {isExpanded && (
+                          <div className="text-[10px] text-slate-500 bg-slate-50 rounded-lg p-2 border border-slate-200/70">
+                            Created at: {formatDateTimeDDMMYYYY(log.created_at || log.log_date)} • Created by:{' '}
+                            {log.created_by_email || log.created_by || role.toUpperCase()}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {/* P2 #13 & #14: Desktop Table with Sticky Header & Sortable Columns */}
+                <div className="hidden md:block overflow-x-auto max-h-[620px]">
+                  <table className="min-w-full divide-y divide-slate-100">
+                    <thead className="bg-slate-50 sticky top-0 z-10 shadow-2xs">
+                      <tr>
+                        <th className="px-4 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                          <button
+                            type="button"
+                            onClick={() => toggleSort('date')}
+                            className="inline-flex items-center gap-1 hover:text-slate-900"
+                          >
+                            <span>Date</span>
+                            <span>{sortBy === 'date' ? (sortDir === 'asc' ? '↑' : '↓') : '↕'}</span>
+                          </button>
+                        </th>
+                        <th className="px-4 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                          Item &amp; Type
+                        </th>
+                        <th className="px-4 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                          <button
+                            type="button"
+                            onClick={() => toggleSort('qty')}
+                            className="inline-flex items-center gap-1 hover:text-slate-900"
+                          >
+                            <span>Qty</span>
+                            <span>{sortBy === 'qty' ? (sortDir === 'asc' ? '↑' : '↓') : '↕'}</span>
+                          </button>
+                        </th>
+                        <th className="px-4 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                          <button
+                            type="button"
+                            onClick={() => toggleSort('cost')}
+                            className="inline-flex items-center gap-1 hover:text-slate-900"
+                          >
+                            <span>Cost / Split</span>
+                            <span>{sortBy === 'cost' ? (sortDir === 'asc' ? '↑' : '↓') : '↕'}</span>
+                          </button>
+                        </th>
+                        {isAdmin && (
+                          <th className="px-4 py-2.5 text-right text-[10px] font-bold text-slate-500 uppercase tracking-wider print:hidden">
+                            Action
+                          </th>
+                        )}
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-slate-100">
+                      {paginatedLogs.map(log => {
+                        const isPurchase = log.entry_type === 'Purchase' || !log.entry_type
+                        const speciesLabel = log.target_species || 'Goat'
+                        const costNum = Number(log.total_cost || 0)
+                        const qtyNum = Number(log.quantity_kg || 0)
+                        const isExpanded = expandedRowId === log.id
+
+                        return (
+                          <tr
+                            key={log.id}
+                            title={`Created at: ${formatDateTimeDDMMYYYY(
+                              log.created_at || log.log_date
+                            )} • By: ${log.created_by_email || log.created_by || role.toUpperCase()}`}
+                            className="hover:bg-slate-50/90 transition-colors"
+                          >
+                            <td className="px-4 py-3 whitespace-nowrap text-xs font-mono text-slate-700">
+                              {formatDateDDMMYYYY(log.log_date)}
                             </td>
-                            <td className="py-2.5 px-2 text-right font-mono font-semibold text-slate-900 whitespace-nowrap">
-                              {Number(row.quantity_kg || 0).toFixed(1)} kg
-                            </td>
-                            <td className="py-2.5 px-2 text-right font-mono font-semibold text-slate-900 whitespace-nowrap">
-                              Rs. {Number(row.total_cost || 0).toLocaleString()}
-                            </td>
-                            <td className="py-2.5 px-2 max-w-[210px]">
-                              <div className="text-[10px] font-semibold text-slate-700">
-                                {statusLabel}
+                            <td className="px-4 py-3">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="text-xs font-bold text-slate-900">
+                                  {log.feed_type}
+                                </span>
+                                <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase rounded bg-slate-900 text-white">
+                                  {speciesLabel}
+                                </span>
+                                <span
+                                  className={`px-1.5 py-0.5 text-[9px] font-semibold rounded-full ${
+                                    isPurchase
+                                      ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                                      : 'bg-purple-50 text-purple-700 border border-purple-200'
+                                  }`}
+                                >
+                                  {isPurchase ? 'Stock In' : 'Stock Out'}
+                                </span>
                               </div>
-                              {notesStr && (
-                                <div className="text-[11px] text-slate-500 truncate" title={notesStr}>
-                                  {notesStr}
+                              {log.notes && (
+                                <div className="text-[11px] text-slate-400 mt-0.5">{log.notes}</div>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => setExpandedRowId(isExpanded ? null : log.id)}
+                                className="text-[10px] text-slate-400 hover:text-slate-600 mt-0.5 print:hidden"
+                              >
+                                {isExpanded ? '▾ Hide audit' : '▸ Audit'}
+                              </button>
+                              {isExpanded && (
+                                <div className="text-[10px] text-slate-500 mt-1 bg-slate-50 px-2 py-1 rounded border border-slate-200/70">
+                                  Created at: {formatDateTimeDDMMYYYY(log.created_at || log.log_date)} •
+                                  Created by: {log.created_by_email || log.created_by || role.toUpperCase()}
                                 </div>
                               )}
                             </td>
+                            <td className="px-4 py-3 whitespace-nowrap text-xs font-mono font-semibold text-slate-800">
+                              {qtyNum.toFixed(1)} kg
+                            </td>
+                            <td className="px-4 py-3 whitespace-nowrap">
+                              <div className="text-xs font-bold font-mono text-slate-900">
+                                Rs. {costNum.toLocaleString()}
+                              </div>
+                              {!isPurchase && isAdmin && (
+                                <span
+                                  className={`text-[10px] font-semibold ${
+                                    log.is_allocated ? 'text-emerald-600' : 'text-amber-600'
+                                  }`}
+                                >
+                                  {log.is_allocated ? '✓ Allocated' : '• Pending Split'}
+                                </span>
+                              )}
+                            </td>
                             {isAdmin && (
-                              <td className="py-2.5 pl-2 text-right whitespace-nowrap">
-                                <form action={deleteFeedLogAction}>
-                                  <input type="hidden" name="logId" value={row.id} />
+                              <td className="px-4 py-3 whitespace-nowrap text-right print:hidden">
+                                <form
+                                  action={deleteFeedLogAction}
+                                  onSubmit={e => {
+                                    const confirmed = window.confirm(
+                                      `Delete ${log.feed_type} — ${qtyNum.toFixed(1)}kg — Rs. ${costNum.toLocaleString()}? ${
+                                        isPurchase
+                                          ? `Rs. ${costNum.toLocaleString()} will be refunded to OPERATING wallet. `
+                                          : ''
+                                      }This cannot be undone.`
+                                    )
+                                    if (!confirmed) {
+                                      e.preventDefault()
+                                      return
+                                    }
+                                    setDeletingId(log.id)
+                                  }}
+                                  className="inline-block"
+                                >
+                                  <input type="hidden" name="logId" value={log.id} />
                                   <button
                                     type="submit"
-                                    onClick={() => {
-                                      router.refresh()
-                                    }}
-                                    className="text-[11px] font-semibold text-rose-600 hover:text-rose-800"
+                                    disabled={deletingId === log.id}
+                                    className="px-2 py-1 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 disabled:opacity-50 border border-rose-200 text-[11px] font-semibold transition"
                                   >
-                                    Delete
+                                    {deletingId === log.id ? 'Deleting...' : 'Delete'}
                                   </button>
                                 </form>
                               </td>
                             )}
                           </tr>
                         )
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
-
-              {totalPages > 1 && (
-                <div className="flex items-center justify-between pt-2 text-xs text-slate-600">
-                  <span>
-                    Page {safePage} of {totalPages}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      disabled={safePage <= 1}
-                      onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                      className="px-2.5 py-1 rounded-lg border border-slate-300 bg-white disabled:opacity-40"
-                    >
-                      Previous
-                    </button>
-                    <button
-                      type="button"
-                      disabled={safePage >= totalPages}
-                      onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                      className="px-2.5 py-1 rounded-lg border border-slate-300 bg-white disabled:opacity-40"
-                    >
-                      Next
-                    </button>
-                  </div>
+                      })}
+                    </tbody>
+                  </table>
                 </div>
-              )}
-            </div>
+              </>
+            )}
+
+            {/* P1 #10: Ledger Footer Totals + Pagination */}
+            {totalFilteredCount > 0 && (
+              <div className="px-5 py-3 border-t border-slate-100 bg-slate-50/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
+                <span className="text-slate-600 font-mono text-[11px]">
+                  Showing <strong className="text-slate-900">{paginatedLogs.length}</strong> of{' '}
+                  <strong className="text-slate-900">{totalFilteredCount}</strong> • Page Total:{' '}
+                  <strong className="text-slate-900">Rs. {pageTotalCost.toLocaleString()}</strong> • Filter
+                  Total: <strong className="text-slate-900">Rs. {filterTotalCost.toLocaleString()}</strong>
+                </span>
+
+                <div className="flex items-center gap-2 print:hidden">
+                  <button
+                    type="button"
+                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                    disabled={safePage <= 1}
+                    className="px-3 py-1.5 bg-white hover:bg-slate-100 disabled:bg-slate-100 disabled:text-slate-400 text-slate-700 font-semibold rounded-lg border border-slate-200 transition"
+                  >
+                    ← Previous
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                    disabled={safePage >= totalPages}
+                    className="px-3 py-1.5 bg-white hover:bg-slate-100 disabled:bg-slate-100 disabled:text-slate-400 text-slate-700 font-semibold rounded-lg border border-slate-200 transition"
+                  >
+                    Next →
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
+
+          {/* Right 5 Cols: Sticky Quick-Entry & Write-off Forms */}
+          <FeedActionFormsClient
+            speciesOptions={SPECIES_OPTIONS}
+            defaultSpecies={selectedSpeciesFilter !== 'All' ? selectedSpeciesFilter : 'Goat'}
+            todayStr={todayStr}
+            isAdmin={isAdmin}
+            addFeedLogAction={addFeedLogAction}
+            adjustFeedStockAction={adjustFeedStockAction}
+          />
         </div>
       </div>
     </div>
