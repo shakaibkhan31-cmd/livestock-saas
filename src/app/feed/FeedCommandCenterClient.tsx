@@ -305,7 +305,7 @@ export default function FeedCommandCenterClient({
           remainingKg: 0,
           totalPurchasedCost: 0,
           avgRatePerKg: 0,
-          thresholdKg: thresholdByFeedName[ft.toLowerCase()] ?? 50,
+          thresholdKg: thresholdByFeedName[ft.toLowerCase()] ?? 10,
         }
       }
       const qty = Number(log.quantity_kg) || 0
@@ -875,7 +875,7 @@ export default function FeedCommandCenterClient({
         {isAdmin && (
           <div id="split-engine-section">
             <SplitEngineClient
-              speciesOptions={SPECIES_OPTIONS}
+              speciesOptions={speciesOptions}
               activeAnimals={activeAnimals}
               unallocatedBySpecies={unallocatedBySpecies}
               selectedSpeciesFilter={selectedSpeciesFilter}
@@ -1515,7 +1515,7 @@ export default function FeedCommandCenterClient({
 
           {/* Right 5 Cols: Sticky Quick-Entry & Write-off Forms */}
           <FeedActionFormsClient
-            speciesOptions={SPECIES_OPTIONS}
+            speciesOptions={speciesOptions}
             defaultSpecies={selectedSpeciesFilter !== 'All' ? selectedSpeciesFilter : 'Goat'}
             todayStr={todayStr}
             isAdmin={isAdmin}

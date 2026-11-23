@@ -980,7 +980,6 @@ export default async function FeedManagementPage({
       restoreFeedLogAction={restoreFeedLog}
       adjustFeedStockAction={adjustFeedStock}
       allocateFeedCostAction={allocateFeedCostToAnimals}
-      updateFeedThresholdAction={updateFeedThreshold}
     />
   )
 }
