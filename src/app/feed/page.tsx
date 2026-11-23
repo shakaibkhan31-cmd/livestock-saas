@@ -1,9 +1,7 @@
 import { createClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
-import Link from 'next/link'
 import { getUserFarmAndRole } from '@/utils/rbac'
-import SplitEngineClient from './SplitEngineClient'
-import FeedActionFormsClient from './FeedActionFormsClient'
+import FeedCommandCenterClient from './FeedCommandCenterClient'
 
 type ActiveAnimalRow = {
   id: string
@@ -23,7 +21,6 @@ function getKarachiDate(): string {
   }).format(new Date())
 }
 
-// Helper: Consistent DD/MM/YYYY Date Formatter
 function formatDateDDMMYYYY(dateInput?: string | null): string {
   if (!dateInput) return 'N/A'
   const datePart = String(dateInput).split('T')[0]
@@ -38,32 +35,6 @@ function formatDateDDMMYYYY(dateInput?: string | null): string {
   const month = String(d.getMonth() + 1).padStart(2, '0')
   const year = d.getFullYear()
   return `${day}/${month}/${year}`
-}
-
-function buildFeedUrl({
-  species,
-  entryType,
-  alloc,
-  q,
-  page,
-  splitDate,
-}: {
-  species?: string
-  entryType?: string
-  alloc?: string
-  q?: string
-  page?: number
-  splitDate?: string
-}) {
-  const sp = new URLSearchParams()
-  if (species && species !== 'All') sp.set('species', species)
-  if (entryType && entryType !== 'All') sp.set('entryType', entryType)
-  if (alloc && alloc !== 'All') sp.set('alloc', alloc)
-  if (q && q.trim()) sp.set('q', q.trim())
-  if (splitDate && splitDate.trim()) sp.set('splitDate', splitDate.trim())
-  if (page && page > 1) sp.set('page', String(page))
-  const qs = sp.toString()
-  return qs ? `/feed?${qs}` : '/feed'
 }
 
 function distributeExactShares(totalPool: number, weightsOrEqual: number[]): number[] {
@@ -130,6 +101,10 @@ export default async function FeedManagementPage({
     alloc?: string
     q?: string
     page?: string
+    from?: string
+    to?: string
+    lowOnly?: string
+    undo?: string
   }>
 }) {
   const params = await searchParams
@@ -140,9 +115,10 @@ export default async function FeedManagementPage({
   const selectedAllocFilter =
     params.alloc === 'Pending' || params.alloc === 'Allocated' ? params.alloc : 'All'
   const searchQuery = (params.q || '').trim()
-  const normalizedQuery = searchQuery.toLowerCase()
-  const currentPage = Math.max(1, parseInt(params.page || '1', 10) || 1)
-  const pageSize = 15
+  const fromDateFilter = (params.from || '').trim()
+  const toDateFilter = (params.to || '').trim()
+  const lowStockOnlyFilter = params.lowOnly === '1'
+  const undoPayloadEncoded = params.undo || ''
 
   // RBAC Check
   const { user, farm, role } = await getUserFarmAndRole()
@@ -153,30 +129,18 @@ export default async function FeedManagementPage({
   const supabase = await createClient()
   const todayStr = getKarachiDate()
 
-  const rangeFrom = (currentPage - 1) * pageSize
-  const rangeTo = rangeFrom + pageSize - 1
-
   let loadErrorMsg = params.error || ''
-  let pagedFeedLogs: Array<Record<string, any>> = []
-  let pagedTotalCount: number | null = 0
   let allFeedLogs: Array<Record<string, any>> = []
   let activeAnimals: ActiveAnimalRow[] = []
   let inventoryRows: Array<Record<string, any>> = []
 
   try {
-    const [pagedRes, summaryRes, animalsRes, invRes] = await Promise.all([
+    const [logsRes, animalsRes, invRes] = await Promise.all([
       supabase
         .from('feed_logs')
-        .select('id, target_species, entry_type, feed_type, quantity_kg, total_cost, log_date, notes, is_allocated', {
-          count: 'exact',
-        })
+        .select('*')
         .eq('farm_id', farm.id)
-        .order('log_date', { ascending: false })
-        .range(rangeFrom, rangeTo),
-      supabase
-        .from('feed_logs')
-        .select('id, target_species, entry_type, feed_type, quantity_kg, total_cost, log_date, is_allocated')
-        .eq('farm_id', farm.id),
+        .order('log_date', { ascending: false }),
       supabase
         .from('livestock_master')
         .select('id, tag_id, species, ownership, client_name, acquisition_date')
@@ -188,17 +152,10 @@ export default async function FeedManagementPage({
         .eq('farm_id', farm.id),
     ])
 
-    if (pagedRes.error) {
-      loadErrorMsg = loadErrorMsg || pagedRes.error.message
+    if (logsRes.error) {
+      loadErrorMsg = loadErrorMsg || logsRes.error.message
     } else {
-      pagedFeedLogs = pagedRes.data || []
-      pagedTotalCount = pagedRes.count ?? pagedFeedLogs.length
-    }
-
-    if (summaryRes.error) {
-      loadErrorMsg = loadErrorMsg || summaryRes.error.message
-    } else {
-      allFeedLogs = summaryRes.data || []
+      allFeedLogs = logsRes.data || []
     }
 
     if (animalsRes.error) {
@@ -214,10 +171,8 @@ export default async function FeedManagementPage({
     if (isNextRedirectError(err)) throw err
     loadErrorMsg =
       loadErrorMsg ||
-      (err instanceof Error ? err.message : 'Failed loading feed data from database.')
+      (err instanceof Error ? err.message : 'Failed loading feed data from the database.')
   }
-
-  const errorMsg = loadErrorMsg
 
   // Auto-learn custom feed names from entries + inventory + defaults
   const dynamicFeedSuggestions = Array.from(
@@ -228,45 +183,6 @@ export default async function FeedManagementPage({
     ])
   ).sort()
 
-  // Species-level logs used for KPIs & Live Shed Stock
-  const speciesFeedLogs = allFeedLogs.filter(log => {
-    if (selectedSpeciesFilter === 'All') return true
-    return (log.target_species || 'Goat') === selectedSpeciesFilter
-  })
-
-  // Ledger filtering on fetched page logs
-  const filteredLedgerLogs = pagedFeedLogs.filter(log => {
-    if (selectedSpeciesFilter !== 'All' && (log.target_species || 'Goat') !== selectedSpeciesFilter) {
-      return false
-    }
-    const isPurchase = log.entry_type === 'Purchase' || !log.entry_type
-
-    if (selectedEntryType === 'Purchase' && !isPurchase) return false
-    if (selectedEntryType === 'Consumption' && isPurchase) return false
-
-    if (selectedAllocFilter === 'Pending' && log.is_allocated) return false
-    if (selectedAllocFilter === 'Allocated' && !log.is_allocated) return false
-
-    if (!normalizedQuery) return true
-
-    const haystack = [
-      log.feed_type || '',
-      log.target_species || 'Goat',
-      log.notes || '',
-      isPurchase ? 'stock in purchase' : 'stock out consumption',
-      formatDateDDMMYYYY(log.log_date),
-      String(log.quantity_kg || ''),
-      String(log.total_cost || ''),
-    ]
-      .join(' ')
-      .toLowerCase()
-
-    return haystack.includes(normalizedQuery)
-  })
-
-  const totalDbPages = Math.max(1, Math.ceil((pagedTotalCount ?? filteredLedgerLogs.length) / pageSize))
-  const safePage = Math.min(currentPage, totalDbPages)
-
   // Map low_stock_threshold_kg from public.feed_inventory by feed name
   const thresholdByFeedName: Record<string, number> = {}
   inventoryRows.forEach(row => {
@@ -275,103 +191,6 @@ export default async function FeedManagementPage({
       thresholdByFeedName[nameKey] = Number(row.low_stock_threshold_kg) || 50
     }
   })
-
-  // Calculate Bulk Stock Inventory per (Species + Feed Type)
-  type StockSummary = {
-    key: string
-    species: string
-    feedType: string
-    purchasedKg: number
-    consumedKg: number
-    remainingKg: number
-    totalPurchasedCost: number
-    avgRatePerKg: number
-    thresholdKg: number
-  }
-
-  const stockMap: Record<string, StockSummary> = {}
-  speciesFeedLogs.forEach(log => {
-    const sp = String(log.target_species || 'Goat').trim()
-    const ft = String(log.feed_type || 'General Feed').trim()
-    const key = `${sp}__${ft}`
-
-    if (!stockMap[key]) {
-      stockMap[key] = {
-        key,
-        species: sp,
-        feedType: ft,
-        purchasedKg: 0,
-        consumedKg: 0,
-        remainingKg: 0,
-        totalPurchasedCost: 0,
-        avgRatePerKg: 0,
-        thresholdKg: thresholdByFeedName[ft.toLowerCase()] ?? 50,
-      }
-    }
-    const qty = Number(log.quantity_kg) || 0
-    const cost = Number(log.total_cost) || 0
-    const type = log.entry_type || 'Purchase'
-
-    if (type === 'Purchase') {
-      stockMap[key].purchasedKg += qty
-      stockMap[key].totalPurchasedCost += cost
-    } else {
-      stockMap[key].consumedKg += qty
-    }
-  })
-
-  const inventoryList = Object.values(stockMap).map(item => {
-    const remainingKg = item.purchasedKg - item.consumedKg
-    const avgRatePerKg = item.purchasedKg > 0 ? item.totalPurchasedCost / item.purchasedKg : 0
-    return {
-      ...item,
-      remainingKg,
-      avgRatePerKg,
-    }
-  })
-
-  const lowStockCount = inventoryList.filter(i => i.remainingKg <= i.thresholdKg).length
-
-  // Pending Consumption Cost Pool grouped by Species
-  const unallocatedBySpecies: Record<string, { amount: number; billCount: number }> = {}
-  allFeedLogs.forEach(l => {
-    if (!l.is_allocated && l.entry_type === 'Consumption' && Number(l.total_cost) > 0) {
-      const sp = String(l.target_species || 'Goat').trim()
-      if (!unallocatedBySpecies[sp]) {
-        unallocatedBySpecies[sp] = { amount: 0, billCount: 0 }
-      }
-      unallocatedBySpecies[sp].amount += Number(l.total_cost) || 0
-      unallocatedBySpecies[sp].billCount += 1
-    }
-  })
-
-  const filteredUnallocatedPool = speciesFeedLogs
-    .filter(l => !l.is_allocated && l.entry_type === 'Consumption' && Number(l.total_cost) > 0)
-    .reduce((sum, l) => sum + (Number(l.total_cost) || 0), 0)
-
-  const filteredUnallocatedBillsCount = speciesFeedLogs.filter(
-    l => !l.is_allocated && l.entry_type === 'Consumption' && Number(l.total_cost) > 0
-  ).length
-
-  const totalPurchasedSpend = speciesFeedLogs
-    .filter(l => l.entry_type === 'Purchase' || !l.entry_type)
-    .reduce((sum, l) => sum + (Number(l.total_cost) || 0), 0)
-
-  const totalRemainingStockKg = inventoryList.reduce((sum, i) => sum + Math.max(i.remainingKg, 0), 0)
-
-  const effectiveSplitDate = (params.splitDate || todayStr).split('T')[0]
-
-  const matchingActiveAnimals = activeAnimals.filter(a => {
-    if (selectedSpeciesFilter === 'All' || selectedSpeciesFilter === 'Shared (All Species)') return true
-    return a.species === selectedSpeciesFilter
-  })
-
-  const activeSpeciesTabs = Array.from(
-    new Set([
-      ...activeAnimals.map(a => String(a.species || '')),
-      ...allFeedLogs.map(l => String(l.target_species || 'Goat')),
-    ])
-  ).filter(Boolean)
 
   // Helper to sync weighted average rate & closing stock into public.feed_inventory per species
   const syncFeedInventorySnapshot = async (
@@ -463,13 +282,13 @@ export default async function FeedManagementPage({
     }
   }
 
-  // SERVER ACTION 1: Record Bulk Purchase (Stock-In + OPERATING Wallet Deduction + Rollback on Wallet Fail)
+  // SERVER ACTION 1: Record Bulk Purchase (Core Logic Unchanged)
   const addFeedLog = async (formData: FormData) => {
     'use server'
     try {
       const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
       if (!authUser || !authFarm || authRole !== 'admin') {
-        return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Admin only')}`)
+        return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Administrator access is required.')}`)
       }
 
       const target_species = String(formData.get('target_species') || 'Goat').trim() || 'Goat'
@@ -504,7 +323,7 @@ export default async function FeedManagementPage({
 
       if (recordsToInsert.length === 0) {
         return redirect(
-          `/feed?error=${encodeURIComponent('Please enter valid feed item, quantity (> 0), and cost (> 0).')}`
+          `/feed?error=${encodeURIComponent('Please enter a valid feed item, quantity greater than 0, and cost greater than 0.')}`
         )
       }
 
@@ -536,7 +355,7 @@ export default async function FeedManagementPage({
             .eq('farm_id', authFarm.id)
         }
         return redirect(
-          `/feed?error=${encodeURIComponent('Purchase failed, wallet error: ' + walletErr.message)}`
+          `/feed?error=${encodeURIComponent('Purchase failed due to a wallet transaction error: ' + walletErr.message)}`
         )
       }
 
@@ -553,18 +372,18 @@ export default async function FeedManagementPage({
       )
     } catch (err: unknown) {
       if (isNextRedirectError(err)) throw err
-      const msg = err instanceof Error ? err.message : 'Unexpected error saving purchase.'
+      const msg = err instanceof Error ? err.message : 'Unexpected error while saving purchase.'
       return redirect(`/feed?error=${encodeURIComponent(msg)}`)
     }
   }
 
-  // SERVER ACTION 2: Delete Feed Log (Admin Only, Guard Allocated, Reverse Wallet on Purchase, Resync Stock)
+  // SERVER ACTION 2: Delete Feed Log (Core Logic Unchanged + Undo Snapshot Payload)
   const deleteFeedLog = async (formData: FormData) => {
     'use server'
     try {
       const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
       if (!authUser || !authFarm || authRole !== 'admin') {
-        return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Admin only')}`)
+        return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Administrator access is required.')}`)
       }
 
       const logId = String(formData.get('logId') || '')
@@ -572,18 +391,18 @@ export default async function FeedManagementPage({
 
       const { data: existingLog, error: fetchErr } = await supabaseClient
         .from('feed_logs')
-        .select('id, entry_type, total_cost, feed_type, target_species, is_allocated, log_date')
+        .select('id, entry_type, total_cost, quantity_kg, feed_type, target_species, is_allocated, log_date, notes')
         .eq('id', logId)
         .eq('farm_id', authFarm.id)
         .single()
 
       if (fetchErr || !existingLog) {
-        return redirect(`/feed?error=${encodeURIComponent('Feed log entry not found.')}`)
+        return redirect(`/feed?error=${encodeURIComponent('Feed log entry was not found.')}`)
       }
 
       if (existingLog.is_allocated) {
         return redirect(
-          `/feed?error=${encodeURIComponent('Cannot delete: Already allocated. Pehle allocation reverse karo.')}`
+          `/feed?error=${encodeURIComponent('Cannot delete this entry because it has already been allocated. Please reverse the allocation first.')}`
         )
       }
 
@@ -617,21 +436,102 @@ export default async function FeedManagementPage({
         null
       )
 
-      return redirect(`/feed?msg=${encodeURIComponent('Feed log entry deleted and inventory/wallet synced.')}`)
+      const undoSnapshot = Buffer.from(
+        JSON.stringify({
+          target_species: existingLog.target_species || 'Goat',
+          entry_type: existingLog.entry_type || 'Purchase',
+          feed_type: existingLog.feed_type,
+          quantity_kg: Number(existingLog.quantity_kg) || 0,
+          total_cost: Number(existingLog.total_cost) || 0,
+          log_date: String(existingLog.log_date || getKarachiDate()).split('T')[0],
+          notes: existingLog.notes || null,
+        }),
+        'utf-8'
+      ).toString('base64url')
+
+      return redirect(
+        `/feed?msg=${encodeURIComponent(
+          `Deleted ${existingLog.feed_type} (${Number(existingLog.quantity_kg).toFixed(1)} kg — Rs. ${logCost.toLocaleString()}) and synced inventory/wallet.`
+        )}&undo=${encodeURIComponent(undoSnapshot)}`
+      )
     } catch (err: unknown) {
       if (isNextRedirectError(err)) throw err
-      const msg = err instanceof Error ? err.message : 'Unexpected error deleting feed log.'
+      const msg = err instanceof Error ? err.message : 'Unexpected error while deleting feed log.'
       return redirect(`/feed?error=${encodeURIComponent(msg)}`)
     }
   }
 
-  // SERVER ACTION 3: Stock Adjustment (Decrease / Write-off Only -> Consumption; Increase Blocked)
+  // SERVER ACTION 2B: Restore Deleted Feed Log (10-second Undo Toast Action)
+  const restoreFeedLog = async (formData: FormData) => {
+    'use server'
+    try {
+      const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
+      if (!authUser || !authFarm || authRole !== 'admin') {
+        return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Administrator access is required.')}`)
+      }
+
+      const encoded = String(formData.get('undoPayload') || '')
+      if (!encoded) {
+        return redirect(`/feed?error=${encodeURIComponent('Undo data has expired or is invalid.')}`)
+      }
+
+      const decoded = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf-8'))
+      const supabaseClient = await createClient()
+
+      const entryType = decoded.entry_type === 'Consumption' ? 'Consumption' : 'Purchase'
+      const targetSpecies = String(decoded.target_species || 'Goat')
+      const feedType = String(decoded.feed_type || '').trim()
+      const qty = Number(decoded.quantity_kg) || 0
+      const cost = Number(decoded.total_cost) || 0
+      const logDate = String(decoded.log_date || getKarachiDate()).split('T')[0]
+
+      const { error: restoreErr } = await supabaseClient.from('feed_logs').insert([
+        {
+          farm_id: authFarm.id,
+          target_species: targetSpecies,
+          entry_type: entryType,
+          feed_type: feedType,
+          quantity_kg: qty,
+          total_cost: cost,
+          log_date: logDate,
+          notes: decoded.notes || null,
+          is_allocated: false,
+        },
+      ])
+
+      if (restoreErr) {
+        return redirect(`/feed?error=${encodeURIComponent(restoreErr.message)}`)
+      }
+
+      if (entryType === 'Purchase' && cost > 0) {
+        await supabaseClient.from('wallet_transactions').insert({
+          farm_id: authFarm.id,
+          wallet_type: 'OPERATING',
+          amount: -Math.abs(cost),
+          source_type: 'FEED_PURCHASE',
+          description: `Restored Feed Purchase - ${targetSpecies} (${feedType}) - Rs. ${Math.abs(cost)}`,
+        })
+      }
+
+      await syncFeedInventorySnapshot(supabaseClient, authFarm.id, feedType, targetSpecies, logDate, decoded.notes || null)
+
+      return redirect(
+        `/feed?msg=${encodeURIComponent(`Restored ${feedType} (${qty.toFixed(1)} kg — Rs. ${cost.toLocaleString()}).`)}`
+      )
+    } catch (err: unknown) {
+      if (isNextRedirectError(err)) throw err
+      const msg = err instanceof Error ? err.message : 'Unable to restore deleted entry.'
+      return redirect(`/feed?error=${encodeURIComponent(msg)}`)
+    }
+  }
+
+  // SERVER ACTION 3: Stock Adjustment (Decrease-Only Core Logic Unchanged)
   const adjustFeedStock = async (formData: FormData) => {
     'use server'
     try {
       const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
       if (!authUser || !authFarm || authRole !== 'admin') {
-        return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Admin only')}`)
+        return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Administrator access is required.')}`)
       }
 
       const target_species = String(formData.get('target_species') || 'Goat').trim() || 'Goat'
@@ -687,7 +587,7 @@ export default async function FeedManagementPage({
 
         if (diff < 0) {
           throw new Error(
-            `Stock increase not allowed via Adjustment for ${ft}. Stock sirf Purchase se barh sakta hai. Agar stock waqai barha hai to Purchase entry karo.`
+            `Stock increase is not allowed via Adjustment for ${ft}. Stock can only increase through a Purchase entry with wallet deduction.`
           )
         }
 
@@ -711,7 +611,7 @@ export default async function FeedManagementPage({
 
       if (adjustmentsToInsert.length === 0) {
         return redirect(
-          `/feed?error=${encodeURIComponent('No stock decrease detected between physical stock and ledger stock.')}`
+          `/feed?error=${encodeURIComponent('No stock decrease was detected between physical stock and ledger stock.')}`
         )
       }
 
@@ -736,7 +636,7 @@ export default async function FeedManagementPage({
 
       return redirect(
         `/feed?species=${encodeURIComponent(target_species)}&msg=${encodeURIComponent(
-          `Applied stock adjustment for ${adjustmentsToInsert.length} item(s)!`
+          `Applied stock adjustment for ${adjustmentsToInsert.length} item(s).`
         )}`
       )
     } catch (err: unknown) {
@@ -746,13 +646,13 @@ export default async function FeedManagementPage({
     }
   }
 
-  // SERVER ACTION 4: Allocate Pending Consumption Costs to Eligible Animals (Preserve feed_logs.notes)
+  // SERVER ACTION 4: Allocate Pending Consumption Costs to Eligible Animals (Core Logic Unchanged)
   const allocateFeedCostToAnimals = async (formData: FormData) => {
     'use server'
     try {
       const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
       if (!authUser || !authFarm || authRole !== 'admin') {
-        return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Admin only')}`)
+        return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Administrator access is required.')}`)
       }
 
       const targetSpecies = String(formData.get('allocate_species') || 'Goat').trim() || 'Goat'
@@ -778,7 +678,7 @@ export default async function FeedManagementPage({
 
       if (!pendingLogs || pendingLogs.length === 0) {
         return redirect(
-          `/feed?error=${encodeURIComponent(`No unallocated consumption costs found for ${targetSpecies}.`)}`
+          `/feed?error=${encodeURIComponent(`No unallocated consumption costs were found for ${targetSpecies}.`)}`
         )
       }
 
@@ -835,7 +735,7 @@ export default async function FeedManagementPage({
           if (w <= 0) {
             return redirect(
               `/feed?error=${encodeURIComponent(
-                `Weight missing for Tag #${animal.tag_id}, pehle weight enter karo.`
+                `Weight record is missing for Tag #${animal.tag_id}. Please record its weight before running a live-weight split.`
               )}`
             )
           }
@@ -858,7 +758,7 @@ export default async function FeedManagementPage({
 
       if (claimErr || !claimedLogs || claimedLogs.length === 0) {
         return redirect(
-          `/feed?error=${encodeURIComponent('Allocation already processed or in progress.')}`
+          `/feed?error=${encodeURIComponent('Allocation has already been processed or is currently in progress.')}`
         )
       }
 
@@ -904,517 +804,48 @@ export default async function FeedManagementPage({
         }
       }
 
+      const avgPerHead =
+        financialInserts.length > 0 ? Math.round(totalPool / financialInserts.length) : 0
+
       return redirect(
         `/feed?species=${encodeURIComponent(targetSpecies)}&msg=${encodeURIComponent(
-          `Rs. ${totalPool.toLocaleString()} (${targetSpecies} Consumption Pool) allocated across ${financialInserts.length} eligible ${targetSpecies}(s)!`
+          `Rs. ${totalPool.toLocaleString()} split among ${financialInserts.length} animals • Avg Rs. ${avgPerHead.toLocaleString()}/head`
         )}`
       )
     } catch (err: unknown) {
       if (isNextRedirectError(err)) throw err
-      const msg = err instanceof Error ? err.message : 'Unexpected error allocating feed cost.'
+      const msg = err instanceof Error ? err.message : 'Unexpected error while allocating feed cost.'
       return redirect(`/feed?error=${encodeURIComponent(msg)}`)
     }
   }
 
-  const matchingCount = matchingActiveAnimals.length
-  const estimatedShare = matchingCount > 0 ? Math.floor(filteredUnallocatedPool / matchingCount) : 0
-  const hasLedgerFilters =
-    selectedEntryType !== 'All' || selectedAllocFilter !== 'All' || searchQuery.length > 0
-
   return (
-    <div className="min-h-screen bg-slate-50/80 py-7 px-4 sm:px-6 lg:px-8">
-      <datalist id="common-feeds">
-        {dynamicFeedSuggestions.map(item => (
-          <option key={item} value={item} />
-        ))}
-      </datalist>
-
-      <div className="max-w-7xl mx-auto space-y-5">
-
-        {/* Top Bar: Brand Header + Quick Jump Actions */}
-        <div className="bg-white rounded-2xl border border-slate-200/90 shadow-xs p-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-          <div className="space-y-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-emerald-800 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
-                {farm?.farm_name || 'Livestock ERP'} • {role?.toUpperCase()}
-              </span>
-              <span className="text-[11px] text-slate-400 font-medium">Feed Inventory &amp; Cost Allocation</span>
-            </div>
-            <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">
-              Feed Command Center
-            </h1>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2.5">
-            <a
-              href="#purchase-panel"
-              className="inline-flex items-center justify-center px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-xl shadow-xs transition text-xs"
-            >
-              + New Purchase
-            </a>
-            {isAdmin && (
-              <a
-                href="#adjustment-panel"
-                className="inline-flex items-center justify-center px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-semibold rounded-xl shadow-xs transition text-xs"
-              >
-                Stock Write-off
-              </a>
-            )}
-            <Link
-              href="/animals"
-              className="inline-flex items-center justify-center px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl border border-slate-200 transition text-xs"
-            >
-              ← Livestock Master
-            </Link>
-          </div>
-        </div>
-
-        {/* Species Filter Bar */}
-        <div className="bg-white px-3 py-2.5 rounded-2xl border border-slate-200/90 shadow-xs flex flex-wrap items-center gap-1.5">
-          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider px-2.5">Species:</span>
-          <Link
-            href={buildFeedUrl({
-              species: 'All',
-              entryType: selectedEntryType,
-              alloc: selectedAllocFilter,
-              q: searchQuery,
-              splitDate: params.splitDate,
-              page: 1,
-            })}
-            className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
-              selectedSpeciesFilter === 'All'
-                ? 'bg-slate-900 text-white shadow-xs'
-                : 'text-slate-600 hover:bg-slate-100'
-            }`}
-          >
-            All ({allFeedLogs.length})
-          </Link>
-          {activeSpeciesTabs.map(sp => {
-            const count = allFeedLogs.filter(l => (l.target_species || 'Goat') === sp).length
-            const pendingAmt = unallocatedBySpecies[sp]?.amount || 0
-            return (
-              <Link
-                key={sp}
-                href={buildFeedUrl({
-                  species: sp,
-                  entryType: selectedEntryType,
-                  alloc: selectedAllocFilter,
-                  q: searchQuery,
-                  splitDate: params.splitDate,
-                  page: 1,
-                })}
-                className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 ${
-                  selectedSpeciesFilter === sp
-                    ? 'bg-emerald-600 text-white shadow-xs'
-                    : 'bg-slate-50 text-slate-700 hover:bg-slate-100 border border-slate-200/70'
-                }`}
-              >
-                <span>{sp}</span>
-                <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
-                  selectedSpeciesFilter === sp ? 'bg-emerald-700 text-emerald-100' : 'bg-slate-200 text-slate-600'
-                }`}>
-                  {count}
-                </span>
-                {pendingAmt > 0 && (
-                  <span className="h-2 w-2 rounded-full bg-amber-400" title={`Pending Consumption Rs. ${pendingAmt.toLocaleString()}`}></span>
-                )}
-              </Link>
-            )
-          })}
-        </div>
-
-        {/* Status / Error Alerts */}
-        {statusMsg && (
-          <div className="p-3.5 bg-emerald-50 border border-emerald-200 text-emerald-900 rounded-2xl text-xs sm:text-sm flex items-center justify-between shadow-xs">
-            <span><strong>Success:</strong> {decodeURIComponent(statusMsg)}</span>
-            <Link href="/feed" className="text-emerald-700 font-bold hover:text-emerald-950 px-2">×</Link>
-          </div>
-        )}
-        {errorMsg && (
-          <div className="p-3.5 bg-rose-50 border border-rose-200 text-rose-800 rounded-2xl text-xs sm:text-sm flex items-center justify-between shadow-xs">
-            <span><strong>Error:</strong> {decodeURIComponent(errorMsg)}</span>
-            <Link href="/feed" className="text-rose-600 font-bold hover:text-rose-900 px-2">×</Link>
-          </div>
-        )}
-
-        {/* Executive KPI Row */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
-          <div className="bg-white p-4 rounded-2xl border border-slate-200/90 shadow-xs">
-            <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-              {selectedSpeciesFilter === 'All' ? 'Bulk Spend' : `${selectedSpeciesFilter} Spend`}
-            </p>
-            <p className="text-2xl font-bold text-slate-900 mt-1 font-mono">Rs. {totalPurchasedSpend.toLocaleString()}</p>
-            <p className="text-[11px] text-slate-400 mt-0.5">Total recorded purchase bills</p>
-          </div>
-
-          <div className="bg-white p-4 rounded-2xl border border-slate-200/90 shadow-xs">
-            <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Shed Stock</p>
-            <p className="text-2xl font-bold text-emerald-600 mt-1 font-mono">
-              {totalRemainingStockKg.toFixed(1)} <span className="text-xs font-sans font-semibold text-slate-400">kg</span>
-            </p>
-            <p className="text-[11px] text-slate-400 mt-0.5">
-              {lowStockCount > 0 ? `${lowStockCount} item(s) at/below threshold` : `Across ${inventoryList.length} tracked ration item(s)`}
-            </p>
-          </div>
-
-          {isAdmin && (
-            <div className="bg-amber-50/60 p-4 rounded-2xl border border-amber-200/90 shadow-xs">
-              <p className="text-[11px] font-bold text-amber-800 uppercase tracking-wider">Pending Consumption Pool</p>
-              <p className="text-2xl font-bold text-amber-700 mt-1 font-mono">Rs. {filteredUnallocatedPool.toLocaleString()}</p>
-              <p className="text-[11px] text-amber-700/80 mt-0.5">{filteredUnallocatedBillsCount} consumption item(s) unallocated</p>
-            </div>
-          )}
-
-          <div className="bg-white p-4 rounded-2xl border border-slate-200/90 shadow-xs">
-            <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Est. Share / Head</p>
-            <p className="text-2xl font-bold text-indigo-600 mt-1 font-mono">Rs. {estimatedShare.toLocaleString()}</p>
-            <p className="text-[11px] text-slate-400 mt-0.5">
-              {matchingCount} active {selectedSpeciesFilter === 'All' ? 'head(s)' : `${selectedSpeciesFilter}(s)`}
-            </p>
-          </div>
-        </div>
-
-        {/* Tier 2: Automated Cost Split Engine */}
-        {isAdmin && (
-          <SplitEngineClient
-            speciesOptions={SPECIES_OPTIONS}
-            activeAnimals={activeAnimals}
-            unallocatedBySpecies={unallocatedBySpecies}
-            selectedSpeciesFilter={selectedSpeciesFilter}
-            initialSplitDate={effectiveSplitDate}
-            allocateAction={allocateFeedCostToAnimals}
-          />
-        )}
-
-        {/* Compact Live Shed Stock Strip */}
-        {inventoryList.length > 0 && (
-          <div className="bg-white rounded-2xl border border-slate-200/90 shadow-xs p-4 sm:p-5">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 mb-3.5">
-              <div>
-                <h2 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Live Shed Ration Stock</h2>
-                <p className="text-[11px] text-slate-500">Real-time balance per species &amp; ration item (Purchase minus Write-off / Usage)</p>
-              </div>
-              <span className="text-[11px] font-mono text-slate-400">{inventoryList.length} items</span>
-            </div>
-
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
-              {inventoryList.map((item) => {
-                const isLow = item.remainingKg <= item.thresholdKg
-                return (
-                  <div
-                    key={item.key}
-                    className={`p-3 rounded-xl border transition ${
-                      isLow ? 'bg-rose-50/50 border-rose-200' : 'bg-slate-50/80 border-slate-200/80'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-1">
-                      <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-slate-900 text-white">
-                        {item.species}
-                      </span>
-                      <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${
-                        isLow ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'
-                      }`}>
-                        {isLow ? `Low (≤${item.thresholdKg}kg)` : 'OK'}
-                      </span>
-                    </div>
-                    <p className="font-bold text-xs text-slate-900 mt-1.5 truncate" title={item.feedType}>
-                      {item.feedType}
-                    </p>
-                    <p className="text-base font-bold font-mono text-slate-900 mt-0.5">
-                      {item.remainingKg.toFixed(1)} <span className="text-[10px] font-sans font-normal text-slate-500">kg</span>
-                    </p>
-                    <div className="mt-1.5 pt-1.5 border-t border-slate-200/70 flex items-center justify-between text-[10px] text-slate-500 font-mono">
-                      <span>+{item.purchasedKg} / -{item.consumedKg}</span>
-                      {isAdmin && item.avgRatePerKg > 0 && (
-                        <span className="font-semibold text-slate-700">Rs.{Math.round(item.avgRatePerKg)}/kg</span>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* Main Workspace: Left Ledger + Right Sticky Action Forms */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-
-          {/* Left 7 Cols: Searchable, Filterable & Paginated Transaction Ledger */}
-          <div className="lg:col-span-7 bg-white rounded-2xl shadow-xs border border-slate-200/90 overflow-hidden">
-            <div className="px-5 py-3.5 border-b border-slate-100 bg-slate-50/70 space-y-3">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div>
-                  <h2 className="font-bold text-slate-900 text-sm">
-                    {selectedSpeciesFilter === 'All'
-                      ? 'Purchase & Stock-Out Ledger'
-                      : `${selectedSpeciesFilter} Feed Ledger`}
-                  </h2>
-                  <p className="text-[11px] text-slate-500">
-                    Page {safePage} of {totalDbPages} • Showing {filteredLedgerLogs.length} of {pagedFeedLogs.length} on page
-                  </p>
-                </div>
-
-                {/* Type & Allocation Filter Pills */}
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <Link
-                    href={buildFeedUrl({
-                      species: selectedSpeciesFilter,
-                      entryType: 'All',
-                      alloc: 'All',
-                      q: searchQuery,
-                      splitDate: params.splitDate,
-                      page: 1,
-                    })}
-                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
-                      selectedEntryType === 'All' && selectedAllocFilter === 'All'
-                        ? 'bg-slate-900 text-white'
-                        : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
-                    }`}
-                  >
-                    All
-                  </Link>
-                  <Link
-                    href={buildFeedUrl({
-                      species: selectedSpeciesFilter,
-                      entryType: 'Purchase',
-                      alloc: selectedAllocFilter,
-                      q: searchQuery,
-                      splitDate: params.splitDate,
-                      page: 1,
-                    })}
-                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
-                      selectedEntryType === 'Purchase'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
-                    }`}
-                  >
-                    Stock In
-                  </Link>
-                  <Link
-                    href={buildFeedUrl({
-                      species: selectedSpeciesFilter,
-                      entryType: 'Consumption',
-                      alloc: 'All',
-                      q: searchQuery,
-                      splitDate: params.splitDate,
-                      page: 1,
-                    })}
-                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
-                      selectedEntryType === 'Consumption'
-                        ? 'bg-purple-600 text-white'
-                        : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
-                    }`}
-                  >
-                    Stock Out
-                  </Link>
-                  {isAdmin && (
-                    <Link
-                      href={buildFeedUrl({
-                        species: selectedSpeciesFilter,
-                        entryType: 'Consumption',
-                        alloc: selectedAllocFilter === 'Pending' ? 'All' : 'Pending',
-                        q: searchQuery,
-                        splitDate: params.splitDate,
-                        page: 1,
-                      })}
-                      className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ${
-                        selectedAllocFilter === 'Pending'
-                          ? 'bg-amber-600 text-white'
-                          : 'bg-white border border-amber-200 text-amber-800 hover:bg-amber-50'
-                      }`}
-                    >
-                      Pending Split
-                    </Link>
-                  )}
-                </div>
-              </div>
-
-              {/* Search Bar */}
-              <form method="GET" action="/feed" className="flex items-center gap-2">
-                {selectedSpeciesFilter !== 'All' && (
-                  <input type="hidden" name="species" value={selectedSpeciesFilter} />
-                )}
-                {selectedEntryType !== 'All' && (
-                  <input type="hidden" name="entryType" value={selectedEntryType} />
-                )}
-                {selectedAllocFilter !== 'All' && (
-                  <input type="hidden" name="alloc" value={selectedAllocFilter} />
-                )}
-                {params.splitDate && (
-                  <input type="hidden" name="splitDate" value={params.splitDate} />
-                )}
-                <input
-                  type="text"
-                  name="q"
-                  defaultValue={searchQuery}
-                  placeholder="Search ration item, vendor/notes, date, or cost..."
-                  className="flex-1 px-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs text-slate-900 focus:ring-2 focus:ring-emerald-600"
-                />
-                <button
-                  type="submit"
-                  className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold transition"
-                >
-                  Search
-                </button>
-                {hasLedgerFilters && (
-                  <Link
-                    href={buildFeedUrl({
-                      species: selectedSpeciesFilter,
-                      splitDate: params.splitDate,
-                      page: 1,
-                    })}
-                    className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition"
-                  >
-                    Reset
-                  </Link>
-                )}
-              </form>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-slate-100">
-                <thead className="bg-slate-50/80">
-                  <tr>
-                    <th className="px-4 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">Date</th>
-                    <th className="px-4 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">Item &amp; Type</th>
-                    <th className="px-4 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">Qty</th>
-                    <th className="px-4 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider">Cost / Split</th>
-                    {isAdmin && <th className="px-4 py-2.5 text-right text-[10px] font-bold text-slate-500 uppercase tracking-wider">Action</th>}
-                  </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-slate-100">
-                  {filteredLedgerLogs.length > 0 ? (
-                    filteredLedgerLogs.map((log) => {
-                      const isPurchase = log.entry_type === 'Purchase' || !log.entry_type
-                      const speciesLabel = log.target_species || 'Goat'
-                      return (
-                        <tr key={log.id} className="hover:bg-slate-50/90 transition-colors">
-                          <td className="px-4 py-3 whitespace-nowrap text-xs font-mono text-slate-700">
-                            {formatDateDDMMYYYY(log.log_date)}
-                          </td>
-                          <td className="px-4 py-3">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className="text-xs font-bold text-slate-900">{log.feed_type}</span>
-                              <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase rounded bg-slate-900 text-white">
-                                {speciesLabel}
-                              </span>
-                              <span className={`px-1.5 py-0.5 text-[9px] font-semibold rounded-full ${
-                                isPurchase
-                                  ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                                  : 'bg-purple-50 text-purple-700 border border-purple-200'
-                              }`}>
-                                {isPurchase ? 'Stock In' : 'Stock Out'}
-                              </span>
-                            </div>
-                            {log.notes && <div className="text-[11px] text-slate-400 mt-0.5">{log.notes}</div>}
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap text-xs font-mono font-semibold text-slate-800">
-                            {Number(log.quantity_kg).toFixed(1)} kg
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap">
-                            <div className="text-xs font-bold font-mono text-slate-900">
-                              Rs. {Number(log.total_cost || 0).toLocaleString()}
-                            </div>
-                            {!isPurchase && isAdmin && (
-                              <span className={`text-[10px] font-semibold ${
-                                log.is_allocated ? 'text-emerald-600' : 'text-amber-600'
-                              }`}>
-                                {log.is_allocated ? '✓ Allocated' : '• Pending Split'}
-                              </span>
-                            )}
-                          </td>
-                          {isAdmin && (
-                            <td className="px-4 py-3 whitespace-nowrap text-right">
-                              <form action={deleteFeedLog} className="inline-block">
-                                <input type="hidden" name="logId" value={log.id} />
-                                <button
-                                  type="submit"
-                                  className="px-2 py-1 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-[11px] font-semibold transition"
-                                >
-                                  Delete
-                                </button>
-                              </form>
-                            </td>
-                          )}
-                        </tr>
-                      )
-                    })
-                  ) : (
-                    <tr>
-                      <td colSpan={isAdmin ? 5 : 4} className="px-6 py-10 text-center text-sm text-slate-400">
-                        No feed records found for this filter.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Pagination Footer */}
-            {(pagedTotalCount ?? 0) > 0 && (
-              <div className="px-5 py-3 border-t border-slate-100 bg-slate-50/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
-                <span className="text-slate-500">
-                  Page <strong className="text-slate-800">{safePage}</strong> of{' '}
-                  <strong className="text-slate-800">{totalDbPages}</strong>
-                </span>
-
-                <div className="flex items-center gap-2">
-                  {safePage > 1 ? (
-                    <Link
-                      href={buildFeedUrl({
-                        species: selectedSpeciesFilter,
-                        entryType: selectedEntryType,
-                        alloc: selectedAllocFilter,
-                        q: searchQuery,
-                        splitDate: params.splitDate,
-                        page: safePage - 1,
-                      })}
-                      className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 font-semibold rounded-lg border border-slate-200 transition"
-                    >
-                      ← Previous
-                    </Link>
-                  ) : (
-                    <span className="px-3 py-1.5 bg-slate-100 text-slate-400 font-semibold rounded-lg border border-slate-200 cursor-not-allowed">
-                      ← Previous
-                    </span>
-                  )}
-
-                  {safePage < totalDbPages ? (
-                    <Link
-                      href={buildFeedUrl({
-                        species: selectedSpeciesFilter,
-                        entryType: selectedEntryType,
-                        alloc: selectedAllocFilter,
-                        q: searchQuery,
-                        splitDate: params.splitDate,
-                        page: safePage + 1,
-                      })}
-                      className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 font-semibold rounded-lg border border-slate-200 transition"
-                    >
-                      Next →
-                    </Link>
-                  ) : (
-                    <span className="px-3 py-1.5 bg-slate-100 text-slate-400 font-semibold rounded-lg border border-slate-200 cursor-not-allowed">
-                      Next →
-                    </span>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Right 5 Cols: Sticky Quick-Entry & Write-off Forms */}
-          <FeedActionFormsClient
-            speciesOptions={SPECIES_OPTIONS}
-            defaultSpecies={selectedSpeciesFilter !== 'All' ? selectedSpeciesFilter : 'Goat'}
-            todayStr={todayStr}
-            isAdmin={isAdmin}
-            addFeedLogAction={addFeedLog}
-            adjustFeedStockAction={adjustFeedStock}
-          />
-        </div>
-      </div>
-    </div>
+    <FeedCommandCenterClient
+      farmName={farm?.farm_name || 'Livestock ERP'}
+      role={role || 'staff'}
+      isAdmin={isAdmin}
+      todayStr={todayStr}
+      speciesOptions={SPECIES_OPTIONS}
+      dynamicFeedSuggestions={dynamicFeedSuggestions}
+      allFeedLogs={allFeedLogs}
+      activeAnimals={activeAnimals}
+      thresholdByFeedName={thresholdByFeedName}
+      initialSpeciesFilter={selectedSpeciesFilter}
+      initialEntryType={selectedEntryType}
+      initialAllocFilter={selectedAllocFilter}
+      initialSearchQuery={searchQuery}
+      initialFromDate={fromDateFilter}
+      initialToDate={toDateFilter}
+      initialLowOnly={lowStockOnlyFilter}
+      initialSplitDate={(params.splitDate || todayStr).split('T')[0]}
+      statusMsg={statusMsg ? decodeURIComponent(statusMsg) : ''}
+      errorMsg={loadErrorMsg ? decodeURIComponent(loadErrorMsg) : ''}
+      undoPayload={undoPayloadEncoded}
+      addFeedLogAction={addFeedLog}
+      deleteFeedLogAction={deleteFeedLog}
+      restoreFeedLogAction={restoreFeedLog}
+      adjustFeedStockAction={adjustFeedStock}
+      allocateFeedCostAction={allocateFeedCostToAnimals}
+    />
   )
 }

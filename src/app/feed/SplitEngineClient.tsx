@@ -30,6 +30,7 @@ export default function SplitEngineClient({
   const router = useRouter()
   const searchParams = useSearchParams()
   const [ledgerDate, setLedgerDate] = useState(initialSplitDate)
+  const [isSplitting, setIsSplitting] = useState(false)
 
   const speciesWithPendingPools = Object.keys(unallocatedBySpecies)
   const cutoffStr = String(ledgerDate || initialSplitDate).split('T')[0]
@@ -66,7 +67,7 @@ export default function SplitEngineClient({
   const hasPendingForSelected = activePool > 0
 
   const handleSubmitConfirm = (e: React.FormEvent<HTMLFormElement>) => {
-    if (!hasPendingForSelected) {
+    if (!hasPendingForSelected || isSplitting) {
       e.preventDefault()
       return
     }
@@ -75,11 +76,13 @@ export default function SplitEngineClient({
     )
     if (!ok) {
       e.preventDefault()
+      return
     }
+    setIsSplitting(true)
   }
 
   return (
-    <div className="bg-slate-900 text-white rounded-2xl shadow-md p-6 border border-slate-800">
+    <div className="bg-slate-900 text-white rounded-2xl shadow-md p-6 border border-slate-800 print:hidden">
       <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
         <div className="space-y-2 max-w-xl">
           <div className="flex items-center gap-2">
@@ -188,10 +191,14 @@ export default function SplitEngineClient({
               <div className="flex items-end">
                 <button
                   type="submit"
-                  disabled={!hasPendingForSelected}
+                  disabled={!hasPendingForSelected || isSplitting}
                   className="w-full py-2 px-3 bg-amber-400 hover:bg-amber-300 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-bold rounded-xl text-xs transition shadow-sm"
                 >
-                  {hasPendingForSelected ? 'Run Species Split' : 'No pending Consumption cost to split'}
+                  {isSplitting
+                    ? 'Saving...'
+                    : hasPendingForSelected
+                    ? 'Run Species Split'
+                    : 'No pending Consumption cost to split'}
                 </button>
               </div>
             </div>
