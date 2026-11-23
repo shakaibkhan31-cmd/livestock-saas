@@ -982,7 +982,7 @@ export default function FeedCommandCenterClient({
 
                     <div className="mt-1.5 pt-1.5 border-t border-slate-200/70 flex items-center justify-between text-[10px] text-slate-500 font-mono">
                       <span>
-                        +{item.purchasedKg} / -{item.consumedKg}
+                        +{item.purchasedKg.toFixed(1)} / -{item.consumedKg.toFixed(1)}
                       </span>
                       {isAdmin && item.avgRatePerKg > 0 && (
                         <span className="font-semibold text-slate-700">
