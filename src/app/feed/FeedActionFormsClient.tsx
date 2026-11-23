@@ -21,7 +21,7 @@ interface FeedActionFormsClientProps {
   todayStr: string
   isAdmin: boolean
   addFeedLogAction: (formData: FormData) => void | Promise<void>
-  adjustFeedStockAction?: (formData: FormData) => void | Promise<void>
+  adjustFeedStockAction: (formData: FormData) => void | Promise<void>
 }
 
 export default function FeedActionFormsClient({
@@ -30,6 +30,7 @@ export default function FeedActionFormsClient({
   todayStr,
   isAdmin,
   addFeedLogAction,
+  adjustFeedStockAction,
 }: FeedActionFormsClientProps) {
   const [purchaseRows, setPurchaseRows] = useState<PurchaseRowItem[]>([
     { id: 1, feed_type: '', quantity_kg: '', total_cost: '' },
@@ -38,6 +39,13 @@ export default function FeedActionFormsClient({
   const [adjRows, setAdjRows] = useState<AdjustmentRowItem[]>([
     { id: 1, feed_type: '', target_remaining_kg: '0' },
   ])
+
+  const [adjustmentReason, setAdjustmentReason] = useState<string>('consumption')
+  const [adjNotes, setAdjNotes] = useState<string>('')
+  const [isSavingPurchase, setIsSavingPurchase] = useState(false)
+  const [isSavingAdjustment, setIsSavingAdjustment] = useState(false)
+
+  const isWriteOff = adjustmentReason.startsWith('writeoff')
 
   const liveBillTotal = purchaseRows.reduce((sum, row) => {
     const val = parseFloat(row.total_cost) || 0
@@ -86,6 +94,41 @@ export default function FeedActionFormsClient({
     )
   }
 
+  const handlePurchaseSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    if (isSavingPurchase) {
+      e.preventDefault()
+      return
+    }
+    const ok = window.confirm(
+      `Save Bulk Purchase for ${defaultSpecies}? Bill Total: Rs. ${liveBillTotal.toLocaleString()}. This amount will be deducted from OPERATING wallet.`
+    )
+    if (!ok) {
+      e.preventDefault()
+      return
+    }
+    setIsSavingPurchase(true)
+  }
+
+  const handleAdjustmentSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    if (isSavingAdjustment) {
+      e.preventDefault()
+      return
+    }
+    if (isWriteOff && !adjNotes.trim()) {
+      e.preventDefault()
+      window.alert('Write-off requires a reason in Notes — e.g. Spoiled, Theft, Expired.')
+      return
+    }
+    const ok = window.confirm(
+      `Apply stock adjustment? This will create Consumption entries. Consumption entries go to Pending Split Pool unless you selected Write-off.`
+    )
+    if (!ok) {
+      e.preventDefault()
+      return
+    }
+    setIsSavingAdjustment(true)
+  }
+
   return (
     <div className="lg:col-span-5 space-y-5 lg:sticky lg:top-6">
       {/* Card A: Record Bulk Purchase (Stock-In) */}
@@ -97,19 +140,20 @@ export default function FeedActionFormsClient({
           <div>
             <h2 className="text-sm font-bold text-slate-900">Record Bulk Purchase</h2>
             <p className="text-[11px] text-slate-500">
-              Add ration stock-in &amp; deduct operating wallet
+              Add ration stock-in and deduct from OPERATING wallet
             </p>
           </div>
           <button
             type="button"
+            disabled={isSavingPurchase}
             onClick={handleAddPurchaseRow}
-            className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1 rounded-lg border border-emerald-200 transition"
+            className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 disabled:opacity-40 disabled:cursor-not-allowed bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1 rounded-lg border border-emerald-200 transition"
           >
             + Add Item
           </button>
         </div>
 
-        <form action={addFeedLogAction} className="space-y-3.5">
+        <form action={addFeedLogAction} onSubmit={handlePurchaseSubmit} className="space-y-3.5">
           <div className="grid grid-cols-2 gap-2.5">
             <div>
               <label className="block text-[11px] font-semibold text-slate-700 mb-1">
@@ -118,6 +162,7 @@ export default function FeedActionFormsClient({
               <select
                 name="target_species"
                 defaultValue={defaultSpecies}
+                disabled={isSavingPurchase}
                 className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold text-slate-900 focus:bg-white focus:ring-2 focus:ring-emerald-600"
               >
                 {speciesOptions.map(sp => (
@@ -137,6 +182,7 @@ export default function FeedActionFormsClient({
                 type="date"
                 required
                 defaultValue={todayStr}
+                disabled={isSavingPurchase}
                 className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900 focus:bg-white focus:ring-2 focus:ring-emerald-600"
               />
             </div>
@@ -154,6 +200,7 @@ export default function FeedActionFormsClient({
                     type="text"
                     list="common-feeds"
                     required
+                    disabled={isSavingPurchase}
                     value={row.feed_type}
                     onChange={e => handlePurchaseChange(row.id, 'feed_type', e.target.value)}
                     placeholder="Ration item (e.g., Channa Chilka)"
@@ -162,9 +209,10 @@ export default function FeedActionFormsClient({
                   {purchaseRows.length > 1 && (
                     <button
                       type="button"
+                      disabled={isSavingPurchase}
                       onClick={() => handleRemovePurchaseRow(row.id)}
                       aria-label={`Remove purchase item ${index + 1}`}
-                      className="px-2 py-1 text-xs font-bold text-rose-600 hover:bg-rose-50 rounded-lg"
+                      className="px-2 py-1 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg"
                     >
                       ×
                     </button>
@@ -177,9 +225,10 @@ export default function FeedActionFormsClient({
                     step="0.1"
                     min="0.1"
                     required
+                    disabled={isSavingPurchase}
                     value={row.quantity_kg}
                     onChange={e => handlePurchaseChange(row.id, 'quantity_kg', e.target.value)}
-                    placeholder="Qty (KG)"
+                    placeholder="Qty (kg)"
                     className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-emerald-600"
                   />
                   <input
@@ -188,9 +237,10 @@ export default function FeedActionFormsClient({
                     step="1"
                     min="1"
                     required
+                    disabled={isSavingPurchase}
                     value={row.total_cost}
                     onChange={e => handlePurchaseChange(row.id, 'total_cost', e.target.value)}
-                    placeholder="Cost (PKR)"
+                    placeholder="Cost (Rs.)"
                     className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 focus:ring-2 focus:ring-emerald-600"
                   />
                 </div>
@@ -214,6 +264,7 @@ export default function FeedActionFormsClient({
             <input
               name="notes"
               type="text"
+              disabled={isSavingPurchase}
               placeholder="e.g., Afzaal Memon Traders"
               className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900 focus:bg-white focus:ring-2 focus:ring-emerald-600"
             />
@@ -221,9 +272,10 @@ export default function FeedActionFormsClient({
 
           <button
             type="submit"
-            className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl transition font-semibold text-xs sm:text-sm shadow-xs"
+            disabled={isSavingPurchase}
+            className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl transition font-semibold text-xs sm:text-sm shadow-xs"
           >
-            Save Bulk Purchase(s)
+            {isSavingPurchase ? 'Saving...' : 'Save Bulk Purchase(s)'}
           </button>
         </form>
       </div>
@@ -238,19 +290,24 @@ export default function FeedActionFormsClient({
             <div>
               <h2 className="text-sm font-bold text-slate-900">Stock Adjustment / Closing</h2>
               <p className="text-[11px] text-slate-500">
-                Enter remaining physical kg (logs consumption pool or stock correction)
+                Enter remaining physical kg. Consumption goes to Split Pool. Write-off goes to Loss Ledger.
               </p>
             </div>
             <button
               type="button"
+              disabled={isSavingAdjustment}
               onClick={handleAddAdjRow}
-              className="text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded-lg border border-slate-300 transition"
+              className="text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 disabled:opacity-40 disabled:cursor-not-allowed px-2.5 py-1 rounded-lg border border-slate-300 transition"
             >
               + Add Item
             </button>
           </div>
 
-          <form action="/api/feed/adjust-stock" method="POST" className="space-y-3.5">
+          <form
+            action={adjustFeedStockAction}
+            onSubmit={handleAdjustmentSubmit}
+            className="space-y-3.5"
+          >
             <div className="grid grid-cols-2 gap-2.5">
               <div>
                 <label className="block text-[11px] font-semibold text-slate-700 mb-1">
@@ -259,6 +316,7 @@ export default function FeedActionFormsClient({
                 <select
                   name="target_species"
                   defaultValue={defaultSpecies}
+                  disabled={isSavingAdjustment}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold text-slate-900"
                 >
                   {speciesOptions.map(sp => (
@@ -278,6 +336,7 @@ export default function FeedActionFormsClient({
                   type="date"
                   required
                   defaultValue={todayStr}
+                  disabled={isSavingAdjustment}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
                 />
               </div>
@@ -285,12 +344,50 @@ export default function FeedActionFormsClient({
 
             <div>
               <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                Reason / Label
+                Adjustment Type *
+              </label>
+              <select
+                name="adjustment_reason"
+                required
+                value={adjustmentReason}
+                disabled={isSavingAdjustment}
+                onChange={e => setAdjustmentReason(e.target.value)}
+                className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
+              >
+                <option value="consumption">
+                  Consumption — Fed to Animals (Goes to Pending Split Pool)
+                </option>
+                <option value="writeoff_spoiled">
+                  Write-off — Spoiled / Damaged (Does NOT go to Split Pool)
+                </option>
+                <option value="writeoff_theft">
+                  Write-off — Theft / Loss (Does NOT go to Split Pool)
+                </option>
+                <option value="writeoff_expired">
+                  Write-off — Expired (Does NOT go to Split Pool)
+                </option>
+              </select>
+              <p className="text-[11px] text-slate-500 mt-1">
+                Consumption = animals ate it, will be split. Write-off = wasted/stolen, will show in Ledger as Loss, will NOT be split.
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                Reason / Notes {isWriteOff ? '*' : ''}
               </label>
               <input
                 name="notes"
                 type="text"
-                defaultValue="Weekly Closing Adjustment"
+                required={isWriteOff}
+                disabled={isSavingAdjustment}
+                value={adjNotes}
+                onChange={e => setAdjNotes(e.target.value)}
+                placeholder={
+                  isWriteOff
+                    ? 'Required: e.g., Spoiled by rain, Theft, Expired'
+                    : 'e.g., Physical Stock Count'
+                }
                 className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900"
               />
             </div>
@@ -307,6 +404,7 @@ export default function FeedActionFormsClient({
                       type="text"
                       list="common-feeds"
                       required
+                      disabled={isSavingAdjustment}
                       value={row.feed_type}
                       onChange={e => handleAdjChange(row.id, 'feed_type', e.target.value)}
                       placeholder="Item name"
@@ -320,11 +418,12 @@ export default function FeedActionFormsClient({
                       step="0.1"
                       min="0"
                       required
+                      disabled={isSavingAdjustment}
                       value={row.target_remaining_kg}
                       onChange={e =>
                         handleAdjChange(row.id, 'target_remaining_kg', e.target.value)
                       }
-                      title="Remaining Physical KG"
+                      title="Remaining Physical kg"
                       className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900"
                     />
                   </div>
@@ -333,9 +432,10 @@ export default function FeedActionFormsClient({
                     {adjRows.length > 1 && (
                       <button
                         type="button"
+                        disabled={isSavingAdjustment}
                         onClick={() => handleRemoveAdjRow(row.id)}
                         aria-label={`Remove adjustment item ${idx + 1}`}
-                        className="px-1.5 py-0.5 text-xs font-bold text-rose-600 hover:bg-rose-50 rounded-lg"
+                        className="px-1.5 py-0.5 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg"
                       >
                         ×
                       </button>
@@ -345,20 +445,12 @@ export default function FeedActionFormsClient({
               ))}
             </div>
 
-            <label className="flex items-center gap-2 text-[11px] text-slate-700 bg-slate-50 px-3 py-2 rounded-xl border border-slate-200 cursor-pointer">
-              <input
-                type="checkbox"
-                name="already_allocated"
-                className="rounded border-slate-300 text-slate-900 focus:ring-slate-900"
-              />
-              <span>Cost already allocated (do not add to Pending Consumption Pool)</span>
-            </label>
-
             <button
               type="submit"
-              className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl transition font-semibold text-xs shadow-xs"
+              disabled={isSavingAdjustment}
+              className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl transition font-semibold text-xs shadow-xs"
             >
-              Apply Stock Adjustments
+              {isSavingAdjustment ? 'Saving...' : 'Apply Stock Adjustments'}
             </button>
           </form>
         </div>

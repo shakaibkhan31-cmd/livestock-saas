@@ -525,7 +525,7 @@ export default async function FeedManagementPage({
     }
   }
 
-  // SERVER ACTION 3: Stock Adjustment (Decrease-Only Core Logic Unchanged)
+  // SERVER ACTION 3: Stock Adjustment (Decrease-Only + Consumption vs Write-off)
   const adjustFeedStock = async (formData: FormData) => {
     'use server'
     try {
@@ -537,7 +537,17 @@ export default async function FeedManagementPage({
       const target_species = String(formData.get('target_species') || 'Goat').trim() || 'Goat'
       const rawDate = String(formData.get('log_date') || '').trim()
       const log_date = /^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? rawDate : getKarachiDate()
-      const notes = String(formData.get('notes') || '').trim() || 'Stock Adjustment - Physical Count'
+      const adjustmentReason = String(formData.get('adjustment_reason') || 'consumption').trim()
+      const isWriteOff = adjustmentReason.startsWith('writeoff')
+      const rawNotes = String(formData.get('notes') || '').trim()
+
+      if (isWriteOff && !rawNotes) {
+        return redirect(
+          `/feed?error=${encodeURIComponent('Write-off requires a reason in Notes — e.g. Spoiled, Theft, Expired.')}`
+        )
+      }
+
+      const notes = rawNotes || 'Stock Adjustment - Physical Count'
 
       const feedTypes = formData.getAll('feed_type').map(v => String(v || ''))
       const targetQuantities = formData.getAll('target_remaining_kg').map(v => String(v || ''))
@@ -595,6 +605,10 @@ export default async function FeedManagementPage({
 
         if (diff > 0) {
           const adjustedCost = avgRatePerKg > 0 ? Math.round(avgRatePerKg * diff) : 0
+          const formattedNotes = isWriteOff
+            ? `Write-off: ${adjustmentReason} — ${notes} (${currentRemaining.toFixed(1)}kg -> ${targetRemainingKg.toFixed(1)}kg)`
+            : `${notes} (${currentRemaining.toFixed(1)}kg -> ${targetRemainingKg.toFixed(1)}kg)`
+
           adjustmentsToInsert.push({
             farm_id: authFarm.id,
             target_species,
@@ -603,8 +617,8 @@ export default async function FeedManagementPage({
             quantity_kg: diff,
             total_cost: adjustedCost,
             log_date,
-            notes: `${notes} (${currentRemaining.toFixed(1)}kg -> ${targetRemainingKg.toFixed(1)}kg)`,
-            is_allocated: false,
+            notes: formattedNotes,
+            is_allocated: isWriteOff ? true : false,
           })
         }
       }
