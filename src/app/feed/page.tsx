@@ -1,5 +1,6 @@
 import { createClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
+import { revalidatePath } from 'next/cache'
 import { getUserFarmAndRole } from '@/utils/rbac'
 import FeedCommandCenterClient from './FeedCommandCenterClient'
 
@@ -89,6 +90,47 @@ const DEFAULT_FEED_SUGGESTIONS = [
   'Rabbit Pellets / Dry Lucerne',
 ]
 
+const DEFAULT_THRESHOLDS_BY_KEY: Record<string, number> = {
+  'mineral mixture & dcp': 1,
+  'mineral mixture': 1,
+  'dcp': 1,
+  'maymil milk powder': 2,
+  'maymil': 2,
+  'bhoosa': 50,
+  'kala chana': 15,
+  'channa chilka': 20,
+  'soya bean chilka': 20,
+  'gandum (wheat)': 15,
+  'gandum': 15,
+  'gandum daliya': 15,
+  'chokar (wheat bran)': 25,
+  'alfalfa hay / lucerne': 25,
+  'alfalfa hay': 25,
+  'mong phalli missa': 15,
+  'mix dana / wanda': 25,
+  'khal': 20,
+  'jau (barley)': 15,
+  'makai (maize)': 15,
+  'chicken starter / layer feed': 15,
+  'rabbit pellets / dry lucerne': 10,
+}
+
+const DEFAULT_FALLBACK_THRESHOLD_KG = 10
+
+function getDefaultThresholdForFeed(feedName: string): number {
+  const key = String(feedName || '').trim().toLowerCase()
+  if (!key) return DEFAULT_FALLBACK_THRESHOLD_KG
+  if (DEFAULT_THRESHOLDS_BY_KEY[key] !== undefined) {
+    return DEFAULT_THRESHOLDS_BY_KEY[key]
+  }
+  for (const [k, val] of Object.entries(DEFAULT_THRESHOLDS_BY_KEY)) {
+    if (key.includes(k) || k.includes(key)) {
+      return val
+    }
+  }
+  return DEFAULT_FALLBACK_THRESHOLD_KG
+}
+
 export default async function FeedManagementPage({
   searchParams,
 }: {
@@ -133,9 +175,10 @@ export default async function FeedManagementPage({
   let allFeedLogs: Array<Record<string, any>> = []
   let activeAnimals: ActiveAnimalRow[] = []
   let inventoryRows: Array<Record<string, any>> = []
+  let thresholdRows: Array<Record<string, any>> = []
 
   try {
-    const [logsRes, animalsRes, invRes] = await Promise.all([
+    const [logsRes, animalsRes, invRes, threshRes] = await Promise.all([
       supabase
         .from('feed_logs')
         .select('*')
@@ -149,6 +192,10 @@ export default async function FeedManagementPage({
       supabase
         .from('feed_inventory')
         .select('*')
+        .eq('farm_id', farm.id),
+      supabase
+        .from('feed_thresholds')
+        .select('feed_name, min_stock_kg')
         .eq('farm_id', farm.id),
     ])
 
@@ -167,6 +214,10 @@ export default async function FeedManagementPage({
     if (!invRes.error) {
       inventoryRows = invRes.data || []
     }
+
+    if (!threshRes.error) {
+      thresholdRows = threshRes.data || []
+    }
   } catch (err: unknown) {
     if (isNextRedirectError(err)) throw err
     loadErrorMsg =
@@ -174,22 +225,31 @@ export default async function FeedManagementPage({
       (err instanceof Error ? err.message : 'Failed loading feed data from the database.')
   }
 
-  // Auto-learn custom feed names from entries + inventory + defaults
+  // Auto-learn custom feed names from entries + inventory + thresholds + defaults
   const dynamicFeedSuggestions = Array.from(
     new Set([
       ...DEFAULT_FEED_SUGGESTIONS,
       ...allFeedLogs.map(l => String(l.feed_type || '').trim()).filter(Boolean),
       ...inventoryRows.map(r => String(r.feed_name || r.item_name || '').trim()).filter(Boolean),
+      ...thresholdRows.map(t => String(t.feed_name || '').trim()).filter(Boolean),
     ])
   ).sort()
 
-  // Map low_stock_threshold_kg from public.feed_inventory by feed name
-  const thresholdByFeedName: Record<string, number> = {}
-  inventoryRows.forEach(row => {
-    const nameKey = String(row.feed_name || row.item_name || '').trim().toLowerCase()
-    if (nameKey && row.low_stock_threshold_kg !== null && row.low_stock_threshold_kg !== undefined) {
-      thresholdByFeedName[nameKey] = Number(row.low_stock_threshold_kg) || 50
+  // Build thresholdByFeedName: DB value if exists, else DEFAULT_THRESHOLDS[feed], else 10
+  const dbThresholdMap: Record<string, number> = {}
+  thresholdRows.forEach(row => {
+    const key = String(row.feed_name || '').trim().toLowerCase()
+    const numVal = Number(row.min_stock_kg)
+    if (key && Number.isFinite(numVal) && numVal >= 0) {
+      dbThresholdMap[key] = numVal
     }
+  })
+
+  const thresholdByFeedName: Record<string, number> = {}
+  dynamicFeedSuggestions.forEach(feedName => {
+    const key = feedName.trim().toLowerCase()
+    thresholdByFeedName[key] =
+      dbThresholdMap[key] !== undefined ? dbThresholdMap[key] : getDefaultThresholdForFeed(feedName)
   })
 
   // Helper to sync weighted average rate & closing stock into public.feed_inventory per species
@@ -233,6 +293,8 @@ export default async function FeedManagementPage({
 
     const closingBalanceKg = Number((purchKg - consKg).toFixed(2))
     const weightedAvgRate = purchKg > 0 ? Number((purchCost / purchKg).toFixed(2)) : 0
+    const effectiveThreshold =
+      dbThresholdMap[cleanFeedName.toLowerCase()] ?? getDefaultThresholdForFeed(cleanFeedName)
 
     const { data: existingInv, error: selInvErr } = await supabaseClient
       .from('feed_inventory')
@@ -256,6 +318,7 @@ export default async function FeedManagementPage({
           current_stock_kg: closingBalanceKg,
           cost_per_kg: weightedAvgRate,
           unit_cost_per_kg: weightedAvgRate,
+          low_stock_threshold_kg: effectiveThreshold,
           stock_check_date: dateStr,
           notes: noteText,
         })
@@ -274,11 +337,68 @@ export default async function FeedManagementPage({
           current_stock_kg: closingBalanceKg,
           cost_per_kg: weightedAvgRate,
           unit_cost_per_kg: weightedAvgRate,
-          low_stock_threshold_kg: 50,
+          low_stock_threshold_kg: effectiveThreshold,
           stock_check_date: dateStr,
           notes: noteText,
         },
       ])
+    }
+  }
+
+  // SERVER ACTION: Upsert Low Stock Threshold (Admin Only)
+  const updateFeedThreshold = async (formData: FormData) => {
+    'use server'
+    try {
+      const { user: authUser, farm: authFarm, role: authRole } = await getUserFarmAndRole()
+      if (!authUser || !authFarm || authRole !== 'admin') {
+        return redirect(`/feed?error=${encodeURIComponent('Unauthorized: Administrator access is required.')}`)
+      }
+
+      const feedName = String(formData.get('feed_name') || '').trim()
+      const minStockRaw = Number(formData.get('min_stock_kg'))
+
+      if (!feedName) {
+        return redirect(`/feed?error=${encodeURIComponent('Please select or enter a valid feed name.')}`)
+      }
+
+      if (!Number.isFinite(minStockRaw) || minStockRaw < 0) {
+        return redirect(`/feed?error=${encodeURIComponent('Minimum stock must be 0 kg or greater.')}`)
+      }
+
+      const minStockKg = Number(minStockRaw.toFixed(2))
+      const supabaseClient = await createClient()
+
+      const { error: upsertErr } = await supabaseClient
+        .from('feed_thresholds')
+        .upsert(
+          {
+            farm_id: authFarm.id,
+            feed_name: feedName,
+            min_stock_kg: minStockKg,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'farm_id,feed_name' }
+        )
+
+      if (upsertErr) {
+        return redirect(`/feed?error=${encodeURIComponent(upsertErr.message)}`)
+      }
+
+      await supabaseClient
+        .from('feed_inventory')
+        .update({ low_stock_threshold_kg: minStockKg })
+        .eq('farm_id', authFarm.id)
+        .ilike('feed_name', feedName)
+
+      revalidatePath('/feed')
+
+      return redirect(
+        `/feed?msg=${encodeURIComponent(`Updated minimum stock threshold for ${feedName} to ${minStockKg} kg.`)}`
+      )
+    } catch (err: unknown) {
+      if (isNextRedirectError(err)) throw err
+      const msg = err instanceof Error ? err.message : 'Unexpected error while updating threshold.'
+      return redirect(`/feed?error=${encodeURIComponent(msg)}`)
     }
   }
 
@@ -860,6 +980,7 @@ export default async function FeedManagementPage({
       restoreFeedLogAction={restoreFeedLog}
       adjustFeedStockAction={adjustFeedStock}
       allocateFeedCostAction={allocateFeedCostToAnimals}
+      updateFeedThresholdAction={updateFeedThreshold}
     />
   )
 }
