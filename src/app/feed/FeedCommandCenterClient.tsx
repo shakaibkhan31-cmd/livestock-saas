@@ -916,6 +916,11 @@ export default function FeedCommandCenterClient({
                 <span className="text-[11px] font-mono text-slate-400">
                   {displayedInventory.length} of {inventoryList.length} items
                 </span>
+                {isAdmin && (
+  <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-lg">
+    Total Stock Value: Rs. {Math.round(displayedInventory.reduce((sum, item) => sum + Math.max(0, item.remainingKg) * item.avgRatePerKg, 0)).toLocaleString('en-PK')}
+  </span>
+)}
               </div>
             </div>
 
