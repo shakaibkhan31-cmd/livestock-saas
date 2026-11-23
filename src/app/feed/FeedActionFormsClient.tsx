@@ -345,6 +345,15 @@ export default function FeedActionFormsClient({
               ))}
             </div>
 
+            <label className="flex items-center gap-2 text-[11px] text-slate-700 bg-slate-50 px-3 py-2 rounded-xl border border-slate-200 cursor-pointer">
+              <input
+                type="checkbox"
+                name="already_allocated"
+                className="rounded border-slate-300 text-slate-900 focus:ring-slate-900"
+              />
+              <span>Cost already allocated (do not add to Pending Consumption Pool)</span>
+            </label>
+
             <button
               type="submit"
               className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl transition font-semibold text-xs shadow-xs"

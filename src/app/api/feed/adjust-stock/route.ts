@@ -117,6 +117,7 @@ export async function POST(req: NextRequest) {
     const rawDate = String(formData.get('log_date') || '').trim()
     const log_date = /^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? rawDate : getKarachiDate()
     const notes = String(formData.get('notes') || '').trim() || 'Closing Stock Adjustment'
+    const markAlreadyAllocated = formData.get('already_allocated') === 'on'
 
     const feedTypes = formData.getAll('feed_type').map(v => String(v || ''))
     const targetQuantities = formData.getAll('target_remaining_kg').map(v => String(v || ''))
@@ -179,7 +180,8 @@ export async function POST(req: NextRequest) {
           total_cost: adjustedCost,
           log_date,
           notes: `${notes} (${currentRemaining.toFixed(1)}kg -> ${targetRemainingKg.toFixed(1)}kg)`,
-          is_allocated: false,
+          is_allocated: markAlreadyAllocated,
+          allocated_at: markAlreadyAllocated ? new Date().toISOString() : null,
         })
       } else if (diff < 0) {
         const upQty = Math.abs(diff)
