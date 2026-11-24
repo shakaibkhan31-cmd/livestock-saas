@@ -43,6 +43,7 @@ interface FeedCommandCenterClientProps {
   restoreFeedLogAction: (formData: FormData) => Promise<void>
   adjustFeedStockAction: (formData: FormData) => Promise<void>
   allocateFeedCostAction: (formData: FormData) => Promise<void>
+  updateFeedThresholdAction?: (formData: FormData) => Promise<void>
 }
 
 function formatDateDDMMYYYY(dateInput?: string | null): string {
@@ -118,6 +119,7 @@ export default function FeedCommandCenterClient({
   restoreFeedLogAction,
   adjustFeedStockAction,
   allocateFeedCostAction,
+  updateFeedThresholdAction,
 }: FeedCommandCenterClientProps) {
   const router = useRouter()
 
@@ -275,7 +277,7 @@ export default function FeedCommandCenterClient({
     [speciesFeedLogs]
   )
 
-  // Live Shed Ration Stock (sorted with Low / Out of Stock first)
+  // Live Shed Ration Stock (using thresholdByFeedName ONLY)
   const inventoryList = useMemo(() => {
     type StockSummary = {
       key: string
@@ -287,6 +289,7 @@ export default function FeedCommandCenterClient({
       totalPurchasedCost: number
       avgRatePerKg: number
       thresholdKg: number
+      isLow: boolean
     }
 
     const stockMap: Record<string, StockSummary> = {}
@@ -296,6 +299,7 @@ export default function FeedCommandCenterClient({
       const key = `${sp}__${ft}`
 
       if (!stockMap[key]) {
+        const thresholdKg = thresholdByFeedName[ft.trim().toLowerCase()] ?? 0
         stockMap[key] = {
           key,
           species: sp,
@@ -305,7 +309,8 @@ export default function FeedCommandCenterClient({
           remainingKg: 0,
           totalPurchasedCost: 0,
           avgRatePerKg: 0,
-          thresholdKg: thresholdByFeedName[ft.toLowerCase()] ?? 10,
+          thresholdKg,
+          isLow: false,
         }
       }
       const qty = Number(log.quantity_kg) || 0
@@ -324,15 +329,19 @@ export default function FeedCommandCenterClient({
       .map(item => {
         const remainingKg = Number((item.purchasedKg - item.consumedKg).toFixed(2))
         const avgRatePerKg = item.purchasedKg > 0 ? item.totalPurchasedCost / item.purchasedKg : 0
+        const thresholdKg = thresholdByFeedName[item.feedType.trim().toLowerCase()] ?? 0
+        const isLow = remainingKg <= thresholdKg
         return {
           ...item,
           remainingKg,
           avgRatePerKg,
+          thresholdKg,
+          isLow,
         }
       })
       .sort((a, b) => {
-        const aLow = a.remainingKg <= a.thresholdKg ? 0 : 1
-        const bLow = b.remainingKg <= b.thresholdKg ? 0 : 1
+        const aLow = a.isLow ? 0 : 1
+        const bLow = b.isLow ? 0 : 1
         if (aLow !== bLow) return aLow - bLow
         return a.remainingKg - b.remainingKg
       })
@@ -340,11 +349,11 @@ export default function FeedCommandCenterClient({
 
   const displayedInventory = useMemo(() => {
     if (!lowStockOnly) return inventoryList
-    return inventoryList.filter(i => i.remainingKg <= i.thresholdKg)
+    return inventoryList.filter(i => i.isLow)
   }, [inventoryList, lowStockOnly])
 
   const lowStockCount = useMemo(
-    () => inventoryList.filter(i => i.remainingKg <= i.thresholdKg).length,
+    () => inventoryList.filter(i => i.isLow).length,
     [inventoryList]
   )
 
@@ -352,6 +361,31 @@ export default function FeedCommandCenterClient({
     () => inventoryList.reduce((sum, i) => sum + Math.max(i.remainingKg, 0), 0),
     [inventoryList]
   )
+
+  // Editable Thresholds List & State
+  const thresholdFeedNames = useMemo(() => {
+    const set = new Set<string>(dynamicFeedSuggestions)
+    allFeedLogs.forEach(l => {
+      const name = String(l.feed_type || '').trim()
+      if (name) set.add(name)
+    })
+    return Array.from(set).sort((a, b) => a.localeCompare(b))
+  }, [dynamicFeedSuggestions, allFeedLogs])
+
+  const [draftThresholds, setDraftThresholds] = useState<Record<string, string>>({})
+  const [savingFeedKey, setSavingFeedKey] = useState<string | null>(null)
+
+  const getDraftThresholdValue = (feedName: string): string => {
+    const key = feedName.trim().toLowerCase()
+    if (draftThresholds[key] !== undefined) return draftThresholds[key]
+    const current = thresholdByFeedName[key]
+    return current !== undefined ? String(current) : ''
+  }
+
+  const handleDraftThresholdChange = (feedName: string, value: string) => {
+    const key = feedName.trim().toLowerCase()
+    setDraftThresholds(prev => ({ ...prev, [key]: value }))
+  }
 
   // Active Animals per Species
   const activeSpeciesTabs = useMemo(
@@ -650,6 +684,12 @@ export default function FeedCommandCenterClient({
                 Stock Write-off
               </a>
             )}
+            <a
+              href="#low-stock-thresholds-section"
+              className="inline-flex items-center justify-center px-3.5 py-2 bg-amber-50 hover:bg-amber-100 text-amber-900 font-semibold rounded-xl border border-amber-200 transition text-xs"
+            >
+              Min Stock Limits
+            </a>
             <Link
               href="/animals"
               className="inline-flex items-center justify-center px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl border border-slate-200 transition text-xs"
@@ -900,7 +940,7 @@ export default function FeedCommandCenterClient({
                   Real-time balance per species &amp; ration item (Purchase minus Consumption)
                 </p>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 {lowStockOnly && (
                   <button
                     type="button"
@@ -917,17 +957,23 @@ export default function FeedCommandCenterClient({
                   {displayedInventory.length} of {inventoryList.length} items
                 </span>
                 {isAdmin && (
-  <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-lg">
-    Total Stock Value: Rs. {Math.round(displayedInventory.reduce((sum, item) => sum + Math.max(0, item.remainingKg) * item.avgRatePerKg, 0)).toLocaleString('en-PK')}
-  </span>
-)}
+                  <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-lg">
+                    Total Stock Value: Rs.{' '}
+                    {Math.round(
+                      displayedInventory.reduce(
+                        (sum, item) => sum + Math.max(0, item.remainingKg) * item.avgRatePerKg,
+                        0
+                      )
+                    ).toLocaleString('en-PK')}
+                  </span>
+                )}
               </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2.5">
               {displayedInventory.map(item => {
                 const isOut = item.remainingKg <= 0
-                const isLow = item.remainingKg <= item.thresholdKg
+                const isLow = item.isLow
                 const pct =
                   item.thresholdKg > 0
                     ? Math.min(100, Math.max(0, (item.remainingKg / item.thresholdKg) * 100))
@@ -996,17 +1042,106 @@ export default function FeedCommandCenterClient({
                       )}
                     </div>
                     {isAdmin && item.avgRatePerKg > 0 && (
-  <div className="mt-1 text-[11px] text-emerald-700 font-semibold flex items-center justify-between">
-    <span>Stock Value</span>
-    <span>Rs. {Math.round(Math.max(0, item.remainingKg) * item.avgRatePerKg).toLocaleString('en-PK')}</span>
-  </div>
-)}
+                      <div className="mt-1 text-[11px] text-emerald-700 font-semibold flex items-center justify-between">
+                        <span>Stock Value</span>
+                        <span>
+                          Rs.{' '}
+                          {Math.round(
+                            Math.max(0, item.remainingKg) * item.avgRatePerKg
+                          ).toLocaleString('en-PK')}
+                        </span>
+                      </div>
+                    )}
                   </div>
                 )
               })}
             </div>
           </div>
         )}
+
+        {/* Low Stock Thresholds Section (Admin Editable / Staff Read-Only) */}
+        <div
+          id="low-stock-thresholds-section"
+          className="bg-white rounded-2xl border border-slate-200/90 shadow-xs p-4 sm:p-5 space-y-3.5"
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h2 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
+                Low Stock Thresholds (Min Stock kg)
+              </h2>
+              <p className="text-[11px] text-slate-500">
+                {isAdmin
+                  ? 'Admin controls: edit minimum stock (kg) per feed item and save to update live stock alerts.'
+                  : 'Read-only view of configured minimum stock (kg) per feed item.'}
+              </p>
+            </div>
+            <span className="text-[11px] font-mono text-slate-400">
+              {thresholdFeedNames.length} feed item(s)
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 max-h-72 overflow-y-auto pr-1">
+            {thresholdFeedNames.map(feedName => {
+              const key = feedName.trim().toLowerCase()
+              const currentMin = thresholdByFeedName[key] ?? 0
+              const draftVal = getDraftThresholdValue(feedName)
+              const isSaving = savingFeedKey === key
+
+              if (!isAdmin || !updateFeedThresholdAction) {
+                return (
+                  <div
+                    key={feedName}
+                    className="flex items-center justify-between px-3 py-2 rounded-xl bg-slate-50 border border-slate-200/80 text-xs"
+                  >
+                    <span className="font-semibold text-slate-800 truncate pr-2">{feedName}</span>
+                    <span className="font-mono font-bold text-slate-900 whitespace-nowrap">
+                      Min: {currentMin} kg
+                    </span>
+                  </div>
+                )
+              }
+
+              return (
+                <form
+                  key={feedName}
+                  action={updateFeedThresholdAction}
+                  onSubmit={() => setSavingFeedKey(key)}
+                  className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-slate-50/90 border border-slate-200/90 text-xs"
+                >
+                  <input type="hidden" name="feed_name" value={feedName} />
+                  <span
+                    className="font-semibold text-slate-800 truncate flex-1"
+                    title={feedName}
+                  >
+                    {feedName}
+                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <input
+                      type="number"
+                      name="min_stock_kg"
+                      step="0.1"
+                      min="0"
+                      required
+                      value={draftVal}
+                      disabled={isSaving}
+                      onChange={e => handleDraftThresholdChange(feedName, e.target.value)}
+                      aria-label={`Minimum stock in kg for ${feedName}`}
+                      className="w-20 px-2 py-1 bg-white border border-slate-300 rounded-lg text-xs font-mono text-slate-900 text-right focus:ring-2 focus:ring-emerald-600"
+                    />
+                    <span className="text-[10px] font-mono text-slate-500">kg</span>
+                    <button
+                      type="submit"
+                      disabled={isSaving}
+                      className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-[11px] font-semibold transition"
+                    >
+                      {isSaving ? 'Saving...' : 'Save'}
+                    </button>
+                  </div>
+                </form>
+              )
+            })}
+          </div>
+        </div>
 
         {/* Main Workspace: Left Ledger + Right Sticky Action Forms */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">

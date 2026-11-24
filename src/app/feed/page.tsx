@@ -96,18 +96,18 @@ const DEFAULT_THRESHOLDS_BY_KEY: Record<string, number> = {
   'dcp': 1,
   'maymil milk powder': 2,
   'maymil': 2,
-  'bhoosa': 50,
-  'kala chana': 15,
-  'channa chilka': 20,
+  'bhoosa': 30,
+  'kala chana': 5,
+  'channa chilka': 10,
   'soya bean chilka': 20,
   'gandum (wheat)': 15,
   'gandum': 15,
-  'gandum daliya': 15,
-  'chokar (wheat bran)': 25,
-  'alfalfa hay / lucerne': 25,
-  'alfalfa hay': 25,
-  'mong phalli missa': 15,
-  'mix dana / wanda': 25,
+  'gandum daliya': 5,
+  'chokar (wheat bran)': 30,
+  'alfalfa hay / lucerne': 20,
+  'alfalfa hay': 20,
+  'mong phalli missa': 20,
+  'mix dana / wanda': 30,
   'khal': 20,
   'jau (barley)': 15,
   'makai (maize)': 15,
@@ -980,6 +980,7 @@ export default async function FeedManagementPage({
       restoreFeedLogAction={restoreFeedLog}
       adjustFeedStockAction={adjustFeedStock}
       allocateFeedCostAction={allocateFeedCostToAnimals}
+      updateFeedThresholdAction={updateFeedThreshold}
     />
   )
 }
