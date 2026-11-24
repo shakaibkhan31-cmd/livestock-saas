@@ -1,4 +1,3 @@
-import { connection } from 'next/server'
 import { createClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
 import Link from 'next/link'
@@ -95,13 +94,28 @@ function isMeatFatteningRole(role?: string | null): boolean {
   return normalized === 'meat / fattening' || normalized === 'meat' || normalized === 'fattening'
 }
 
-function normalizeBreed(breed?: string | null): string {
-  return String(breed || '').trim().toLowerCase()
+function normalizeText(val?: string | null): string {
+  return String(val || '').trim().toLowerCase()
+}
+
+function isSelfOwnership(ownership?: string | null): boolean {
+  const norm = normalizeText(ownership)
+  return norm === 'self' || norm === 'farm' || norm === 'farm owned' || norm === 'own'
+}
+
+function isActiveStatus(status?: string | null): boolean {
+  const norm = normalizeText(status)
+  return norm === '' || norm === 'active'
+}
+
+function isChickenSpecies(species?: string | null): boolean {
+  const norm = normalizeText(species)
+  return norm === 'chicken' || norm === 'poultry'
 }
 
 function isAseelChick(animal: { cash_cycle_role?: string | null; tag_id?: string | null }): boolean {
-  const roleLower = String(animal.cash_cycle_role || '').trim().toLowerCase()
-  const tagLower = String(animal.tag_id || '').trim().toLowerCase()
+  const roleLower = normalizeText(animal.cash_cycle_role)
+  const tagLower = normalizeText(animal.tag_id)
   return roleLower.includes('chick') || tagLower.includes('chick')
 }
 
@@ -233,7 +247,6 @@ export default async function FinancesPage({
     page?: string
   }>
 }) {
-    await connection()
   const params = await searchParams
   const statusMsg = params.msg
   const errorMsg = params.error
@@ -257,11 +270,10 @@ export default async function FinancesPage({
   const rangeFrom = (currentPage - 1) * pageSize
   const rangeTo = rangeFrom + pageSize - 1
 
-  // Ensure default 4 wallets exist & load parallel data (with DB range pagination on ledger & audit tables)
+  // Ensure default 4 wallets exist & load parallel data
   const [
     wallets,
-    { data: palaiAnimals },
-    { data: selfAnimals },
+    { data: allFarmLivestock },
     { data: weightLogs },
     { data: pagedGlobalTxns, count: pagedGlobalCount },
     { data: allGlobalTxnsForTotals },
@@ -274,16 +286,8 @@ export default async function FinancesPage({
     ensureDefaultWallets(supabase, farm.id),
     supabase
       .from('livestock_master')
-      .select('id, tag_id, species, client_name, monthly_palai_fee, acquisition_date, status, cost_basis')
-      .eq('farm_id', farm.id)
-      .neq('ownership', 'Self')
-      .eq('status', 'Active'),
-    supabase
-      .from('livestock_master')
-      .select('id, tag_id, species, breed, acquisition_date, status, cost_basis, batch_label, cash_cycle_role')
-      .eq('farm_id', farm.id)
-      .eq('ownership', 'Self')
-      .eq('status', 'Active'),
+      .select('id, tag_id, species, breed, ownership, client_name, monthly_palai_fee, acquisition_date, status, cost_basis, batch_label, cash_cycle_role')
+      .eq('farm_id', farm.id),
     supabase
       .from('animal_weight_logs')
       .select('animal_id, weight_kg, recorded_date')
@@ -384,6 +388,10 @@ export default async function FinancesPage({
       .eq('farm_id', farm.id),
   ])
 
+  const activeFarmLivestock = (allFarmLivestock || []).filter((a: any) => isActiveStatus(a.status))
+  const selfAnimals = activeFarmLivestock.filter((a: any) => isSelfOwnership(a.ownership))
+  const palaiAnimals = activeFarmLivestock.filter((a: any) => !isSelfOwnership(a.ownership))
+
   const globalTxns = allGlobalTxnsForTotals || []
   const animalFinLogs = allAnimalFinLogsForTotals || []
   const walletAuditRows = allWalletAuditRowsForTotals || []
@@ -408,7 +416,7 @@ export default async function FinancesPage({
   const ownerProfitBalance = Number(ownerProfitWallet?.current_balance || 0)
 
   // Dynamic 10% Emergency / Mortality Fund target from active self-owned livestock cost basis
-  const totalSelfLivestockValue = (selfAnimals || []).reduce(
+  const totalSelfLivestockValue = selfAnimals.reduce(
     (sum: number, a: any) => sum + (Number(a.cost_basis) || 0),
     0
   )
@@ -474,7 +482,7 @@ export default async function FinancesPage({
   })
 
   // Palai Client Billing & Dues Statement per active Palai animal
-  const palaiClientLedger = (palaiAnimals || []).map(a => {
+  const palaiClientLedger = palaiAnimals.map(a => {
     const rate = Number(a.monthly_palai_fee) > 0 ? Number(a.monthly_palai_fee) : 5000
     const acqStr = a.acquisition_date ? String(a.acquisition_date).split('T')[0] : todayStr
     const daysBoarded = Math.max(1, daysBetweenDateStrings(acqStr, todayStr, 1))
@@ -634,28 +642,28 @@ export default async function FinancesPage({
 
   // Phase 3: Staggered Batches (Jan-Jul / Mar-Sep / May-Nov) + Short-Cycle Cash Mix
   const { batches: staggeredBatches, shortCycleMix } = computeStaggeredBatchesAndShortCycle({
-    selfAnimals: selfAnimals || [],
+    selfAnimals,
     items: cashItemsForAnalytics,
     todayStr,
   })
 
   // ONLY Goat / Sheep Meat goes in Staggered Batches
-  const meatSelfAnimals = (selfAnimals || []).filter(
-    (a: any) => isMeatFatteningRole(a.cash_cycle_role) && a.species !== 'Chicken'
+  const meatSelfAnimals = selfAnimals.filter(
+    (a: any) => isMeatFatteningRole(a.cash_cycle_role) && !isChickenSpecies(a.species)
   )
-  const nonSaleSelfAnimals = (selfAnimals || []).filter(
-    (a: any) => !isMeatFatteningRole(a.cash_cycle_role) && a.species !== 'Chicken'
+  const nonSaleSelfAnimals = selfAnimals.filter(
+    (a: any) => !isMeatFatteningRole(a.cash_cycle_role) && !isChickenSpecies(a.species)
   )
 
-  // Poultry Stock breakdown (species === 'Chicken', normalized breed: lower(trim(breed)))
-  const poultryAnimals = (selfAnimals || []).filter((a: any) => a.species === 'Chicken')
-  const desiLayerAnimals = poultryAnimals.filter((a: any) => normalizeBreed(a.breed) === 'desi')
-  const aseelAllAnimals = poultryAnimals.filter((a: any) => normalizeBreed(a.breed) === 'aseel')
+  // Poultry Stock breakdown (case-insensitive & whitespace-safe species + breed)
+  const poultryAnimals = selfAnimals.filter((a: any) => isChickenSpecies(a.species))
+  const desiLayerAnimals = poultryAnimals.filter((a: any) => normalizeText(a.breed).includes('desi'))
+  const aseelAllAnimals = poultryAnimals.filter((a: any) => normalizeText(a.breed).includes('aseel'))
   const aseelChicksAnimals = aseelAllAnimals.filter((a: any) => isAseelChick(a))
   const aseelBreedersAnimals = aseelAllAnimals.filter((a: any) => !isAseelChick(a))
   const unclassifiedPoultryAnimals = poultryAnimals.filter((a: any) => {
-    const b = normalizeBreed(a.breed)
-    return b !== 'desi' && b !== 'aseel'
+    const b = normalizeText(a.breed)
+    return !b.includes('desi') && !b.includes('aseel')
   })
 
   const desiCostBasis = desiLayerAnimals.reduce((s, a: any) => s + (Number(a.cost_basis) || 0), 0)
@@ -861,7 +869,7 @@ export default async function FinancesPage({
     Math.round(totalNonFeedExpense - alreadyAllocatedNonFeedExpense)
   )
 
-  const defaultGoatSelfAnimals = (selfAnimals || []).filter(a => (a.species || 'Goat') === 'Goat')
+  const defaultGoatSelfAnimals = selfAnimals.filter(a => normalizeText(a.species || 'Goat') === 'goat')
   const previewWeightedAnimals = computeWeightedAnimalsForPool(
     defaultGoatSelfAnimals,
     latestWeightByAnimal,
@@ -1166,17 +1174,15 @@ export default async function FinancesPage({
     const [
       { data: liveGlobalTxns },
       { data: liveAnimalLogs },
-      { data: liveSelfAnimals },
+      { data: liveLivestock },
       { data: liveWeightLogs },
     ] = await Promise.all([
       supabaseClient.from('transactions').select('type, category, amount, target_species, description').eq('farm_id', farm.id),
       supabaseClient.from('animal_financial_logs').select('entry_type, category, amount, notes, livestock_master(species)').eq('farm_id', farm.id),
       supabaseClient
         .from('livestock_master')
-        .select('id, tag_id, species, acquisition_date')
-        .eq('farm_id', farm.id)
-        .eq('ownership', 'Self')
-        .eq('status', 'Active'),
+        .select('id, tag_id, species, ownership, status, acquisition_date')
+        .eq('farm_id', farm.id),
       supabaseClient
         .from('animal_weight_logs')
         .select('animal_id, weight_kg, recorded_date')
@@ -1264,9 +1270,10 @@ export default async function FinancesPage({
       )
     }
 
-    const matchingSelfAnimals = (liveSelfAnimals || []).filter(a => {
+    const matchingSelfAnimals = (liveLivestock || []).filter(a => {
+      if (!isActiveStatus(a.status) || !isSelfOwnership(a.ownership)) return false
       if (isSharedPool) return true
-      return (a.species || 'Goat') === targetSpecies
+      return normalizeText(a.species || 'Goat') === normalizeText(targetSpecies)
     })
 
     if (matchingSelfAnimals.length === 0) {
@@ -1380,14 +1387,16 @@ export default async function FinancesPage({
 
     const supabaseClient = await createClient()
 
-    const { data: activePalai } = await supabaseClient
+    const { data: farmAnimals } = await supabaseClient
       .from('livestock_master')
-      .select('id, tag_id, client_name, monthly_palai_fee')
+      .select('id, tag_id, ownership, status, client_name, monthly_palai_fee')
       .eq('farm_id', farm.id)
-      .neq('ownership', 'Self')
-      .eq('status', 'Active')
 
-    if (!activePalai || activePalai.length === 0) {
+    const activePalai = (farmAnimals || []).filter(
+      (a: any) => isActiveStatus(a.status) && !isSelfOwnership(a.ownership)
+    )
+
+    if (activePalai.length === 0) {
       return redirect(`/finances?error=${encodeURIComponent('No active Palai animals found for billing.')}`)
     }
 
@@ -1908,7 +1917,7 @@ export default async function FinancesPage({
               </p>
             </div>
 
-            {(selfAnimals || []).length > 0 && (
+            {selfAnimals.length > 0 && (
               <form
                 action={assignBatchAndCycleAction}
                 className="flex flex-wrap items-end gap-2 bg-slate-50 p-3 rounded-xl border border-slate-200"
@@ -1920,7 +1929,7 @@ export default async function FinancesPage({
                     required
                     className="px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono font-bold text-slate-900"
                   >
-                    {(selfAnimals || []).map((a: any) => (
+                    {selfAnimals.map((a: any) => (
                       <option key={a.id} value={a.id}>
                         {a.tag_id} ({a.species}) — {a.cash_cycle_role || 'Meat / Fattening'}
                       </option>
@@ -2053,7 +2062,7 @@ export default async function FinancesPage({
             )}
           </div>
 
-          {/* Poultry Stock Section (species === 'Chicken', Desi vs Aseel via existing breed field) */}
+          {/* Poultry Stock Section */}
           <div className="p-4 rounded-xl bg-sky-50/50 border border-sky-200/90 space-y-3">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div className="flex flex-wrap items-center gap-2">
@@ -2195,7 +2204,7 @@ export default async function FinancesPage({
                 <p className="text-base font-bold font-mono text-cyan-800 mt-0.5">
                   Rs. {shortCycleMix.palaiIncome30d.toLocaleString()}
                 </p>
-                <p className="text-[10px] text-slate-500">{palaiAnimals?.length || 0} client animal(s)</p>
+                <p className="text-[10px] text-slate-500">{palaiAnimals.length} client animal(s)</p>
               </div>
               <div className="p-3 rounded-xl bg-sky-50/60 border border-sky-200">
                 <p className="text-[10px] font-bold uppercase text-sky-900">30d Egg Cash</p>
@@ -2530,7 +2539,7 @@ export default async function FinancesPage({
                 Automated Billing (Receivable Only)
               </span>
               <span className="text-xs text-indigo-200">
-                Active Palai Animals: <strong>{palaiAnimals?.length || 0}</strong>
+                Active Palai Animals: <strong>{palaiAnimals.length}</strong>
               </span>
             </div>
             <h2 className="text-lg font-bold">Monthly Palai Auto-Billing Generator</h2>
@@ -2786,7 +2795,7 @@ export default async function FinancesPage({
               </div>
               <button
                 type="submit"
-                disabled={(selfAnimals || []).length === 0 || pendingNonFeedAllocationPool <= 0}
+                disabled={selfAnimals.length === 0 || pendingNonFeedAllocationPool <= 0}
                 className="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:bg-slate-300 text-white font-bold rounded-lg text-xs shadow-xs transition"
               >
                 ⚖️ Allocate Non-Feed Share
