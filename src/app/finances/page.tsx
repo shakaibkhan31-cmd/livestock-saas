@@ -657,12 +657,12 @@ export default async function FinancesPage({
 
   // Poultry Stock breakdown (case-insensitive & whitespace-safe species + breed)
   const poultryAnimals = selfAnimals.filter((a: any) => isChickenSpecies(a.species))
-  const desiLayerAnimals = poultryAnimals.filter((a: any) => normalizeText(a.breed).includes('desi'))
-  const aseelAllAnimals = poultryAnimals.filter((a: any) => normalizeText(a.breed).includes('aseel'))
+  const desiLayerAnimals = poultryAnimals.filter((a: any) => normalizeText(a.breed_name).includes('desi'))
+  const aseelAllAnimals = poultryAnimals.filter((a: any) => normalizeText(a.breed_name).includes('aseel'))
   const aseelChicksAnimals = aseelAllAnimals.filter((a: any) => isAseelChick(a))
   const aseelBreedersAnimals = aseelAllAnimals.filter((a: any) => !isAseelChick(a))
   const unclassifiedPoultryAnimals = poultryAnimals.filter((a: any) => {
-    const b = normalizeText(a.breed)
+    const b = normalizeText(a.breed_name)
     return !b.includes('desi') && !b.includes('aseel')
   })
 
