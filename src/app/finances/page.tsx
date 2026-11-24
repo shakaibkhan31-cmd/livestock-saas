@@ -1,6 +1,4 @@
-export const dynamic = 'force-dynamic'
-export const revalidate = 0
-export const fetchCache = 'force-no-store'
+import { connection } from 'next/server'
 import { createClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
 import Link from 'next/link'
@@ -235,6 +233,7 @@ export default async function FinancesPage({
     page?: string
   }>
 }) {
+    await connection()
   const params = await searchParams
   const statusMsg = params.msg
   const errorMsg = params.error
