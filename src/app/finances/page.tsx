@@ -89,6 +89,22 @@ function isVoidText(val?: string | null): boolean {
   return upper.startsWith('[VOID]') || upper.startsWith('VOID:')
 }
 
+function isMeatFatteningRole(role?: string | null): boolean {
+  const normalized = String(role || 'Meat / Fattening').trim().toLowerCase()
+  return normalized === 'meat / fattening' || normalized === 'meat' || normalized === 'fattening'
+}
+
+function inferBatchLabelFromAcquisition(acqDate?: string | null, fallbackDate?: string): string {
+  const src = String(acqDate || fallbackDate || '').split('T')[0]
+  const month = parseInt(src.split('-')[1] || '1', 10)
+  if (month >= 1 && month <= 2) return STAGGERED_BATCH_DEFINITIONS[0].label
+  if (month >= 3 && month <= 4) return STAGGERED_BATCH_DEFINITIONS[1].label
+  if (month >= 5 && month <= 6) return STAGGERED_BATCH_DEFINITIONS[2].label
+  if (month >= 7 && month <= 8) return STAGGERED_BATCH_DEFINITIONS[0].label
+  if (month >= 9 && month <= 10) return STAGGERED_BATCH_DEFINITIONS[1].label
+  return STAGGERED_BATCH_DEFINITIONS[2].label
+}
+
 function parseSplitRoleFromNotes(notes?: string | null): '60_CAP' | '20_OPS' | '20_OWN' | null {
   const s = String(notes || '')
   if (s.includes('SPLIT_60_CAPITAL')) return '60_CAP'
@@ -611,6 +627,57 @@ export default async function FinancesPage({
     todayStr,
   })
 
+  // Separate Meat / Fattening animals for Sell/Harvest batch cards from Breeding / Milk / Non-Sale stock
+  const meatSelfAnimals = (selfAnimals || []).filter((a: any) => isMeatFatteningRole(a.cash_cycle_role))
+  const nonSaleSelfAnimals = (selfAnimals || []).filter((a: any) => !isMeatFatteningRole(a.cash_cycle_role))
+
+  const meatAnimalsByBatchLabel: Record<string, Array<any>> = {}
+  STAGGERED_BATCH_DEFINITIONS.forEach(def => {
+    meatAnimalsByBatchLabel[def.label] = []
+  })
+
+  meatSelfAnimals.forEach((a: any) => {
+    const resolvedBatch =
+      a.batch_label && meatAnimalsByBatchLabel[a.batch_label]
+        ? a.batch_label
+        : inferBatchLabelFromAcquisition(a.acquisition_date, todayStr)
+    meatAnimalsByBatchLabel[resolvedBatch].push(a)
+  })
+
+  const filteredBatchCards = staggeredBatches.map(batch => {
+    const sellableAnimals = meatAnimalsByBatchLabel[batch.label] || []
+    const sellableCount = sellableAnimals.length
+    const sellableCostBasis = sellableAnimals.reduce(
+      (sum, a) => sum + (Number(a.cost_basis) || 0),
+      0
+    )
+    const sellableTags = sellableAnimals.map((a: any) => String(a.tag_id))
+
+    const canShowSellBadge = batch.phaseNow === 'SELL_WINDOW' && sellableCount > 0
+    const badgeLabel = canShowSellBadge
+      ? 'SELL / HARVEST'
+      : batch.phaseNow === 'BUY_WINDOW'
+      ? 'BUY WINDOW'
+      : sellableCount === 0 && batch.phaseNow === 'SELL_WINDOW'
+      ? 'NO MEAT STOCK FOR SALE'
+      : 'GROWOUT PHASE'
+
+    const badgeStyle = canShowSellBadge
+      ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+      : batch.phaseNow === 'BUY_WINDOW'
+      ? 'bg-blue-100 text-blue-800 border-blue-300'
+      : 'bg-slate-100 text-slate-700 border-slate-300'
+
+    return {
+      ...batch,
+      sellableCount,
+      sellableCostBasis,
+      sellableTags,
+      badgeLabel,
+      badgeStyle,
+    }
+  })
+
   // Phase 5: Monthly Retained Profit & Capital Growth Report
   type MonthlyReportRow = {
     month: string
@@ -726,8 +793,6 @@ export default async function FinancesPage({
   const totalPages = Math.max(1, Math.ceil(totalDbLedgerCount / pageSize))
   const safePage = Math.min(currentPage, totalPages)
 
-  // Cash / Billed separation:
-  // Auto-Bill is Billed (receivable), NOT Cash received. Cash comes via payments/income excluding isAutoBill.
   const totalBilledIncome = activeLedgerItems
     .filter(t => t.type === 'Income')
     .reduce((acc, t) => acc + t.amount, 0)
@@ -744,8 +809,6 @@ export default async function FinancesPage({
 
   const netBalance = totalIncome - totalExpense
 
-  // Non-Feed Expense Pool Calculation (excludes Feed & Ration and excludes Farm Overhead / Deficit Share):
-  // Already allocated overhead amounts are subtracted so previously allocated non-feed expenses are NOT counted again.
   const totalNonFeedExpense = activeLedgerItems
     .filter(
       t =>
@@ -764,7 +827,6 @@ export default async function FinancesPage({
     Math.round(totalNonFeedExpense - alreadyAllocatedNonFeedExpense)
   )
 
-  // Preview for default Goat species using shared breakeven pool helper
   const defaultGoatSelfAnimals = (selfAnimals || []).filter(a => (a.species || 'Goat') === 'Goat')
   const previewWeightedAnimals = computeWeightedAnimalsForPool(
     defaultGoatSelfAnimals,
@@ -783,7 +845,6 @@ export default async function FinancesPage({
 
   const sortedExpenseCategories = Object.entries(expenseByCategory).sort((a, b) => b[1] - a[1])
 
-  // Server Action: Assign Batch & Short-Cycle Role on an Animal
   const assignBatchAndCycleAction = async (formData: FormData) => {
     'use server'
     const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
@@ -819,7 +880,6 @@ export default async function FinancesPage({
     )
   }
 
-  // Server Action: Fund / Adjust a Wallet (4 Wallets Discipline + Explicit Audit Source + farm_wallets Fallback)
   const fundWalletAction = async (formData: FormData) => {
     'use server'
     const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
@@ -926,7 +986,6 @@ export default async function FinancesPage({
     )
   }
 
-  // Phase 5 Server Action: VOID Wallet Audit Transaction & Recalculate Wallet Balance
   const voidWalletAuditRowAction = async (formData: FormData) => {
     'use server'
     const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
@@ -971,7 +1030,6 @@ export default async function FinancesPage({
     return redirect(`/finances?msg=${encodeURIComponent('Wallet audit entry marked as VOID and balance recalculated.')}`)
   }
 
-  // Server Action: Log Palai Client Boarding Payment (credits Operating Cash Wallet + Rollback on Wallet Fail)
   const logPalaiPaymentAction = async (formData: FormData) => {
     'use server'
     const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
@@ -1020,7 +1078,6 @@ export default async function FinancesPage({
       return redirect(`/finances?error=${encodeURIComponent(payErr?.message || 'Failed to log Palai payment.')}`)
     }
 
-    // Credit Palai client payment into Wallet 1: Operating Cash with linked reference_key
     const farmWallets = await ensureDefaultWallets(supabaseClient, farm.id)
     const opWallet = farmWallets.find(w => w.wallet_type === 'OPERATING_CASH')
     if (opWallet) {
@@ -1058,7 +1115,6 @@ export default async function FinancesPage({
     )
   }
 
-  // Server Action: One-Click Species-Scoped Non-Feed Overhead Share Allocation
   const allocateDeficitByWeight = async (formData: FormData) => {
     'use server'
     const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
@@ -1279,7 +1335,6 @@ export default async function FinancesPage({
     )
   }
 
-  // Server Action: Run Monthly Palai Auto-Billing (Billed Receivable only; does NOT credit Cash/Wallet)
   const runMonthlyPalaiBilling = async (formData: FormData) => {
     'use server'
     const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
@@ -1356,7 +1411,6 @@ export default async function FinancesPage({
     )
   }
 
-  // Server Action: Add Global Farm Transaction (with Target Species, Wallet Guardrail, Linked Sale Split & Rollback)
   const addTransaction = async (formData: FormData) => {
     'use server'
     const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
@@ -1497,7 +1551,6 @@ export default async function FinancesPage({
     return redirect(`/finances?msg=${encodeURIComponent(`Transaction recorded under ${targetSpecies}.`)}`)
   }
 
-  // Server Action: VOID Transaction + VOID Linked Wallet Entries + Recalculate Wallets
   const voidTransactionAction = async (formData: FormData) => {
     'use server'
     const { user: actionUser, farm: actionFarm, role: actionRole } = await getUserFarmAndRole()
@@ -1817,7 +1870,7 @@ export default async function FinancesPage({
                 6-Month Staggered Batch Rotation (Jan–Jul • Mar–Sep • May–Nov)
               </h2>
               <p className="text-xs text-slate-500">
-                Never hold all stock on one single Qurbani timeline—rotate 3 overlapping batches alongside daily Milk, Manure &amp; Kid cash streams
+                Batch cards track <strong>Meat / Fattening</strong> sellable stock only; Breeding / Milk / Kid Crop stock is separated below as non-sale assets
               </p>
             </div>
 
@@ -1835,7 +1888,7 @@ export default async function FinancesPage({
                   >
                     {(selfAnimals || []).map((a: any) => (
                       <option key={a.id} value={a.id}>
-                        {a.tag_id} ({a.species})
+                        {a.tag_id} ({a.species}) — {a.cash_cycle_role || 'Meat / Fattening'}
                       </option>
                     ))}
                   </select>
@@ -1874,62 +1927,96 @@ export default async function FinancesPage({
             )}
           </div>
 
-          {/* 3 Overlapping Batches */}
+          {/* 3 Overlapping Batches (Meat / Fattening Only) */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {staggeredBatches.map(batch => {
-              const phaseBadge =
-                batch.phaseNow === 'BUY_WINDOW'
-                  ? 'bg-blue-100 text-blue-800 border-blue-300'
-                  : batch.phaseNow === 'SELL_WINDOW'
-                  ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
-                  : 'bg-slate-100 text-slate-700 border-slate-300'
-
-              const phaseLabel =
-                batch.phaseNow === 'BUY_WINDOW'
-                  ? 'BUY WINDOW'
-                  : batch.phaseNow === 'SELL_WINDOW'
-                  ? 'SELL / HARVEST'
-                  : 'GROWOUT PHASE'
-
-              return (
-                <div
-                  key={batch.key}
-                  className="p-4 rounded-xl bg-slate-50/80 border border-slate-200 space-y-2"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-bold text-slate-900">{batch.label}</span>
-                    <span className={`px-2 py-0.5 text-[10px] font-bold rounded-full border ${phaseBadge}`}>
-                      {phaseLabel}
-                    </span>
-                  </div>
-                  <div className="flex items-baseline justify-between">
-                    <span className="text-xl font-bold font-mono text-slate-900">
-                      {batch.animalCount} <span className="text-xs font-sans font-normal text-slate-500">head</span>
-                    </span>
-                    <span className="text-xs font-mono font-semibold text-slate-700">
-                      Rs. {batch.totalCostBasis.toLocaleString()}
-                    </span>
-                  </div>
-                  <p className="text-[11px] text-slate-500">
-                    Buy: <strong>{batch.buyWindow}</strong> • Sell: <strong>{batch.sellWindow}</strong>
-                  </p>
-                  <div className="flex flex-wrap gap-1 pt-1">
-                    {batch.tags.length > 0 ? (
-                      batch.tags.map(tag => (
-                        <span
-                          key={tag}
-                          className="px-2 py-0.5 text-[10px] font-mono font-bold rounded bg-white border border-slate-200 text-slate-800"
-                        >
-                          {tag}
-                        </span>
-                      ))
-                    ) : (
-                      <span className="text-[11px] text-slate-400 italic">No animals assigned yet</span>
-                    )}
-                  </div>
+            {filteredBatchCards.map(batch => (
+              <div
+                key={batch.key}
+                className="p-4 rounded-xl bg-slate-50/80 border border-slate-200 space-y-2"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-slate-900">{batch.label}</span>
+                  <span className={`px-2 py-0.5 text-[10px] font-bold rounded-full border ${batch.badgeStyle}`}>
+                    {batch.badgeLabel}
+                  </span>
                 </div>
-              )
-            })}
+                <div className="flex items-baseline justify-between">
+                  <span className="text-xl font-bold font-mono text-slate-900">
+                    {batch.sellableCount} <span className="text-xs font-sans font-normal text-slate-500">meat head</span>
+                  </span>
+                  <span className="text-xs font-mono font-semibold text-slate-700">
+                    Rs. {batch.sellableCostBasis.toLocaleString()}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  Buy: <strong>{batch.buyWindow}</strong> • Sell: <strong>{batch.sellWindow}</strong>
+                </p>
+                <div className="flex flex-wrap gap-1 pt-1">
+                  {batch.sellableTags.length > 0 ? (
+                    batch.sellableTags.map(tag => (
+                      <span
+                        key={tag}
+                        className="px-2 py-0.5 text-[10px] font-mono font-bold rounded bg-white border border-slate-200 text-slate-800"
+                      >
+                        {tag}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-[11px] text-slate-400 italic">No Meat / Fattening animals in this batch</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Dedicated Non-Sale Stock Section: Breeding Stock (Not for Sale) */}
+          <div className="p-4 rounded-xl bg-amber-50/50 border border-amber-200/90 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-amber-900 text-white">
+                  Breeding Stock (Not for Sale)
+                </span>
+                <span className="text-xs font-bold text-slate-900">
+                  {nonSaleSelfAnimals.length} head protected from SELL / HARVEST badges
+                </span>
+              </div>
+              <span className="text-xs font-mono font-semibold text-slate-700">
+                Asset Value: Rs.{' '}
+                {nonSaleSelfAnimals
+                  .reduce((sum: number, a: any) => sum + (Number(a.cost_basis) || 0), 0)
+                  .toLocaleString()}
+              </span>
+            </div>
+
+            {nonSaleSelfAnimals.length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {nonSaleSelfAnimals.map((a: any) => {
+                  const batchLabel =
+                    a.batch_label || inferBatchLabelFromAcquisition(a.acquisition_date, todayStr)
+                  return (
+                    <div
+                      key={a.id}
+                      className="px-3 py-1.5 rounded-lg bg-white border border-amber-200 text-xs flex items-center gap-2"
+                    >
+                      <Link
+                        href={`/animals/${a.id}`}
+                        className="font-mono font-bold text-slate-900 hover:text-indigo-600"
+                      >
+                        {a.tag_id}
+                      </Link>
+                      <span className="text-[11px] text-amber-900 font-semibold">
+                        {a.cash_cycle_role || 'Breeding / Kid Crop'}
+                      </span>
+                      <span className="text-[10px] font-mono text-slate-400">({batchLabel})</span>
+                    </div>
+                  )
+                })}
+              </div>
+            ) : (
+              <p className="text-xs text-slate-500">
+                No animals assigned to Breeding / Milk / Kid Crop roles.
+              </p>
+            )}
           </div>
 
           {/* Short-Cycle Cash Engine Summary (30d) */}
@@ -1953,7 +2040,7 @@ export default async function FinancesPage({
               <p className="text-base font-bold font-mono text-indigo-800 mt-0.5">
                 Rs. {shortCycleMix.kidAndQuickSale30d.toLocaleString()}
               </p>
-              <p className="text-[10px] text-slate-500">{shortCycleMix.kidCropCount} breeding / kid stock</p>
+              <p className="text-[10px] text-slate-500">{nonSaleSelfAnimals.length} breeding / kid stock (Not for Sale)</p>
             </div>
             <div className="p-3 rounded-xl bg-slate-100/80 border border-slate-200">
               <p className="text-[10px] font-bold uppercase text-slate-700">30d Short-Cycle Total</p>
@@ -2120,7 +2207,6 @@ export default async function FinancesPage({
 
         {/* Phase 5: Monthly Retained Profit, Capital Growth & Executive Wallet Audit Ledger */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Monthly Retained Profit & Cash Report */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="px-5 py-4 border-b border-slate-100 bg-slate-900 text-white">
               <h2 className="text-sm font-bold">Monthly Retained Profit &amp; Cash Report</h2>
@@ -2173,7 +2259,6 @@ export default async function FinancesPage({
             </div>
           </div>
 
-          {/* Executive Wallet Audit Ledger */}
           <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/70 flex items-center justify-between">
               <div>
@@ -2693,7 +2778,6 @@ export default async function FinancesPage({
                 </div>
               </div>
 
-              {/* Search Bar */}
               <form method="GET" action="/finances" className="flex items-center gap-2">
                 {filterType !== 'All' && <input type="hidden" name="filter" value={filterType} />}
                 <input
@@ -2813,7 +2897,6 @@ export default async function FinancesPage({
               </table>
             </div>
 
-            {/* Pagination Controls */}
             {totalDbLedgerCount > 0 && (
               <div className="px-6 py-3.5 border-t border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
                 <span className="text-slate-500">
