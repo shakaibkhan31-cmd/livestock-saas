@@ -286,7 +286,7 @@ export default async function FinancesPage({
     ensureDefaultWallets(supabase, farm.id),
     supabase
       .from('livestock_master')
-      .select('id, tag_id, species, breed, ownership, client_name, monthly_palai_fee, acquisition_date, status, cost_basis, batch_label, cash_cycle_role')
+      .select('id, tag_id, species, breed_name, ownership, client_name, monthly_palai_fee, acquisition_date, status, cost_basis, batch_label, cash_cycle_role')
       .eq('farm_id', farm.id),
     supabase
       .from('animal_weight_logs')
