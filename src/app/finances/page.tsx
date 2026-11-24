@@ -94,6 +94,16 @@ function isMeatFatteningRole(role?: string | null): boolean {
   return normalized === 'meat / fattening' || normalized === 'meat' || normalized === 'fattening'
 }
 
+function normalizeBreed(breed?: string | null): string {
+  return String(breed || '').trim().toLowerCase()
+}
+
+function isAseelChick(animal: { cash_cycle_role?: string | null; tag_id?: string | null }): boolean {
+  const roleLower = String(animal.cash_cycle_role || '').trim().toLowerCase()
+  const tagLower = String(animal.tag_id || '').trim().toLowerCase()
+  return roleLower.includes('chick') || tagLower.includes('chick')
+}
+
 function inferBatchLabelFromAcquisition(acqDate?: string | null, fallbackDate?: string): string {
   const src = String(acqDate || fallbackDate || '').split('T')[0]
   const month = parseInt(src.split('-')[1] || '1', 10)
@@ -268,7 +278,7 @@ export default async function FinancesPage({
       .eq('status', 'Active'),
     supabase
       .from('livestock_master')
-      .select('id, tag_id, species, acquisition_date, status, cost_basis, batch_label, cash_cycle_role')
+      .select('id, tag_id, species, breed, acquisition_date, status, cost_basis, batch_label, cash_cycle_role')
       .eq('farm_id', farm.id)
       .eq('ownership', 'Self')
       .eq('status', 'Active'),
@@ -627,9 +637,31 @@ export default async function FinancesPage({
     todayStr,
   })
 
-  // Separate Meat / Fattening animals for Sell/Harvest batch cards from Breeding / Milk / Non-Sale stock
-  const meatSelfAnimals = (selfAnimals || []).filter((a: any) => isMeatFatteningRole(a.cash_cycle_role))
-  const nonSaleSelfAnimals = (selfAnimals || []).filter((a: any) => !isMeatFatteningRole(a.cash_cycle_role))
+  // ONLY Goat / Sheep Meat goes in Staggered Batches
+  const meatSelfAnimals = (selfAnimals || []).filter(
+    (a: any) => isMeatFatteningRole(a.cash_cycle_role) && a.species !== 'Chicken'
+  )
+  const nonSaleSelfAnimals = (selfAnimals || []).filter(
+    (a: any) => !isMeatFatteningRole(a.cash_cycle_role) && a.species !== 'Chicken'
+  )
+
+  // Poultry Stock breakdown (species === 'Chicken', normalized breed: lower(trim(breed)))
+  const poultryAnimals = (selfAnimals || []).filter((a: any) => a.species === 'Chicken')
+  const desiLayerAnimals = poultryAnimals.filter((a: any) => normalizeBreed(a.breed) === 'desi')
+  const aseelAllAnimals = poultryAnimals.filter((a: any) => normalizeBreed(a.breed) === 'aseel')
+  const aseelChicksAnimals = aseelAllAnimals.filter((a: any) => isAseelChick(a))
+  const aseelBreedersAnimals = aseelAllAnimals.filter((a: any) => !isAseelChick(a))
+  const unclassifiedPoultryAnimals = poultryAnimals.filter((a: any) => {
+    const b = normalizeBreed(a.breed)
+    return b !== 'desi' && b !== 'aseel'
+  })
+
+  const desiCostBasis = desiLayerAnimals.reduce((s, a: any) => s + (Number(a.cost_basis) || 0), 0)
+  const aseelCostBasis = aseelBreedersAnimals.reduce((s, a: any) => s + (Number(a.cost_basis) || 0), 0)
+  const unclassifiedPoultryCostBasis = unclassifiedPoultryAnimals.reduce(
+    (s, a: any) => s + (Number(a.cost_basis) || 0),
+    0
+  )
 
   const meatAnimalsByBatchLabel: Record<string, Array<any>> = {}
   STAGGERED_BATCH_DEFINITIONS.forEach(def => {
@@ -1870,7 +1902,7 @@ export default async function FinancesPage({
                 6-Month Staggered Batch Rotation (Jan–Jul • Mar–Sep • May–Nov)
               </h2>
               <p className="text-xs text-slate-500">
-                Batch cards track <strong>Meat / Fattening</strong> sellable stock only; Breeding / Milk / Kid Crop stock is separated below as non-sale assets
+                Batch cards track <strong>Goat / Sheep Meat</strong> sellable stock only; Breeding / Milk / Kid Crop stock is separated below as non-sale assets
               </p>
             </div>
 
@@ -1927,7 +1959,7 @@ export default async function FinancesPage({
             )}
           </div>
 
-          {/* 3 Overlapping Batches (Meat / Fattening Only) */}
+          {/* 3 Overlapping Batches (Goat / Sheep Meat Only) */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {filteredBatchCards.map(batch => (
               <div
@@ -1962,7 +1994,7 @@ export default async function FinancesPage({
                       </span>
                     ))
                   ) : (
-                    <span className="text-[11px] text-slate-400 italic">No Meat / Fattening animals in this batch</span>
+                    <span className="text-[11px] text-slate-400 italic">No Goat / Sheep Meat stock in this batch</span>
                   )}
                 </div>
               </div>
@@ -2019,36 +2051,168 @@ export default async function FinancesPage({
             )}
           </div>
 
+          {/* Poultry Stock Section (species === 'Chicken', Desi vs Aseel via existing breed field) */}
+          <div className="p-4 rounded-xl bg-sky-50/50 border border-sky-200/90 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-sky-900 text-white">
+                  Poultry Stock
+                </span>
+                <span className="text-xs font-bold text-slate-900">
+                  {poultryAnimals.length} bird(s) separated from Goat Batches
+                </span>
+              </div>
+              <span className="text-xs font-mono font-semibold text-slate-700">
+                Total Poultry Cost Basis: Rs.{' '}
+                {poultryAnimals
+                  .reduce((sum: number, a: any) => sum + (Number(a.cost_basis) || 0), 0)
+                  .toLocaleString()}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {/* Card 1: Desi Layers (Eggs for Sale) */}
+              <div className="p-3.5 rounded-xl bg-white border border-sky-200 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-900">Desi Layers</span>
+                  <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-sky-100 text-sky-900 border border-sky-200">
+                    Eggs for Sale
+                  </span>
+                </div>
+                <div className="flex items-baseline justify-between">
+                  <span className="text-base font-bold font-mono text-slate-900">
+                    {desiLayerAnimals.length} head
+                  </span>
+                  <span className="text-xs font-mono font-semibold text-slate-700">
+                    Cost Basis: Rs. {desiCostBasis.toLocaleString()}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-1 pt-0.5">
+                  {desiLayerAnimals.length > 0 ? (
+                    desiLayerAnimals.map((a: any) => (
+                      <span
+                        key={a.id}
+                        className="px-2 py-0.5 text-[10px] font-mono font-bold rounded bg-slate-50 border border-slate-200 text-slate-800"
+                      >
+                        {a.tag_id}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-[11px] text-slate-400 italic">No Desi birds</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Card 2: Aseel Breeders (Chicks for Sale) + Sub-line Aseel Chicks (0-3 Months) */}
+              <div className="p-3.5 rounded-xl bg-white border border-sky-200 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-900">Aseel Breeders</span>
+                  <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-indigo-100 text-indigo-900 border border-indigo-200">
+                    Eggs -&gt; Chicks -&gt; Sale at 3 Months
+                  </span>
+                </div>
+                <div className="flex items-baseline justify-between">
+                  <span className="text-base font-bold font-mono text-slate-900">
+                    {aseelBreedersAnimals.length} head
+                  </span>
+                  <span className="text-xs font-mono font-semibold text-slate-700">
+                    Cost Basis: Rs. {aseelCostBasis.toLocaleString()}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-1 pt-0.5">
+                  {aseelBreedersAnimals.length > 0 ? (
+                    aseelBreedersAnimals.map((a: any) => (
+                      <span
+                        key={a.id}
+                        className="px-2 py-0.5 text-[10px] font-mono font-bold rounded bg-slate-50 border border-slate-200 text-slate-800"
+                      >
+                        {a.tag_id}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-[11px] text-slate-400 italic">No Aseel breeders</span>
+                  )}
+                </div>
+                <p className="text-[11px] font-mono text-slate-600 pt-1 border-t border-slate-100">
+                  Aseel Chicks (0-3 Months): <strong>{aseelChicksAnimals.length} head</strong>
+                </p>
+              </div>
+            </div>
+
+            {unclassifiedPoultryAnimals.length > 0 && (
+              <div className="p-3 rounded-xl bg-white border border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div>
+                  <span className="font-bold text-slate-800">Unclassified Poultry:</span>{' '}
+                  <span className="font-mono font-bold text-slate-900">
+                    {unclassifiedPoultryAnimals.length} head
+                  </span>{' '}
+                  <span className="text-slate-500">
+                    (Cost Basis: Rs. {unclassifiedPoultryCostBasis.toLocaleString()})
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {unclassifiedPoultryAnimals.map((a: any) => (
+                    <span
+                      key={a.id}
+                      className="px-2 py-0.5 text-[10px] font-mono font-bold rounded bg-slate-50 border border-slate-200 text-slate-700"
+                    >
+                      {a.tag_id}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Short-Cycle Cash Engine Summary (30d) */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-slate-100">
-            <div className="p-3 rounded-xl bg-emerald-50/60 border border-emerald-200">
-              <p className="text-[10px] font-bold uppercase text-emerald-900">30d Milk Cash</p>
-              <p className="text-base font-bold font-mono text-emerald-700 mt-0.5">
-                Rs. {shortCycleMix.milkIncome30d.toLocaleString()}
-              </p>
-              <p className="text-[10px] text-slate-500">{shortCycleMix.milkProducersCount} dairy animal(s)</p>
+          <div className="space-y-2 pt-2 border-t border-slate-100">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+              <div className="p-3 rounded-xl bg-emerald-50/60 border border-emerald-200">
+                <p className="text-[10px] font-bold uppercase text-emerald-900">30d Milk Cash</p>
+                <p className="text-base font-bold font-mono text-emerald-700 mt-0.5">
+                  Rs. {shortCycleMix.milkIncome30d.toLocaleString()}
+                </p>
+                <p className="text-[10px] text-slate-500">{shortCycleMix.milkProducersCount} dairy animal(s)</p>
+              </div>
+              <div className="p-3 rounded-xl bg-amber-50/60 border border-amber-200">
+                <p className="text-[10px] font-bold uppercase text-amber-900">30d Manure Cash</p>
+                <p className="text-base font-bold font-mono text-amber-800 mt-0.5">
+                  Rs. {shortCycleMix.manureIncome30d.toLocaleString()}
+                </p>
+                <p className="text-[10px] text-slate-500">Weekly khad / compost</p>
+              </div>
+              <div className="p-3 rounded-xl bg-indigo-50/60 border border-indigo-200">
+                <p className="text-[10px] font-bold uppercase text-indigo-900">30d Kid &amp; Quick Sales</p>
+                <p className="text-base font-bold font-mono text-indigo-800 mt-0.5">
+                  Rs. {shortCycleMix.kidAndQuickSale30d.toLocaleString()}
+                </p>
+                <p className="text-[10px] text-slate-500">{nonSaleSelfAnimals.length} breeding / kid stock (Not for Sale)</p>
+              </div>
+              <div className="p-3 rounded-xl bg-cyan-50/60 border border-cyan-200">
+                <p className="text-[10px] font-bold uppercase text-cyan-900">30d Palai Income</p>
+                <p className="text-base font-bold font-mono text-cyan-800 mt-0.5">
+                  Rs. {shortCycleMix.palaiIncome30d.toLocaleString()}
+                </p>
+                <p className="text-[10px] text-slate-500">{palaiAnimals?.length || 0} client animal(s)</p>
+              </div>
+              <div className="p-3 rounded-xl bg-sky-50/60 border border-sky-200">
+                <p className="text-[10px] font-bold uppercase text-sky-900">30d Egg Cash</p>
+                <p className="text-base font-bold font-mono text-sky-800 mt-0.5">
+                  Rs. {shortCycleMix.eggIncome30d.toLocaleString()}
+                </p>
+                <p className="text-[10px] text-slate-500">{desiLayerAnimals.length} Desi layer(s)</p>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-100/80 border border-slate-200">
+                <p className="text-[10px] font-bold uppercase text-slate-700">30d Short-Cycle Total</p>
+                <p className="text-base font-bold font-mono text-slate-900 mt-0.5">
+                  Rs. {shortCycleMix.totalShortCycle30d.toLocaleString()}
+                </p>
+                <p className="text-[10px] text-slate-500">Feeds daily operating cash</p>
+              </div>
             </div>
-            <div className="p-3 rounded-xl bg-amber-50/60 border border-amber-200">
-              <p className="text-[10px] font-bold uppercase text-amber-900">30d Manure Cash</p>
-              <p className="text-base font-bold font-mono text-amber-800 mt-0.5">
-                Rs. {shortCycleMix.manureIncome30d.toLocaleString()}
-              </p>
-              <p className="text-[10px] text-slate-500">Weekly khad / compost</p>
-            </div>
-            <div className="p-3 rounded-xl bg-indigo-50/60 border border-indigo-200">
-              <p className="text-[10px] font-bold uppercase text-indigo-900">30d Kid &amp; Quick Sales</p>
-              <p className="text-base font-bold font-mono text-indigo-800 mt-0.5">
-                Rs. {shortCycleMix.kidAndQuickSale30d.toLocaleString()}
-              </p>
-              <p className="text-[10px] text-slate-500">{nonSaleSelfAnimals.length} breeding / kid stock (Not for Sale)</p>
-            </div>
-            <div className="p-3 rounded-xl bg-slate-100/80 border border-slate-200">
-              <p className="text-[10px] font-bold uppercase text-slate-700">30d Short-Cycle Total</p>
-              <p className="text-base font-bold font-mono text-slate-900 mt-0.5">
-                Rs. {shortCycleMix.totalShortCycle30d.toLocaleString()}
-              </p>
-              <p className="text-[10px] text-slate-500">Feeds daily operating cash</p>
-            </div>
+            <p className="text-[11px] font-mono text-slate-600">
+              Total = Milk (Rs. {shortCycleMix.milkIncome30d.toLocaleString()}) + Manure (Rs. {shortCycleMix.manureIncome30d.toLocaleString()}) + Kid (Rs. {shortCycleMix.kidAndQuickSale30d.toLocaleString()}) + Palai (Rs. {shortCycleMix.palaiIncome30d.toLocaleString()}) + Egg (Rs. {shortCycleMix.eggIncome30d.toLocaleString()}) = Rs. {shortCycleMix.totalShortCycle30d.toLocaleString()}
+            </p>
           </div>
         </div>
 

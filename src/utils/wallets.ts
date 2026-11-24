@@ -124,6 +124,7 @@ export interface ShortCycleMixSummary {
   manureIncome30d: number
   kidAndQuickSale30d: number
   palaiIncome30d: number
+  eggIncome30d: number
   totalShortCycle30d: number
   milkProducersCount: number
   kidCropCount: number
@@ -201,6 +202,7 @@ export function computeStaggeredBatchesAndShortCycle({
   let manureIncome30d = 0
   let kidAndQuickSale30d = 0
   let palaiIncome30d = 0
+  let eggIncome30d = 0
 
   for (const item of items) {
     if (item.type !== 'Income') continue
@@ -214,6 +216,8 @@ export function computeStaggeredBatchesAndShortCycle({
       manureIncome30d += amt
     } else if (c.includes('palai')) {
       palaiIncome30d += amt
+    } else if (c.includes('egg')) {
+      eggIncome30d += amt
     } else if (c.includes('kid') || c.includes('sale') || c.includes('qurbani')) {
       kidAndQuickSale30d += amt
     }
@@ -241,7 +245,9 @@ export function computeStaggeredBatchesAndShortCycle({
       manureIncome30d,
       kidAndQuickSale30d,
       palaiIncome30d,
-      totalShortCycle30d: milkIncome30d + manureIncome30d + kidAndQuickSale30d + palaiIncome30d,
+      eggIncome30d,
+      totalShortCycle30d:
+        milkIncome30d + manureIncome30d + kidAndQuickSale30d + palaiIncome30d + eggIncome30d,
       milkProducersCount,
       kidCropCount,
       fatteningCount,
