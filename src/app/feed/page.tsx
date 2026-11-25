@@ -402,7 +402,7 @@ export default async function FeedManagementPage({
     }
   }
 
-  // SERVER ACTION 1: Record Bulk Purchase (Core Logic Unchanged)
+  // SERVER ACTION 1: Record Bulk Purchase (Linked to OPERATING_CASH wallet)
   const addFeedLog = async (formData: FormData) => {
     'use server'
     try {
@@ -458,11 +458,36 @@ export default async function FeedManagementPage({
         return redirect(`/feed?error=${encodeURIComponent(error.message)}`)
       }
 
+      const { data: opWallet, error: walletLookupErr } = await supabaseClient
+        .from('farm_wallets')
+        .select('id')
+        .eq('farm_id', authFarm.id)
+        .eq('wallet_type', 'OPERATING_CASH')
+        .maybeSingle()
+
+      if (walletLookupErr || !opWallet?.id) {
+        if (insertedLogs && insertedLogs.length > 0) {
+          await supabaseClient
+            .from('feed_logs')
+            .delete()
+            .in('id', insertedLogs.map(l => l.id))
+            .eq('farm_id', authFarm.id)
+        }
+        return redirect(
+          `/feed?error=${encodeURIComponent(
+            'Purchase failed: OPERATING_CASH wallet not found — ' + (walletLookupErr?.message || 'missing wallet')
+          )}`
+        )
+      }
+
       const { error: walletErr } = await supabaseClient.from('wallet_transactions').insert({
         farm_id: authFarm.id,
-        wallet_type: 'OPERATING',
+        wallet_id: opWallet.id,
+        wallet_type: 'OPERATING_CASH',
+        entry_type: 'OUT',
         amount: -totalPurchaseCost,
         source_type: 'FEED_PURCHASE',
+        txn_date: log_date,
         description: `Feed Purchase - ${target_species} - Rs. ${totalPurchaseCost}`,
       })
 
@@ -487,7 +512,7 @@ export default async function FeedManagementPage({
 
       return redirect(
         `/feed?species=${encodeURIComponent(target_species)}&msg=${encodeURIComponent(
-          `Saved ${recordsToInsert.length} ${target_species} bulk purchase item(s) (Rs. ${totalPurchaseCost.toLocaleString()} deducted from OPERATING wallet).`
+          `Saved ${recordsToInsert.length} ${target_species} bulk purchase item(s) (Rs. ${totalPurchaseCost.toLocaleString()} deducted from OPERATING_CASH wallet).`
         )}`
       )
     } catch (err: unknown) {
@@ -538,11 +563,21 @@ export default async function FeedManagementPage({
 
       const logCost = Number(existingLog.total_cost) || 0
       if ((existingLog.entry_type === 'Purchase' || !existingLog.entry_type) && logCost > 0) {
+        const { data: opWallet } = await supabaseClient
+          .from('farm_wallets')
+          .select('id')
+          .eq('farm_id', authFarm.id)
+          .eq('wallet_type', 'OPERATING_CASH')
+          .maybeSingle()
+
         await supabaseClient.from('wallet_transactions').insert({
           farm_id: authFarm.id,
-          wallet_type: 'OPERATING',
+          wallet_id: opWallet?.id ?? null,
+          wallet_type: 'OPERATING_CASH',
+          entry_type: 'IN',
           amount: Math.abs(logCost),
           source_type: 'FEED_PURCHASE_REVERSAL',
+          txn_date: String(existingLog.log_date || getKarachiDate()).split('T')[0],
           description: `Reversed Feed Purchase - ${existingLog.target_species || 'Goat'} (${existingLog.feed_type}) - Rs. ${Math.abs(logCost)}`,
         })
       }
@@ -624,11 +659,21 @@ export default async function FeedManagementPage({
       }
 
       if (entryType === 'Purchase' && cost > 0) {
+        const { data: opWallet } = await supabaseClient
+          .from('farm_wallets')
+          .select('id')
+          .eq('farm_id', authFarm.id)
+          .eq('wallet_type', 'OPERATING_CASH')
+          .maybeSingle()
+
         await supabaseClient.from('wallet_transactions').insert({
           farm_id: authFarm.id,
-          wallet_type: 'OPERATING',
+          wallet_id: opWallet?.id ?? null,
+          wallet_type: 'OPERATING_CASH',
+          entry_type: 'OUT',
           amount: -Math.abs(cost),
           source_type: 'FEED_PURCHASE',
+          txn_date: logDate,
           description: `Restored Feed Purchase - ${targetSpecies} (${feedType}) - Rs. ${Math.abs(cost)}`,
         })
       }
@@ -984,3 +1029,4 @@ export default async function FeedManagementPage({
     />
   )
 }
+```[cite: 18]
