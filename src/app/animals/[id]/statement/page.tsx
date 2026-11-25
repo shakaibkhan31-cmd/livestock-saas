@@ -10,8 +10,10 @@ import {
 
 export default async function AnimalStatementPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>
+  searchParams?: Promise<{ view?: string }>
 }) {
   const { id } = await params
   const supabase = await createClient()
@@ -60,6 +62,10 @@ export default async function AnimalStatementPage({
 
   const todayStr = new Date().toISOString().split('T')[0]
   const isSelfOwned = animal.ownership === 'Self'
+  const isClientView = (await searchParams)?.view === 'client'
+  const isPalai = !isSelfOwned
+  const monthlyFee = Number(animal.monthly_palai_fee || animal.monthly_boarding_rate || 0)
+
   const purchaseCost = Number(animal.cost_basis || 0)
 
   const allExpenses = (financialLogs || []).filter(f => f.entry_type === 'Expense')
@@ -82,7 +88,18 @@ export default async function AnimalStatementPage({
   const adgKgPerDay = calculateAdgKgPerDay(weightLogs)
   const acqDateStr = animal.acquisition_date ? String(animal.acquisition_date).split('T')[0] : null
   const activeDays = acqDateStr ? daysBetweenDateStrings(acqDateStr, todayStr, 1) : 30
-
+  const billedMonths = Math.max(1, Math.ceil(activeDays / 30))
+  const palaiTotalBilled = billedMonths * monthlyFee
+  const palaiAutoBilled = (financialLogs || [])
+  .filter(f => String(f.notes || '').startsWith('Auto-Bill'))
+  .reduce((s, f) => s + (Number(f.amount) || 0), 0)
+const palaiTotalPaid = Math.max(0, totalRevenue - palaiAutoBilled)
+const palaiBalanceDue = Math.max(0, Math.max(palaiTotalBilled, palaiAutoBilled) - palaiTotalPaid)
+const palaiLogs = (financialLogs || []).filter(f =>
+  String(f.notes || '').startsWith('Auto-Bill') ||
+  String(f.notes || '').includes('Palai') ||
+  f.category === 'Palai Boarding'
+)
   const breakEven = calculateAnimalBreakEven({
     purchaseCost: isSelfOwned ? purchaseCost : 0,
     loggedExpenses: totalLoggedExpenses,
@@ -101,7 +118,12 @@ export default async function AnimalStatementPage({
             className="text-xs font-semibold text-slate-600 hover:text-slate-900"
           >
             ← Back to Animal Profile
-          </Link>
+	  </Link>
+          <div className="flex gap-2 print:hidden">
+  <Link href={`/animals/${animal.id}/statement`} className={`px-3 py-1.5 rounded-lg text-xs font-semibold border ${!isClientView ? 'bg-slate-900 text-white' : 'bg-white text-slate-700'}`}>Owner View</Link>
+  <Link href={`/animals/${animal.id}/statement?view=client`} className={`px-3 py-1.5 rounded-lg text-xs font-semibold border ${isClientView ? 'bg-emerald-600 text-white' : 'bg-white text-slate-700'}`}>Client View</Link>
+</div>
+
           <span className="text-xs text-slate-400">
             Press <strong>Ctrl + P</strong> (or Cmd + P) to Print / Save PDF
           </span>
@@ -124,12 +146,19 @@ export default async function AnimalStatementPage({
               {animal.species} {animal.breed_name ? `(${animal.breed_name})` : ''} • {animal.sex}
             </p>
             <p className="text-xs font-semibold text-slate-700 mt-0.5">
-              {isSelfOwned ? 'Ownership: Farm-Owned (Self)' : `Palai Client: ${animal.client_name || 'N/A'}`}
+              {isSelfOwned ? 'Ownership: Farm-Owned (Self)' : `Palai Client: ${animal.client_name || 'N/A'}${animal.client_phone ? ` • ${animal.client_phone}` : ''}`}
             </p>
           </div>
         </div>
 
-        {/* Financial & Break-Even Summary Grid */}
+        {isClientView && isPalai ? (
+  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+    <div className="p-3.5 rounded-xl border bg-slate-50"><p className="text-[10px] font-bold uppercase text-slate-500">Monthly Palai Fee</p><p className="text-base font-bold font-mono mt-1">Rs. {monthlyFee.toLocaleString()}</p></div>
+    <div className="p-3.5 rounded-xl border bg-slate-50"><p className="text-[10px] font-bold uppercase text-slate-500">Months Billed</p><p className="text-base font-bold font-mono mt-1">{billedMonths} mo ({activeDays} days)</p></div>
+    <div className="p-3.5 rounded-xl border bg-slate-50"><p className="text-[10px] font-bold uppercase text-slate-500">Total Billed</p><p className="text-base font-bold font-mono mt-1">Rs. {Math.max(palaiTotalBilled, palaiAutoBilled).toLocaleString()}</p></div>
+    <div className="p-3.5 rounded-xl border bg-rose-50 border-rose-200"><p className="text-[10px] font-bold uppercase text-rose-700">Balance Due</p><p className="text-base font-bold font-mono mt-1 text-rose-700">Rs. {palaiBalanceDue.toLocaleString()}</p><p className="text-[10px] text-slate-500">Paid: Rs. {palaiTotalPaid.toLocaleString()}</p></div>
+  </div>
+) : (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50">
             <p className="text-[10px] font-bold uppercase text-slate-500">Purchase Cost Basis</p>
@@ -179,7 +208,7 @@ export default async function AnimalStatementPage({
             <p className="text-[10px] text-slate-500">Revenue: Rs. {totalRevenue.toLocaleString()}</p>
           </div>
         </div>
-
+	)}
         {/* Itemized Financial Ledger */}
         <div className="space-y-2">
           <h2 className="text-xs font-bold uppercase tracking-wider text-slate-600">
@@ -207,7 +236,7 @@ export default async function AnimalStatementPage({
                   </td>
                 </tr>
               )}
-              {(financialLogs || []).map(f => (
+              {(isClientView && isPalai ? palaiLogs : (financialLogs || [])).map(f => (
                 <tr key={f.id}>
                   <td className="px-3 py-2 font-mono">{formatDateDDMMYYYY(f.transaction_date)}</td>
                   <td className="px-3 py-2">{f.entry_type}</td>
