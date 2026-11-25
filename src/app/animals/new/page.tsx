@@ -252,7 +252,7 @@ export default async function NewAnimalPage({
                 </div>
 
                 {/* Client Name & Boarding Rate - Visible ONLY when Palai is selected */}
-                <div id="palai-section" style={{ display: 'none' }} className="pt-2 space-y-4">
+                <div id="palai-section" className="pt-2 space-y-4">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-sm font-medium text-slate-700 mb-1.5">Client Name <span className="text-red-500">*</span></label>
