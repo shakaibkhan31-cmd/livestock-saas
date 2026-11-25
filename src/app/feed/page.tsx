@@ -1,8 +1,11 @@
+import { connection } from 'next/server'
 import { createClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
 import { revalidatePath } from 'next/cache'
 import { getUserFarmAndRole } from '@/utils/rbac'
 import FeedCommandCenterClient from './FeedCommandCenterClient'
+
+export const dynamic = 'force-dynamic'
 
 type ActiveAnimalRow = {
   id: string
@@ -149,6 +152,8 @@ export default async function FeedManagementPage({
     undo?: string
   }>
 }) {
+  await connection()
+
   const params = await searchParams
   const statusMsg = params.msg
   const selectedSpeciesFilter = params.species || 'All'
