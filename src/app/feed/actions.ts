@@ -325,12 +325,11 @@ export async function addFeedLog(formData: FormData) {
     const { error: walletErr } = await supabaseClient.from('wallet_transactions').insert({
       farm_id: authFarm.id,
       wallet_id: opWallet.id,
-      wallet_type: 'OPERATING_CASH',
       entry_type: 'OUT',
-      amount: -totalPurchaseCost,
-      source_type: 'FEED_PURCHASE',
+      amount: Math.abs(totalPurchaseCost),
+      source_type: 'FEED_EXPENSE',
       txn_date: log_date,
-      description: `Feed Purchase - ${target_species} - Rs. ${totalPurchaseCost}`,
+      notes: `Feed Purchase - ${target_species} - Rs. ${totalPurchaseCost}`,
     })
 
     if (walletErr) {
@@ -410,16 +409,17 @@ export async function deleteFeedLog(formData: FormData) {
         .eq('wallet_type', 'OPERATING_CASH')
         .maybeSingle()
 
-      await supabaseClient.from('wallet_transactions').insert({
-        farm_id: authFarm.id,
-        wallet_id: opWallet?.id ?? null,
-        wallet_type: 'OPERATING_CASH',
-        entry_type: 'IN',
-        amount: Math.abs(logCost),
-        source_type: 'FEED_PURCHASE_REVERSAL',
-        txn_date: String(existingLog.log_date || getKarachiDate()).split('T')[0],
-        description: `Reversed Feed Purchase - ${existingLog.target_species || 'Goat'} (${existingLog.feed_type}) - Rs. ${Math.abs(logCost)}`,
-      })
+      if (opWallet?.id) {
+        await supabaseClient.from('wallet_transactions').insert({
+          farm_id: authFarm.id,
+          wallet_id: opWallet.id,
+          entry_type: 'IN',
+          amount: Math.abs(logCost),
+          source_type: 'VOID_REVERSAL',
+          txn_date: String(existingLog.log_date || getKarachiDate()).split('T')[0],
+          notes: `Reversed Feed Purchase - ${existingLog.target_species || 'Goat'} (${existingLog.feed_type}) - Rs. ${Math.abs(logCost)}`,
+        })
+      }
     }
 
     await syncFeedInventorySnapshot(
@@ -504,16 +504,17 @@ export async function restoreFeedLog(formData: FormData) {
         .eq('wallet_type', 'OPERATING_CASH')
         .maybeSingle()
 
-      await supabaseClient.from('wallet_transactions').insert({
-        farm_id: authFarm.id,
-        wallet_id: opWallet?.id ?? null,
-        wallet_type: 'OPERATING_CASH',
-        entry_type: 'OUT',
-        amount: -Math.abs(cost),
-        source_type: 'FEED_PURCHASE',
-        txn_date: logDate,
-        description: `Restored Feed Purchase - ${targetSpecies} (${feedType}) - Rs. ${Math.abs(cost)}`,
-      })
+      if (opWallet?.id) {
+        await supabaseClient.from('wallet_transactions').insert({
+          farm_id: authFarm.id,
+          wallet_id: opWallet.id,
+          entry_type: 'OUT',
+          amount: Math.abs(cost),
+          source_type: 'FEED_EXPENSE',
+          txn_date: logDate,
+          notes: `Restored Feed Purchase - ${targetSpecies} (${feedType}) - Rs. ${Math.abs(cost)}`,
+        })
+      }
     }
 
     await syncFeedInventorySnapshot(supabaseClient, authFarm.id, feedType, targetSpecies, logDate, decoded.notes || null)
