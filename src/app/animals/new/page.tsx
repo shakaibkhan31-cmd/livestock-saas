@@ -146,7 +146,10 @@ export default async function NewAnimalPage({
               <span className="font-semibold">Error:</span> {decodeURIComponent(errorMessage)}
             </div>
           )}
-
+<style>{`
+  #palai-section { display: none; }
+  form:has(input[name="ownership"][value="Client"]:checked) #palai-section { display: block; }
+`}</style>
           <form action={registerAnimal} className="p-6 sm:p-8 space-y-6">
             
             {/* Section 0: Visual Identification (Photo Upload) */}
