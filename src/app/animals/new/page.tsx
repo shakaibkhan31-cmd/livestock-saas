@@ -46,6 +46,7 @@ export default async function NewAnimalPage({
     const breed_name = formData.get('breed_name') as string
     const ownership = formData.get('ownership') as string
     const client_name = formData.get('client_name') as string
+    const client_phone = formData.get('client_phone') as string
     const sex = formData.get('sex') as string
     const dob = formData.get('dob') as string
     const acquisition_date = formData.get('acquisition_date') as string
@@ -99,6 +100,7 @@ export default async function NewAnimalPage({
       species,
       ownership,
       client_name: ownership === 'Client' ? (client_name || 'Client') : null,
+      client_phone: ownership === 'Client' ? (client_phone || null) : null,
       sex,
       status,
       cost_basis: cost_basis ? parseFloat(cost_basis) : 0,
@@ -261,6 +263,15 @@ export default async function NewAnimalPage({
                         className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-green-600 transition" 
                       />
                     </div>
+                    <div>
+  <label className="block text-sm font-medium text-slate-700 mb-1.5">Client Phone</label>
+  <input
+    name="client_phone"
+    type="tel"
+    placeholder="03XX-XXXXXXX"
+    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-green-600 transition"
+  />
+</div>
                     <div>
                       <label className="block text-sm font-medium text-slate-700 mb-1.5">Monthly Boarding Rate (PKR)</label>
                       <input 
