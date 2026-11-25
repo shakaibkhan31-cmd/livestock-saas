@@ -158,9 +158,10 @@ export default async function FeedManagementPage({
   let activeAnimals: ActiveAnimalRow[] = []
   let inventoryRows: Array<Record<string, any>> = []
   let thresholdRows: Array<Record<string, any>> = []
+  let operatingCash = 0
 
   try {
-    const [logsRes, animalsRes, invRes, threshRes] = await Promise.all([
+    const [logsRes, animalsRes, invRes, threshRes, walletsRes] = await Promise.all([
       supabase
         .from('feed_logs')
         .select('*')
@@ -179,6 +180,12 @@ export default async function FeedManagementPage({
         .from('feed_thresholds')
         .select('feed_name, min_stock_kg')
         .eq('farm_id', farm.id),
+      isAdmin
+        ? supabase
+            .from('farm_wallets')
+            .select('wallet_type, current_balance')
+            .eq('farm_id', farm.id)
+        : Promise.resolve({ data: [], error: null }),
     ])
 
     if (logsRes.error) {
@@ -199,6 +206,11 @@ export default async function FeedManagementPage({
 
     if (!threshRes.error) {
       thresholdRows = threshRes.data || []
+    }
+
+    if (isAdmin && !walletsRes.error && Array.isArray(walletsRes.data)) {
+      const opRow = walletsRes.data.find(w => w.wallet_type === 'OPERATING_CASH')
+      operatingCash = Number(opRow?.current_balance ?? 0) || 0
     }
   } catch (err: unknown) {
     if (isNextRedirectError(err)) throw err
@@ -237,6 +249,7 @@ export default async function FeedManagementPage({
       farmName={farm?.farm_name || 'Livestock ERP'}
       role={role || 'staff'}
       isAdmin={isAdmin}
+      operatingCash={isAdmin ? operatingCash : 0}
       todayStr={todayStr}
       speciesOptions={SPECIES_OPTIONS}
       dynamicFeedSuggestions={dynamicFeedSuggestions}
