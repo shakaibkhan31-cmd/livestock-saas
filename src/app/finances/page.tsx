@@ -2675,9 +2675,9 @@ export default async function FinancesPage({
                           </span>
                         )}
                       </td>
-                      <td className="px-5 py-3.5 text-right">
+			<td className="px-5 py-3.5 text-right">
                         <div className="inline-flex flex-wrap items-center justify-end gap-2">
-                          {row.whatsappUrl && (
+                          {row.balanceDue > 0 && row.whatsappUrl && (
                             <a
                               href={row.whatsappUrl}
                               target="_blank"
@@ -2693,25 +2693,31 @@ export default async function FinancesPage({
                             </a>
                           )}
 
-                          <form action={logPalaiPaymentAction} className="inline-flex items-center gap-1.5">
-                            <input type="hidden" name="animalId" value={row.id} />
-                            <input type="hidden" name="payment_date" value={todayStr} />
-                            <input
-                              name="amount"
-                              type="number"
-                              min="1"
-                              step="1"
-                              required
-                              defaultValue={row.balanceDue > 0 ? row.balanceDue : row.monthly_fee}
-                              className="w-24 px-2 py-1 border border-slate-300 rounded-lg text-xs font-mono text-right text-slate-900"
-                            />
-                            <button
-                              type="submit"
-                              className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold transition"
-                            >
-                              + Pay
-                            </button>
-                          </form>
+                          {row.balanceDue <= 0 ? (
+                            <span className="inline-flex items-center px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-semibold">
+                              ✓ Paid
+                            </span>
+                          ) : (
+  <form action={logPalaiPaymentAction} className="inline-flex items-center gap-1.5">
+    <input type="hidden" name="animalId" value={row.id} />
+    <input type="hidden" name="payment_date" value={todayStr} />
+    <input
+      name="amount"
+      type="number"
+      min="1"
+      step="1"
+      required
+      defaultValue={row.balanceDue}
+      className="w-24 px-2 py-1 border border-slate-300 rounded-lg text-xs font-mono text-right text-slate-900"
+    />
+    <button
+      type="submit"
+      className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold transition"
+    >
+      + Pay
+    </button>
+  </form>
+                          )}
                         </div>
                       </td>
                     </tr>
