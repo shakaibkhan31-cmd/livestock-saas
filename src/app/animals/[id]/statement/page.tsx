@@ -96,9 +96,8 @@ export default async function AnimalStatementPage({
 const palaiTotalPaid = Math.max(0, totalRevenue - palaiAutoBilled)
 const palaiBalanceDue = Math.max(0, Math.max(palaiTotalBilled, palaiAutoBilled) - palaiTotalPaid)
 const palaiLogs = (financialLogs || []).filter(f =>
-  String(f.notes || '').startsWith('Auto-Bill') ||
-  String(f.notes || '').includes('Palai') ||
-  f.category === 'Palai Boarding'
+  f.entry_type === 'Revenue' ||
+  String(f.notes || '').startsWith('Auto-Bill')
 )
   const breakEven = calculateAnimalBreakEven({
     purchaseCost: isSelfOwned ? purchaseCost : 0,
@@ -134,7 +133,7 @@ const palaiLogs = (financialLogs || []).filter(f =>
           <div>
             <p className="text-xs font-bold uppercase tracking-widest text-emerald-700">{farm.farm_name}</p>
             <h1 className="text-2xl font-bold text-slate-900 mt-1">
-              Livestock Ledger &amp; Break-Even Statement
+              {isClientView && isPalai ? 'Palai Boarding Statement' : 'Livestock Ledger & Break-Even Statement'}
             </h1>
             <p className="text-xs text-slate-500 mt-0.5">
               Generated on {formatDateDDMMYYYY(todayStr)} • Active Tenure: {activeDays} days
@@ -156,7 +155,7 @@ const palaiLogs = (financialLogs || []).filter(f =>
     <div className="p-3.5 rounded-xl border bg-slate-50"><p className="text-[10px] font-bold uppercase text-slate-500">Monthly Palai Fee</p><p className="text-base font-bold font-mono mt-1">Rs. {monthlyFee.toLocaleString()}</p></div>
     <div className="p-3.5 rounded-xl border bg-slate-50"><p className="text-[10px] font-bold uppercase text-slate-500">Months Billed</p><p className="text-base font-bold font-mono mt-1">{billedMonths} mo ({activeDays} days)</p></div>
     <div className="p-3.5 rounded-xl border bg-slate-50"><p className="text-[10px] font-bold uppercase text-slate-500">Total Billed</p><p className="text-base font-bold font-mono mt-1">Rs. {Math.max(palaiTotalBilled, palaiAutoBilled).toLocaleString()}</p></div>
-    <div className="p-3.5 rounded-xl border bg-rose-50 border-rose-200"><p className="text-[10px] font-bold uppercase text-rose-700">Balance Due</p><p className="text-base font-bold font-mono mt-1 text-rose-700">Rs. {palaiBalanceDue.toLocaleString()}</p><p className="text-[10px] text-slate-500">Paid: Rs. {palaiTotalPaid.toLocaleString()}</p></div>
+    <div className={`p-3.5 rounded-xl border ${palaiBalanceDue > 0 ? 'bg-rose-50 border-rose-200' : 'bg-emerald-50 border-emerald-200'}`}><p className="text-[10px] font-bold uppercase text-rose-700">Balance Due</p><p className="text-base font-bold font-mono mt-1 ${palaiBalanceDue > 0 ? 'text-rose-700' : 'text-emerald-700'}">Rs. {palaiBalanceDue.toLocaleString()}</p><p className="text-[10px] text-slate-500">Paid: Rs. {palaiTotalPaid.toLocaleString()}</p></div>
   </div>
 ) : (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
