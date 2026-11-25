@@ -155,7 +155,7 @@ const palaiLogs = (financialLogs || []).filter(f =>
     <div className="p-3.5 rounded-xl border bg-slate-50"><p className="text-[10px] font-bold uppercase text-slate-500">Monthly Palai Fee</p><p className="text-base font-bold font-mono mt-1">Rs. {monthlyFee.toLocaleString()}</p></div>
     <div className="p-3.5 rounded-xl border bg-slate-50"><p className="text-[10px] font-bold uppercase text-slate-500">Months Billed</p><p className="text-base font-bold font-mono mt-1">{billedMonths} mo ({activeDays} days)</p></div>
     <div className="p-3.5 rounded-xl border bg-slate-50"><p className="text-[10px] font-bold uppercase text-slate-500">Total Billed</p><p className="text-base font-bold font-mono mt-1">Rs. {Math.max(palaiTotalBilled, palaiAutoBilled).toLocaleString()}</p></div>
-    <div className={`p-3.5 rounded-xl border ${palaiBalanceDue > 0 ? 'bg-rose-50 border-rose-200' : 'bg-emerald-50 border-emerald-200'}`}><p className="text-[10px] font-bold uppercase text-rose-700">Balance Due</p><p className="text-base font-bold font-mono mt-1 ${palaiBalanceDue > 0 ? 'text-rose-700' : 'text-emerald-700'}">Rs. {palaiBalanceDue.toLocaleString()}</p><p className="text-[10px] text-slate-500">Paid: Rs. {palaiTotalPaid.toLocaleString()}</p></div>
+    <div className={`p-3.5 rounded-xl border ${palaiBalanceDue > 0 ? 'bg-rose-50 border-rose-200' : 'bg-emerald-50 border-emerald-200'}`}><p className="text-[10px] font-bold uppercase ${palaiBalanceDue > 0 ? 'text-rose-700' : 'text-emerald-700'}">Balance Due</p><p className="text-base font-bold font-mono mt-1 ${palaiBalanceDue > 0 ? 'text-rose-700' : 'text-emerald-700'}">Rs. {palaiBalanceDue.toLocaleString()}</p><p className="text-[10px] text-slate-500">Paid: Rs. {palaiTotalPaid.toLocaleString()}</p></div>
   </div>
 ) : (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -211,7 +211,7 @@ const palaiLogs = (financialLogs || []).filter(f =>
         {/* Itemized Financial Ledger */}
         <div className="space-y-2">
           <h2 className="text-xs font-bold uppercase tracking-wider text-slate-600">
-            Itemized Cost &amp; Revenue Ledger
+            {isClientView && isPalai ? 'Palai Payment History' : 'Itemized Cost & Revenue Ledger'}
           </h2>
           <table className="w-full border border-slate-200 text-xs">
             <thead className="bg-slate-100 border-b border-slate-200">
