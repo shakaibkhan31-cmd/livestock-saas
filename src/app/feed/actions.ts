@@ -4,6 +4,7 @@ import { createClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
 import { revalidatePath } from 'next/cache'
 import { getUserFarmAndRole } from '@/utils/rbac'
+import { recalculateWalletBalance } from '@/utils/wallets'
 
 function getKarachiDate(): string {
   return new Intl.DateTimeFormat('en-CA', {
@@ -290,6 +291,7 @@ export async function addFeedLog(formData: FormData) {
     }
 
     const totalPurchaseCost = recordsToInsert.reduce((sum, r) => sum + (Number(r.total_cost) || 0), 0)
+    const purchaseAmount = Math.abs(totalPurchaseCost)
 
     const { data: insertedLogs, error } = await supabaseClient
       .from('feed_logs')
@@ -299,6 +301,9 @@ export async function addFeedLog(formData: FormData) {
     if (error) {
       return redirect(`/feed?error=${encodeURIComponent(error.message)}`)
     }
+
+    const primaryLogId = insertedLogs?.[0]?.id
+    const referenceKey = primaryLogId ? `FEED_LOG:${primaryLogId}` : null
 
     const { data: opWallet, error: walletLookupErr } = await supabaseClient
       .from('farm_wallets')
@@ -325,11 +330,12 @@ export async function addFeedLog(formData: FormData) {
     const { error: walletErr } = await supabaseClient.from('wallet_transactions').insert({
       farm_id: authFarm.id,
       wallet_id: opWallet.id,
+      ...(referenceKey ? { reference_key: referenceKey } : {}),
       entry_type: 'OUT',
-      amount: Math.abs(totalPurchaseCost),
+      amount: purchaseAmount,
       source_type: 'FEED_EXPENSE',
       txn_date: log_date,
-      notes: `Feed Purchase - ${target_species} - Rs. ${totalPurchaseCost}`,
+      notes: `Feed Purchase - ${target_species} - Rs. ${purchaseAmount}`,
     })
 
     if (walletErr) {
@@ -344,6 +350,38 @@ export async function addFeedLog(formData: FormData) {
         `/feed?error=${encodeURIComponent('Purchase failed due to a wallet transaction error: ' + walletErr.message)}`
       )
     }
+
+    const { error: txnErr } = await supabaseClient.from('transactions').insert({
+      farm_id: authFarm.id,
+      type: 'Expense',
+      category: 'Feed & Ration Purchase',
+      amount: purchaseAmount,
+      txn_date: log_date,
+      description: `Feed Purchase - ${target_species}${referenceKey ? ` [${referenceKey}]` : ''}`,
+      target_species,
+    })
+
+    if (txnErr) {
+      if (referenceKey) {
+        await supabaseClient
+          .from('wallet_transactions')
+          .delete()
+          .eq('farm_id', authFarm.id)
+          .eq('reference_key', referenceKey)
+      }
+      if (insertedLogs && insertedLogs.length > 0) {
+        await supabaseClient
+          .from('feed_logs')
+          .delete()
+          .in('id', insertedLogs.map(l => l.id))
+          .eq('farm_id', authFarm.id)
+      }
+      return redirect(
+        `/feed?error=${encodeURIComponent('Purchase failed due to a ledger transaction error: ' + txnErr.message)}`
+      )
+    }
+
+    await recalculateWalletBalance(supabaseClient, authFarm.id, opWallet.id)
 
     await Promise.all(
       recordsToInsert.map(rec =>
@@ -401,24 +439,54 @@ export async function deleteFeedLog(formData: FormData) {
     }
 
     const logCost = Number(existingLog.total_cost) || 0
-    if ((existingLog.entry_type === 'Purchase' || !existingLog.entry_type) && logCost > 0) {
-      const { data: opWallet } = await supabaseClient
-        .from('farm_wallets')
-        .select('id')
-        .eq('farm_id', authFarm.id)
-        .eq('wallet_type', 'OPERATING_CASH')
-        .maybeSingle()
+    const isPurchase = existingLog.entry_type === 'Purchase' || !existingLog.entry_type
 
-      if (opWallet?.id) {
-        await supabaseClient.from('wallet_transactions').insert({
-          farm_id: authFarm.id,
-          wallet_id: opWallet.id,
-          entry_type: 'IN',
-          amount: Math.abs(logCost),
-          source_type: 'VOID_REVERSAL',
-          txn_date: String(existingLog.log_date || getKarachiDate()).split('T')[0],
-          notes: `Reversed Feed Purchase - ${existingLog.target_species || 'Goat'} (${existingLog.feed_type}) - Rs. ${Math.abs(logCost)}`,
-        })
+    if (isPurchase) {
+      const referenceKey = `FEED_LOG:${existingLog.id}`
+      const voidDateStr = getKarachiDate()
+
+      const { data: matchingTxns } = await supabaseClient
+        .from('transactions')
+        .select('id, description')
+        .eq('farm_id', authFarm.id)
+        .ilike('description', `%${referenceKey}%`)
+
+      for (const txn of matchingTxns || []) {
+        const currentDesc = String(txn.description || '')
+        if (!currentDesc.trim().toUpperCase().startsWith('[VOID]')) {
+          await supabaseClient
+            .from('transactions')
+            .update({
+              description: `[VOID] Voided on ${voidDateStr} — ${currentDesc}`,
+            })
+            .eq('id', txn.id)
+            .eq('farm_id', authFarm.id)
+        }
+      }
+
+      const { data: matchingWalletTxns } = await supabaseClient
+        .from('wallet_transactions')
+        .select('id, wallet_id, notes')
+        .eq('farm_id', authFarm.id)
+        .eq('reference_key', referenceKey)
+
+      const touchedWalletIds = new Set<string>()
+      for (const wt of matchingWalletTxns || []) {
+        if (wt.wallet_id) touchedWalletIds.add(wt.wallet_id)
+        const currentNotes = String(wt.notes || '')
+        if (!currentNotes.trim().toUpperCase().startsWith('[VOID]')) {
+          await supabaseClient
+            .from('wallet_transactions')
+            .update({
+              notes: `[VOID] Voided on ${voidDateStr}${currentNotes ? ` — ${currentNotes}` : ''}`,
+            })
+            .eq('id', wt.id)
+            .eq('farm_id', authFarm.id)
+        }
+      }
+
+      for (const wId of touchedWalletIds) {
+        await recalculateWalletBalance(supabaseClient, authFarm.id, wId)
       }
     }
 
@@ -446,7 +514,7 @@ export async function deleteFeedLog(formData: FormData) {
 
     return redirect(
       `/feed?msg=${encodeURIComponent(
-        `Deleted ${existingLog.feed_type} (${Number(existingLog.quantity_kg).toFixed(1)} kg — Rs. ${logCost.toLocaleString()}) and synced inventory/wallet.`
+        `Deleted ${existingLog.feed_type} (${Number(existingLog.quantity_kg).toFixed(1)} kg — Rs. ${logCost.toLocaleString()}) and synced inventory/ledger.`
       )}&undo=${encodeURIComponent(undoSnapshot)}`
     )
   } catch (err: unknown) {
@@ -478,25 +546,32 @@ export async function restoreFeedLog(formData: FormData) {
     const cost = Number(decoded.total_cost) || 0
     const logDate = String(decoded.log_date || getKarachiDate()).split('T')[0]
 
-    const { error: restoreErr } = await supabaseClient.from('feed_logs').insert([
-      {
-        farm_id: authFarm.id,
-        target_species: targetSpecies,
-        entry_type: entryType,
-        feed_type: feedType,
-        quantity_kg: qty,
-        total_cost: cost,
-        log_date: logDate,
-        notes: decoded.notes || null,
-        is_allocated: false,
-      },
-    ])
+    const { data: restoredLog, error: restoreErr } = await supabaseClient
+      .from('feed_logs')
+      .insert([
+        {
+          farm_id: authFarm.id,
+          target_species: targetSpecies,
+          entry_type: entryType,
+          feed_type: feedType,
+          quantity_kg: qty,
+          total_cost: cost,
+          log_date: logDate,
+          notes: decoded.notes || null,
+          is_allocated: false,
+        },
+      ])
+      .select('id')
+      .single()
 
     if (restoreErr) {
       return redirect(`/feed?error=${encodeURIComponent(restoreErr.message)}`)
     }
 
-    if (entryType === 'Purchase' && cost > 0) {
+    const newReferenceKey = restoredLog?.id ? `FEED_LOG:${restoredLog.id}` : null
+    const restoreAmount = Math.abs(cost)
+
+    if (entryType === 'Purchase' && restoreAmount > 0) {
       const { data: opWallet } = await supabaseClient
         .from('farm_wallets')
         .select('id')
@@ -508,12 +583,27 @@ export async function restoreFeedLog(formData: FormData) {
         await supabaseClient.from('wallet_transactions').insert({
           farm_id: authFarm.id,
           wallet_id: opWallet.id,
+          ...(newReferenceKey ? { reference_key: newReferenceKey } : {}),
           entry_type: 'OUT',
-          amount: Math.abs(cost),
+          amount: restoreAmount,
           source_type: 'FEED_EXPENSE',
           txn_date: logDate,
-          notes: `Restored Feed Purchase - ${targetSpecies} (${feedType}) - Rs. ${Math.abs(cost)}`,
+          notes: `Restored Feed Purchase - ${targetSpecies} (${feedType}) - Rs. ${restoreAmount}`,
         })
+      }
+
+      await supabaseClient.from('transactions').insert({
+        farm_id: authFarm.id,
+        type: 'Expense',
+        category: 'Feed & Ration Purchase',
+        amount: restoreAmount,
+        txn_date: logDate,
+        description: `Feed Purchase - ${targetSpecies}${newReferenceKey ? ` [${newReferenceKey}]` : ''}`,
+        target_species: targetSpecies,
+      })
+
+      if (opWallet?.id) {
+        await recalculateWalletBalance(supabaseClient, authFarm.id, opWallet.id)
       }
     }
 
