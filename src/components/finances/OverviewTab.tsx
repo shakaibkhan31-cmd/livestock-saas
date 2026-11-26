@@ -4,6 +4,7 @@ import { formatDateDDMMYYYY } from '@/utils/breakeven'
 import { computeWeeklyCashPulseAndRunway } from '@/utils/wallets'
 import {
   getPakistanDateString,
+  isFeedCategory,
   isOverheadShareCategory,
   isVoidText,
 } from '@/utils/financesHelpers'
@@ -42,6 +43,7 @@ export default async function OverviewTab({ farmId }: { farmId: string }) {
         category: t.category || 'General',
         amount: Number(t.amount) || 0,
         isAutoBill: false,
+        isFeedAllocation: false,
       })),
     ...(animalFinLogs || [])
       .filter((f: any) => !isVoidText(f.notes))
@@ -53,6 +55,7 @@ export default async function OverviewTab({ farmId }: { farmId: string }) {
           category: f.category || 'General',
           amount: Number(f.amount) || 0,
           isAutoBill: noteStr.startsWith('Auto-Bill'),
+          isFeedAllocation: isFeedCategory(f.category || ''),
         }
       }),
   ]
@@ -68,13 +71,23 @@ export default async function OverviewTab({ farmId }: { farmId: string }) {
   const totalIncome = totalCashReceived
 
   const totalExpense = activeItems
-    .filter(t => t.type === 'Expense' && !isOverheadShareCategory(t.category))
+    .filter(
+      t =>
+        t.type === 'Expense' &&
+        !isOverheadShareCategory(t.category) &&
+        !t.isFeedAllocation
+    )
     .reduce((acc, t) => acc + t.amount, 0)
 
   const netBalance = totalIncome - totalExpense
 
   const cashItemsForAnalytics = activeItems
-    .filter(item => !item.isAutoBill && !isOverheadShareCategory(item.category))
+    .filter(
+      item =>
+        !item.isAutoBill &&
+        !isOverheadShareCategory(item.category) &&
+        !item.isFeedAllocation
+    )
     .map(item => ({
       date: item.date,
       type: item.type,
@@ -99,7 +112,12 @@ export default async function OverviewTab({ farmId }: { farmId: string }) {
 
   const expenseByCategory: Record<string, number> = {}
   activeItems
-    .filter(t => t.type === 'Expense')
+    .filter(
+      t =>
+        t.type === 'Expense' &&
+        !isOverheadShareCategory(t.category) &&
+        !t.isFeedAllocation
+    )
     .forEach(t => {
       const cat = t.category || 'General'
       expenseByCategory[cat] = (expenseByCategory[cat] || 0) + t.amount
