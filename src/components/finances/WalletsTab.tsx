@@ -167,7 +167,7 @@ export default async function WalletsTab({ farmId }: { farmId: string }) {
           amount: Number(f.amount) || 0,
           isAutoBill: noteStr.startsWith('Auto-Bill'),
           // Feed Allocation cash nahi hai, sirf andar ki movement hai
-          isFeedAllocation: isFeedCategory(f.category || '') && /allocat/i.test(noteStr),
+          isFeedAllocation: isFeedCategory(f.category || ''),
         }
       }),
   ]
