@@ -154,6 +154,7 @@ export default async function WalletsTab({ farmId }: { farmId: string }) {
         category: t.category || 'General',
         amount: Number(t.amount) || 0,
         isAutoBill: false,
+        isFeedAllocation: false,
       })),
     ...animalFinLogs
       .filter((f: any) => !isVoidText(f.notes))
@@ -165,12 +166,19 @@ export default async function WalletsTab({ farmId }: { farmId: string }) {
           category: f.category || 'General',
           amount: Number(f.amount) || 0,
           isAutoBill: noteStr.startsWith('Auto-Bill'),
+          // Feed Allocation cash nahi hai, sirf andar ki movement hai
+          isFeedAllocation: isFeedCategory(f.category || '') && /allocat/i.test(noteStr),
         }
       }),
   ]
 
   const cashItemsForAnalytics = activeLedgerItems
-    .filter(item => !item.isAutoBill && !isOverheadShareCategory(item.category))
+    .filter(
+      item =>
+        !item.isAutoBill &&
+        !isOverheadShareCategory(item.category) &&
+        !item.isFeedAllocation
+    )
     .map(item => ({
       date: item.date,
       type: item.type,
