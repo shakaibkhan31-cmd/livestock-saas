@@ -61,67 +61,55 @@ export default async function LedgerTab({
   const supabase = await createClient()
   const todayStr = getPakistanDateString()
 
-  // Fetches ONLY Ledger tables: transactions & animal_financial_logs
-  const [
-    { data: pagedGlobalTxns, count: pagedGlobalCount },
-    { data: allGlobalTxnsForTotals },
-    { data: pagedAnimalFinLogs, count: pagedAnimalFinCount },
-    { data: allAnimalFinLogsForTotals },
-  ] = await Promise.all([
-    supabase
-      .from('transactions')
-      .select('id, txn_date, type, category, amount, description, target_species', {
-        count: 'exact',
-      })
-      .eq('farm_id', farmId)
-      .order('txn_date', { ascending: false })
-      .range(rangeFrom, rangeTo),
-    supabase
-      .from('transactions')
-      .select('id, txn_date, type, category, amount, description, target_species')
-      .eq('farm_id', farmId),
-    supabase
-      .from('animal_financial_logs')
-      .select(
-        `
-        id,
-        animal_id,
-        entry_type,
-        category,
-        amount,
-        transaction_date,
-        notes,
-        livestock_master (
-          id,
-          tag_id,
-          species
-        )
-      `,
-        { count: 'exact' }
-      )
-      .eq('farm_id', farmId)
-      .order('transaction_date', { ascending: false })
-      .range(rangeFrom, rangeTo),
-    supabase
-      .from('animal_financial_logs')
-      .select(
-        `
-        id,
-        animal_id,
-        entry_type,
-        category,
-        amount,
-        transaction_date,
-        notes,
-        livestock_master (
-          id,
-          tag_id,
-          species
-        )
+  // Single paginated fetch per ledger table (no duplicate full-table fetch)
+  let globalQuery = supabase
+    .from('transactions')
+    .select('id, txn_date, type, category, amount, description, target_species', {
+      count: 'exact',
+    })
+    .eq('farm_id', farmId)
+    .order('txn_date', { ascending: false })
+
+  if (filterType !== 'All') {
+    globalQuery = globalQuery.eq('type', filterType)
+  }
+
+  let animalQuery = supabase
+    .from('animal_financial_logs')
+    .select(
       `
+      id,
+      animal_id,
+      entry_type,
+      category,
+      amount,
+      transaction_date,
+      notes,
+      livestock_master (
+        tag_id,
+        species
       )
-      .eq('farm_id', farmId),
-  ])
+    `,
+      { count: 'exact' }
+    )
+    .eq('farm_id', farmId)
+    .order('transaction_date', { ascending: false })
+
+  if (filterType === 'Income') {
+    animalQuery = animalQuery.eq('entry_type', 'Revenue')
+  } else if (filterType === 'Expense') {
+    animalQuery = animalQuery.neq('entry_type', 'Revenue')
+  }
+
+  if (!normalizedQuery) {
+    globalQuery = globalQuery.range(rangeFrom, rangeTo)
+    animalQuery = animalQuery.range(rangeFrom, rangeTo)
+  }
+
+  const [
+    { data: globalRows, count: globalCount },
+    { data: animalRows, count: animalCount },
+  ] = await Promise.all([globalQuery, animalQuery])
 
   type UnifiedLedgerItem = {
     id: string
@@ -177,23 +165,13 @@ export default async function LedgerTab({
     }
   }
 
-  const unifiedList: UnifiedLedgerItem[] = [
-    ...(allGlobalTxnsForTotals || []).map(mapGlobalTxn),
-    ...(allAnimalFinLogsForTotals || []).map(mapAnimalFinLog),
+  const combinedRows: UnifiedLedgerItem[] = [
+    ...(globalRows || []).map(mapGlobalTxn),
+    ...(animalRows || []).map(mapAnimalFinLog),
   ].sort((a, b) => b.date.localeCompare(a.date))
 
-  const pagedUnifiedList: UnifiedLedgerItem[] = [
-    ...(pagedGlobalTxns || []).map(mapGlobalTxn),
-    ...(pagedAnimalFinLogs || []).map(mapAnimalFinLog),
-  ].sort((a, b) => b.date.localeCompare(a.date))
-
-  const activeLedgerItems = unifiedList.filter(item => !item.isVoid)
-
-  const applyLedgerFilter = (item: UnifiedLedgerItem) => {
-    if (filterType === 'Income' && item.type !== 'Income') return false
-    if (filterType === 'Expense' && item.type !== 'Expense') return false
+  const applySearchFilter = (item: UnifiedLedgerItem) => {
     if (!normalizedQuery) return true
-
     const haystack = [
       item.category,
       item.description,
@@ -206,12 +184,23 @@ export default async function LedgerTab({
     ]
       .join(' ')
       .toLowerCase()
-
     return haystack.includes(normalizedQuery)
   }
 
-  const filteredLedger = unifiedList.filter(applyLedgerFilter)
-  const paginatedLedger = pagedUnifiedList.filter(applyLedgerFilter).slice(0, pageSize)
+  const filteredLedger = normalizedQuery
+    ? combinedRows.filter(applySearchFilter)
+    : combinedRows
+
+  const totalDbLedgerCount = normalizedQuery
+    ? filteredLedger.length
+    : (globalCount ?? 0) + (animalCount ?? 0)
+
+  const totalPages = Math.max(1, Math.ceil(totalDbLedgerCount / pageSize))
+  const safePage = Math.min(currentPage, totalPages)
+
+  const paginatedLedger = normalizedQuery
+    ? filteredLedger.slice((safePage - 1) * pageSize, safePage * pageSize)
+    : filteredLedger.slice(0, pageSize)
 
   const exportableRows: ExportableTxn[] = filteredLedger.map(item => ({
     date: item.date,
@@ -229,11 +218,6 @@ export default async function LedgerTab({
   const exportFileName = `${farmName
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')}-finances-${filterType.toLowerCase()}-${todayStr}.csv`
-
-  const totalDbLedgerCount = (pagedGlobalCount ?? 0) + (pagedAnimalFinCount ?? 0)
-  const totalFilteredCount = filteredLedger.length
-  const totalPages = Math.max(1, Math.ceil(totalDbLedgerCount / pageSize))
-  const safePage = Math.min(currentPage, totalPages)
 
   const addTransaction = async (formData: FormData) => {
     'use server'
@@ -541,9 +525,8 @@ export default async function LedgerTab({
             <div>
               <h2 className="font-bold text-slate-800 text-sm">Unified Transaction History</h2>
               <p className="text-[11px] text-slate-400">
-                Page {safePage} of {totalPages} • Showing {paginatedLedger.length} on page (
-                {totalFilteredCount} matching in ledger; Active: {activeLedgerItems.length} / Total:{' '}
-                {unifiedList.length})
+                Page {safePage} of {totalPages} • Showing {paginatedLedger.length} entries (Total:{' '}
+                {totalDbLedgerCount})
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-1.5">

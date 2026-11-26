@@ -33,15 +33,14 @@ export default async function WalletsTab({ farmId }: { farmId: string }) {
   const supabase = await createClient()
   const todayStr = getPakistanDateString()
 
-  // Fetches ONLY Wallets, P&L & Overhead Allocation data (no Palai billing or contacts)
+  // Strictly Wallets, P&L & Overhead Allocation data (trimmed columns, single wallet_transactions query)
   const [
     wallets,
     { data: allFarmLivestock },
     { data: weightLogs },
     { data: allGlobalTxnsForTotals },
     { data: allAnimalFinLogsForTotals },
-    { data: pagedWalletAuditRows, count: pagedWalletAuditCount },
-    { data: allWalletAuditRowsForTotals },
+    { data: allWalletAuditRows, count: totalWalletAuditCount },
   ] = await Promise.all([
     ensureDefaultWallets(supabase, farmId),
     supabase
@@ -55,65 +54,21 @@ export default async function WalletsTab({ farmId }: { farmId: string }) {
       .order('recorded_date', { ascending: false }),
     supabase
       .from('transactions')
-      .select('id, txn_date, type, category, amount, description, target_species')
+      .select('txn_date, type, category, amount, description')
       .eq('farm_id', farmId),
     supabase
       .from('animal_financial_logs')
-      .select(
-        `
-        id,
-        animal_id,
-        entry_type,
-        category,
-        amount,
-        transaction_date,
-        notes,
-        livestock_master (
-          id,
-          tag_id,
-          species
-        )
-      `
-      )
+      .select('entry_type, category, amount, transaction_date, notes')
       .eq('farm_id', farmId),
     supabase
       .from('wallet_transactions')
       .select(
-        `
-        id,
-        wallet_id,
-        animal_id,
-        reference_key,
-        entry_type,
-        amount,
-        source_type,
-        txn_date,
-        notes,
-        created_at
-      `,
+        'id, wallet_id, reference_key, entry_type, amount, source_type, txn_date, notes, created_at',
         { count: 'exact' }
       )
       .eq('farm_id', farmId)
       .order('txn_date', { ascending: false })
-      .order('created_at', { ascending: false })
-      .range(0, 29),
-    supabase
-      .from('wallet_transactions')
-      .select(
-        `
-        id,
-        wallet_id,
-        animal_id,
-        reference_key,
-        entry_type,
-        amount,
-        source_type,
-        txn_date,
-        notes,
-        created_at
-      `
-      )
-      .eq('farm_id', farmId),
+      .order('created_at', { ascending: false }),
   ])
 
   const activeFarmLivestock = (allFarmLivestock || []).filter((a: any) => isActiveStatus(a.status))
@@ -121,7 +76,6 @@ export default async function WalletsTab({ farmId }: { farmId: string }) {
 
   const globalTxns = allGlobalTxnsForTotals || []
   const animalFinLogs = allAnimalFinLogsForTotals || []
-  const walletAuditRows = allWalletAuditRowsForTotals || []
 
   const walletByType: Partial<Record<WalletType, (typeof wallets)[number]>> = {}
   const walletById: Record<string, (typeof wallets)[number]> = {}
@@ -140,7 +94,6 @@ export default async function WalletsTab({ farmId }: { farmId: string }) {
   const emergencyBalance = Number(emergencyWallet?.current_balance || 0)
   const ownerProfitBalance = Number(ownerProfitWallet?.current_balance || 0)
 
-  // Dynamic 10% Emergency / Mortality Fund target from active self-owned livestock cost basis
   const totalSelfLivestockValue = selfAnimals.reduce(
     (sum: number, a: any) => sum + (Number(a.cost_basis) || 0),
     0
@@ -153,19 +106,13 @@ export default async function WalletsTab({ farmId }: { farmId: string }) {
       ? 100
       : 0
 
-  // Phase 4 Metrics: Active (non-VOID) Sale Split Totals & Mortality Claims
-  const allAuditRows = ((walletAuditRows || []) as Array<any>).map(r => ({
+  const allAuditRows = ((allWalletAuditRows || []) as Array<any>).map(r => ({
     ...r,
     isVoid: isVoidText(r.notes),
     splitRole: parseSplitRoleFromNotes(r.notes),
   }))
 
-  const displayedAuditRows = ((pagedWalletAuditRows || []) as Array<any>).map(r => ({
-    ...r,
-    isVoid: isVoidText(r.notes),
-    splitRole: parseSplitRoleFromNotes(r.notes),
-  }))
-
+  const displayedAuditRows = allAuditRows.slice(0, 30)
   const activeAuditRows = allAuditRows.filter(r => !r.isVoid)
 
   const sale60Total = activeAuditRows
@@ -198,7 +145,6 @@ export default async function WalletsTab({ farmId }: { farmId: string }) {
     .filter(r => r.source_type === 'MORTALITY_CLAIM' && r.entry_type === 'OUT')
     .reduce((s, r) => s + (Number(r.amount) || 0), 0)
 
-  // Active cash items for 30d target & Monthly P&L
   const activeLedgerItems = [
     ...globalTxns
       .filter((t: any) => !isVoidText(t.description))
@@ -240,7 +186,6 @@ export default async function WalletsTab({ farmId }: { farmId: string }) {
   })
   const thirtyDayOperatingTarget = cashPulse.thirtyDayTargetRequired
 
-  // Phase 5: Monthly Retained Profit & Capital Growth Report
   type MonthlyReportRow = {
     month: string
     label: string
@@ -310,7 +255,6 @@ export default async function WalletsTab({ farmId }: { farmId: string }) {
     .sort((a, b) => b.month.localeCompare(a.month))
     .slice(0, 6)
 
-  // Non-Feed Overhead Pool & Preview
   const latestWeightByAnimal: Record<string, number> = {}
   ;(weightLogs || []).forEach(w => {
     if (w.animal_id && latestWeightByAnimal[w.animal_id] === undefined) {
@@ -979,7 +923,7 @@ export default async function WalletsTab({ farmId }: { farmId: string }) {
         </div>
       </div>
 
-      {/* Phase 5: Monthly Retained Profit, Capital Growth & Executive Wallet Audit Ledger */}
+      {/* Monthly Retained Profit & Executive Wallet Audit Ledger */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="px-5 py-4 border-b border-slate-100 bg-slate-900 text-white">
@@ -1050,7 +994,7 @@ export default async function WalletsTab({ farmId }: { farmId: string }) {
               </p>
             </div>
             <span className="text-xs font-mono text-slate-500 shrink-0">
-              {displayedAuditRows.length} of {pagedWalletAuditCount ?? allAuditRows.length} entries
+              {displayedAuditRows.length} of {totalWalletAuditCount ?? allAuditRows.length} entries
             </span>
           </div>
 

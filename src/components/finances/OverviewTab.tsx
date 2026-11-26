@@ -1,10 +1,7 @@
 import Link from 'next/link'
 import { createClient } from '@/utils/supabase/server'
 import { formatDateDDMMYYYY } from '@/utils/breakeven'
-import {
-  computeWeeklyCashPulseAndRunway,
-  ensureDefaultWallets,
-} from '@/utils/wallets'
+import { computeWeeklyCashPulseAndRunway } from '@/utils/wallets'
 import {
   getPakistanDateString,
   isOverheadShareCategory,
@@ -15,20 +12,25 @@ export default async function OverviewTab({ farmId }: { farmId: string }) {
   const supabase = await createClient()
   const todayStr = getPakistanDateString()
 
-  // Fetches ONLY Overview data: wallets, transactions, and animal_financial_logs (no Palai, contacts, weights, or audit logs)
-  const [wallets, { data: globalTxns }, { data: animalFinLogs }] = await Promise.all([
-    ensureDefaultWallets(supabase, farmId),
-    supabase
-      .from('transactions')
-      .select('id, txn_date, type, category, amount, description')
-      .eq('farm_id', farmId),
-    supabase
-      .from('animal_financial_logs')
-      .select('id, entry_type, category, amount, transaction_date, notes')
-      .eq('farm_id', farmId),
-  ])
+  // Strictly Overview data only: Operating wallet row + minimal ledger columns (no wallet_transactions)
+  const [{ data: operatingWallet }, { data: globalTxns }, { data: animalFinLogs }] =
+    await Promise.all([
+      supabase
+        .from('farm_wallets')
+        .select('current_balance, target_buffer_amount')
+        .eq('farm_id', farmId)
+        .eq('wallet_type', 'OPERATING_CASH')
+        .maybeSingle(),
+      supabase
+        .from('transactions')
+        .select('txn_date, type, category, amount, description')
+        .eq('farm_id', farmId),
+      supabase
+        .from('animal_financial_logs')
+        .select('entry_type, category, amount, transaction_date, notes')
+        .eq('farm_id', farmId),
+    ])
 
-  const operatingWallet = wallets.find(w => w.wallet_type === 'OPERATING_CASH')
   const operatingBalance = Number(operatingWallet?.current_balance || 0)
 
   const activeItems = [
@@ -80,7 +82,6 @@ export default async function OverviewTab({ farmId }: { farmId: string }) {
       amount: item.amount,
     }))
 
-  // Phase 2: Weekly Cash Out vs Cash In Red Flag + 30-Day Operating Runway
   const cashPulse = computeWeeklyCashPulseAndRunway({
     items: cashItemsForAnalytics,
     todayStr,
@@ -108,7 +109,7 @@ export default async function OverviewTab({ farmId }: { farmId: string }) {
 
   return (
     <div className="space-y-6 sm:space-y-8">
-      {/* Summary Cards (Active Cash Only; Auto-Bill Receivables & Allocated Overhead Excluded) */}
+      {/* Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
         <div className="bg-white p-5 sm:p-6 rounded-2xl border border-slate-200 shadow-sm border-l-4 border-sky-500">
           <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">
@@ -148,7 +149,7 @@ export default async function OverviewTab({ farmId }: { farmId: string }) {
         </div>
       </div>
 
-      {/* Phase 2: Weekly Cash Out vs Cash In Red Flag Card + 30-Day Runway */}
+      {/* Weekly Cash Out vs Cash In Red Flag Card + 30-Day Runway */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div
           className={`lg:col-span-2 p-5 sm:p-6 rounded-2xl border shadow-sm space-y-4 ${
