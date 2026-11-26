@@ -1,3 +1,4 @@
+import { Suspense } from 'react'
 import { redirect } from 'next/navigation'
 import Link from 'next/link'
 import { getUserFarmAndRole } from '@/utils/rbac'
@@ -20,6 +21,23 @@ function resolveFinancesTab(rawTab?: string): FinancesTabKey {
     return rawTab
   }
   return 'overview'
+}
+
+function TabContentSkeleton() {
+  return (
+    <div className="space-y-6 animate-pulse">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+        <div className="h-28 bg-white rounded-2xl border border-slate-200 p-5" />
+        <div className="h-28 bg-white rounded-2xl border border-slate-200 p-5" />
+        <div className="h-28 bg-white rounded-2xl border border-slate-200 p-5" />
+        <div className="h-28 bg-white rounded-2xl border border-slate-200 p-5" />
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2 h-72 bg-white rounded-2xl border border-slate-200 p-6" />
+        <div className="h-72 bg-white rounded-2xl border border-slate-200 p-6" />
+      </div>
+    </div>
+  )
 }
 
 export default async function FinancesPage({
@@ -138,21 +156,23 @@ export default async function FinancesPage({
           })}
         </nav>
 
-        {/* Active Tab View (Each Tab Fetches Only Its Own Data) */}
-        {activeTab === 'overview' && <OverviewTab farmId={farm.id} />}
-        {activeTab === 'ledger' && (
-          <LedgerTab
-            farmId={farm.id}
-            farmName={farm.farm_name || 'farm'}
-            filterParam={params.filter}
-            qParam={params.q}
-            pageParam={params.page}
-          />
-        )}
-        {activeTab === 'wallets' && <WalletsTab farmId={farm.id} />}
-        {activeTab === 'palai' && (
-          <PalaiStockTab farmId={farm.id} farmName={farm.farm_name || 'BAA BAA Shed'} />
-        )}
+        {/* Active Tab View Streamed Independently via Suspense */}
+        <Suspense key={activeTab} fallback={<TabContentSkeleton />}>
+          {activeTab === 'overview' && <OverviewTab farmId={farm.id} />}
+          {activeTab === 'ledger' && (
+            <LedgerTab
+              farmId={farm.id}
+              farmName={farm.farm_name || 'farm'}
+              filterParam={params.filter}
+              qParam={params.q}
+              pageParam={params.page}
+            />
+          )}
+          {activeTab === 'wallets' && <WalletsTab farmId={farm.id} />}
+          {activeTab === 'palai' && (
+            <PalaiStockTab farmId={farm.id} farmName={farm.farm_name || 'BAA BAA Shed'} />
+          )}
+        </Suspense>
       </div>
     </div>
   )
