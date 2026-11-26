@@ -370,8 +370,8 @@ export function computeWeeklyCashPulseAndRunway({
 
   const totalCashOut7d = coreCashOut7d + otherCashOut7d
   const totalCashIn7d = shortCycleCashIn7d + palaiCashIn7d
-  const weeklyNetGap = shortCycleCashIn7d - coreCashOut7d
-  const isRedFlag = coreCashOut7d > shortCycleCashIn7d
+  const weeklyNetGap = totalCashIn7d - totalCashOut7d
+  const isRedFlag = totalCashOut7d > totalCashIn7d
 
   const avgDailyOperatingBurn = operatingBurn30d > 0 ? Math.round(operatingBurn30d / 30) : 0
   const thirtyDayTargetRequired =
