@@ -39,7 +39,7 @@ function buildWhatsAppUrl(contact: any, farmName: string, liveBalance: number): 
 async function requireAdmin() {
   const { farm, role } = await getUserFarmAndRole()
   if (!farm) return redirect('/onboarding')
-  if (role !== 'admin' && role !== 'owner') {
+  if (role !== 'admin') {
     return redirect('/contacts?error=' + encodeURIComponent('Access denied: admin permission required.'))
   }
   return { farm, role }
