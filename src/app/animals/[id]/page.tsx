@@ -19,6 +19,18 @@ function isVoidText(val?: string | null): boolean {
   return upper.startsWith('[VOID]') || upper.startsWith('VOID:')
 }
 
+function getSpeciesEmoji(species?: string | null): string {
+  const s = (species || '').toLowerCase().trim()
+  if (s.includes('chicken') || s.includes('poultry') || s.includes('hen') || s.includes('rooster')) return '🐔'
+  if (s.includes('sheep') || s.includes('lamb') || s.includes('dumba')) return '🐑'
+  if (s.includes('cow') || s.includes('cattle') || s.includes('buffalo') || s.includes('bull') || s.includes('calf')) return '🐄'
+  if (s.includes('rabbit') || s.includes('bunny')) return '🐇'
+  if (s.includes('horse') || s.includes('mare') || s.includes('stallion')) return '🐎'
+  if (s.includes('dog') || s.includes('puppy')) return '🐕'
+  if (s.includes('quail') || s.includes('bird') || s.includes('duck')) return '🐦'
+  return '🐐'
+}
+
 export default async function AnimalDetailPage({
   params,
   searchParams,
@@ -456,7 +468,7 @@ export default async function AnimalDetailPage({
               {animal.photo_url ? (
                 <img src={animal.photo_url} alt={animal.tag_id} className="h-full w-full object-cover" />
               ) : (
-                <span className="text-2xl">🐐</span>
+                <span className="text-2xl">{getSpeciesEmoji(animal.species)}</span>
               )}
             </div>
             <div>
