@@ -92,8 +92,8 @@ export default async function ContactsPage({
   Object.entries(animalsByClient).forEach(([k, ids]) => { animalIdsByClientFlat[k] = new Set(ids) })
   ;(palaiLogs || []).forEach((f: any) => {
     if (f.entry_type !== 'Revenue') return
-    const note = String(f.notes || '')
-    const isAuto = note.startsWith('Auto-Bill')
+    const note = String(f.notes || '').toLowerCase()
+    const isAuto = note.includes('auto-bill') || note.includes('auto bill') || note.includes('auto_bill')
     // Find which client owns this animal
     for (const [key, set] of Object.entries(animalIdsByClientFlat)) {
       if (set.has(f.animal_id)) {
