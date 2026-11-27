@@ -2,6 +2,8 @@ import { createClient } from '@/utils/supabase/server'
 import { redirect } from 'next/navigation'
 import Link from 'next/link'
 import { getUserFarmAndRole } from '@/utils/rbac'
+import { daysBetweenDateStrings } from '@/utils/breakeven'
+import { getPakistanDateString, isActiveStatus, isSelfOwnership, isVoidText } from '@/utils/financesHelpers'
 
 // ---------- Helpers ----------
 function formatWhatsAppNumber(phone?: string | null): string | null {
@@ -68,63 +70,74 @@ export default async function ContactsPage({
   const { farm } = await getUserFarmAndRole()
   if (!farm) return redirect('/onboarding')
 
+  const todayStr = getPakistanDateString()
+
   // Fetch contacts + Palai animals + Palai logs (for live due)
   const [{ data: contacts }, { data: palaiAnimals }, { data: palaiLogs }] = await Promise.all([
     supabase.from('contacts').select('*').eq('farm_id', farm.id).order('name', { ascending: true }),
-    supabase.from('livestock_master').select('id, client_name, status, ownership').eq('farm_id', farm.id),
+    supabase.from('livestock_master').select('id, client_name, monthly_palai_fee, acquisition_date, status, ownership').eq('farm_id', farm.id),
     supabase.from('animal_financial_logs').select('animal_id, entry_type, category, amount, notes, transaction_date').eq('farm_id', farm.id),
   ])
 
-  // Map client_name -> animal ids (Palai / Client animals)
-  const animalsByClient: Record<string, string[]> = {}
-  const animalCountByClient: Record<string, number> = {}
-  ;(palaiAnimals || []).forEach((a: any) => {
+  const activePalaiAnimals = (palaiAnimals || []).filter(
+    (a: any) => isActiveStatus(a.status) && !isSelfOwnership(a.ownership)
+  )
+
+  // Map client_name -> active Palai animals & compute exact due using PalaiStockTab 30-day advance block formula
+  const palaiAnimalsByClient: Record<string, any[]> = {}
+  activePalaiAnimals.forEach((a: any) => {
     const key = String(a.client_name || '').trim().toLowerCase()
     if (!key) return
-    if (!animalsByClient[key]) animalsByClient[key] = []
-    animalsByClient[key].push(a.id)
-    animalCountByClient[key] = (animalCountByClient[key] || 0) + 1
+    if (!palaiAnimalsByClient[key]) palaiAnimalsByClient[key] = []
+    palaiAnimalsByClient[key].push(a)
   })
 
-  // Live Palai due per client: Auto-Bill = billed, Revenue without Auto-Bill = paid
   const palaiDueByClient: Record<string, number> = {}
-  const animalIdsByClientFlat: Record<string, Set<string>> = {}
-  Object.entries(animalsByClient).forEach(([k, ids]) => { animalIdsByClientFlat[k] = new Set(ids) })
-  ;(palaiLogs || []).forEach((f: any) => {
-    if (f.entry_type !== 'Revenue') return
-    const note = String(f.notes || '').toLowerCase()
-    const isAuto = note.includes('auto-bill') || note.includes('auto bill') || note.includes('auto_bill')
-    // Find which client owns this animal
-    for (const [key, set] of Object.entries(animalIdsByClientFlat)) {
-      if (set.has(f.animal_id)) {
-        if (!palaiDueByClient[key]) palaiDueByClient[key] = 0
-        if (isAuto) palaiDueByClient[key] += Number(f.amount) || 0
-        else palaiDueByClient[key] -= Number(f.amount) || 0
-        break
-      }
-    }
+  Object.entries(palaiAnimalsByClient).forEach(([key, clientAnimals]) => {
+    const clientTotalDue = clientAnimals.reduce((clientSum: number, a: any) => {
+      const rate = Number(a.monthly_palai_fee) > 0 ? Number(a.monthly_palai_fee) : 5000
+      const acqStr = a.acquisition_date ? String(a.acquisition_date).split('T')[0] : todayStr
+      const daysBoarded = Math.max(1, daysBetweenDateStrings(acqStr, todayStr, 1))
+      // BUSINESS RULE: Palai is billed in non-refundable 30-day advance blocks.
+      const billedMonths = Math.max(1, Math.ceil(daysBoarded / 30))
+      const accruedBoarding = rate * billedMonths
+
+      const animalRevenueLogs = (palaiLogs || []).filter(
+        (f: any) => f.animal_id === a.id && f.entry_type === 'Revenue' && !isVoidText(f.notes)
+      )
+
+      const autoBilledRevenue = animalRevenueLogs
+        .filter((f: any) => String(f.notes || '').startsWith('Auto-Bill'))
+        .reduce((sum: number, f: any) => sum + (Number(f.amount) || 0), 0)
+
+      const totalRevenueRecorded = animalRevenueLogs.reduce(
+        (sum: number, f: any) => sum + (Number(f.amount) || 0),
+        0
+      )
+
+      const totalBilled = Math.max(accruedBoarding, autoBilledRevenue)
+      const totalPaid = Math.max(0, totalRevenueRecorded - autoBilledRevenue)
+      const balanceDue = Math.max(0, totalBilled - totalPaid)
+
+      return clientSum + balanceDue
+    }, 0)
+
+    palaiDueByClient[key] = clientTotalDue
   })
 
   // Attach live balance + animal count to each contact
   const withLive = (contacts || []).map((c: any) => {
     const opening = Number(c.opening_balance || 0)
     const key = String(c.name || '').trim().toLowerCase()
+    const clientAnimals = palaiAnimalsByClient[key] || []
+    const animalCount = clientAnimals.length
     let liveBalance = opening
     let palaiDue = 0
     if (c.role === 'Client') {
       palaiDue = palaiDueByClient[key] || 0
-      // Opening = starting due, PalaiDue = (Auto-Bill - Paid) since opening was set.
-      // If opening already included old bills, this avoids double count by using max:
-      // We treat live = opening + palaiDue only when palaiDue is from new bills.
-      // Safer: if there are Palai animals, live = max(opening, palaiDue) when opening was old due.
-      // Here we use: live = opening + palaiDue if palaiDue > 0 and opening is small, else palaiDue.
-      // To keep it predictable: live = palaiDue if palai animals exist, else opening.
-      liveBalance = animalCountByClient[key] ? palaiDue + (opening > 0 && palaiDue === 0 ? opening : 0) : opening
-      // If opening was a manual starting due and palaiDue already covers it, opening is NOT added twice.
-      // Rule above: when palai animals exist, live = palaiDue (authoritative).
-      if (animalCountByClient[key]) liveBalance = palaiDue
+      liveBalance = animalCount > 0 ? palaiDue : opening
     }
-    return { ...c, openingBalance: opening, liveBalance, palaiDue, animalCount: animalCountByClient[key] || 0 }
+    return { ...c, openingBalance: opening, liveBalance, palaiDue, animalCount }
   })
 
   // Filters: role + search + due
