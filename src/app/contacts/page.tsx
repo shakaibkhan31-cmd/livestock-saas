@@ -375,7 +375,7 @@ export default async function ContactsPage({
                             <span title="Add valid mobile number (e.g. 03001234567) to enable WhatsApp" className="inline-flex items-center px-2.5 py-1.5 rounded-lg bg-slate-100 text-slate-400 text-xs font-medium cursor-not-allowed">No Phone</span>
                           )}
                           <Link href={qs({ editId: c.id })} className="inline-block px-2.5 py-1.5 rounded-lg text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-xs font-medium transition">Edit</Link>
-                          <form action={deleteContact} className="inline-block" onSubmit={(e) => { if (!confirm(`Delete ${c.name}? Ye wapas nahi aayega.`)) e.preventDefault() }}>
+                          <form action={deleteContact} className=\"inline-block\">
                             <input type="hidden" name="contactId" value={c.id} />
                             <button type="submit" className="px-2.5 py-1.5 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-xs font-medium transition">Delete</button>
                           </form>
