@@ -423,9 +423,9 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
             {/* Left Logo + Header */}
             <Box
               x={260}
-              y={65}
-              w={180}
-              h={180}
+              y={55}
+              w={260}
+              h={260}
               style={{
                 justifyContent: 'center',
                 background: 'transparent',
@@ -436,8 +436,8 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
               <img
                 src="/logo.png"
                 alt="Baa Baa Shed Logo"
-                width={170}
-                height={170}
+                width={240}
+                height={240}
                 style={{
                   width: '100%',
                   height: '100%',
@@ -449,9 +449,9 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
             </Box>
 
             <Box
-              x={470}
+              x={535}
               y={70}
-              w={900}
+              w={850}
               h={100}
               style={{
                 color: MAROON,
@@ -463,9 +463,9 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
               Baa Baa Shed
             </Box>
             <Box
-              x={525}
+              x={535}
               y={170}
-              w={950}
+              w={940}
               h={54}
               style={{
                 ...label,
@@ -477,14 +477,8 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
             >
               B-9, Rooftop C.G.E.C.H.S, Block 19, Gulistan-e-Johar, Karachi.
             </Box>
-            <Box x={525} y={232} w={700} h={54} style={{ ...label, fontWeight: 700 }}>
+            <Box x={535} y={232} w={700} h={54} style={{ ...label, fontWeight: 700 }}>
               +92 346 3197358
-            </Box>
-            <Box x={470} y={176} w={50} h={44} style={{ fontSize: fs(34) }}>
-              📍
-            </Box>
-            <Box x={470} y={238} w={50} h={44} style={{ fontSize: fs(34) }}>
-              📞
             </Box>
 
             {/* S.No / Date / PKR (all within x <= 1975) */}
