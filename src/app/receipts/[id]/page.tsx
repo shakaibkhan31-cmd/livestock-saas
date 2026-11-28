@@ -450,22 +450,34 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
 
             <Box
               x={535}
-              y={70}
+              y={66}
               w={850}
               h={100}
               style={{
                 color: MAROON,
                 fontSize: fs(92),
-                lineHeight: 1,
+                lineHeight: 1.05,
                 fontFamily: brandFont.style.fontFamily,
               }}
             >
               Baa Baa Shed
             </Box>
+
+            {/* Location icon + Address */}
+            <Box x={535} y={176} w={42} h={42} style={{ justifyContent: 'center' }}>
+              <svg viewBox="0 0 24 24" style={{ width: '82%', height: '82%' }} aria-hidden="true">
+                <path
+                  d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"
+                  fill="none"
+                  stroke={MAROON}
+                  strokeWidth="2.1"
+                />
+              </svg>
+            </Box>
             <Box
-              x={535}
+              x={583}
               y={170}
-              w={940}
+              w={900}
               h={54}
               style={{
                 ...label,
@@ -477,7 +489,20 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
             >
               B-9, Rooftop C.G.E.C.H.S, Block 19, Gulistan-e-Johar, Karachi.
             </Box>
-            <Box x={535} y={232} w={700} h={54} style={{ ...label, fontWeight: 700 }}>
+
+            {/* Phone icon + Number */}
+            <Box x={535} y={236} w={42} h={42} style={{ justifyContent: 'center' }}>
+              <svg viewBox="0 0 24 24" style={{ width: '78%', height: '78%' }} aria-hidden="true">
+                <path
+                  d="M6.62 10.79a15.05 15.05 0 0 0 6.59 6.59l2.2-2.2a1 1 0 0 1 1.01-.24c1.12.37 2.33.57 3.58.57a1 1 0 0 1 1 1V20a1 1 0 0 1-1 1C10.61 21 3 13.39 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.46.57 3.58a1 1 0 0 1-.25 1.01l-2.2 2.2z"
+                  fill="none"
+                  stroke={MAROON}
+                  strokeWidth="2"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </Box>
+            <Box x={583} y={232} w={700} h={54} style={{ ...label, fontWeight: 700 }}>
               +92 346 3197358
             </Box>
 
@@ -554,41 +579,59 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
               Animal: {animal.tag_id}
             </Box>
 
-            {/* Balance boxes */}
+            {/* Balance boxes with chevron block + right chevron separator + value box */}
             {balanceRows.map(([text, amount, y]) => (
               <div key={text}>
                 <div
                   style={{
-                    ...pos(280, y, 100, 60),
+                    ...pos(280, y, 86, 60),
                     background: MAROON,
-                    clipPath: 'polygon(0 0, 78% 0, 100% 50%, 78% 100%, 0 100%)',
-                    borderRadius: '0.4cqw',
+                    clipPath: 'polygon(0 0, 76% 0, 100% 50%, 76% 100%, 0 100%)',
+                    borderRadius: '0.35cqw',
                   }}
                 />
                 <Box
-                  x={365}
+                  x={362}
                   y={y}
-                  w={290}
+                  w={274}
                   h={60}
                   style={{
-                    border: `0.08cqw solid ${MAROON}`,
-                    paddingLeft: '2.6%',
+                    borderTop: `0.08cqw solid ${MAROON}`,
+                    borderBottom: `0.08cqw solid ${MAROON}`,
+                    borderLeft: `0.08cqw solid ${MAROON}`,
+                    paddingLeft: '1.1%',
+                    paddingRight: '0.8%',
+                    justifyContent: 'space-between',
                     ...label,
-                    fontSize: fs(26),
+                    fontSize: fs(25),
                   }}
                 >
-                  {text}
+                  <span>{text}</span>
+                  <svg
+                    viewBox="0 0 16 28"
+                    style={{ width: fs(14), height: fs(24), flexShrink: 0 }}
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="M3 3L13 14L3 25"
+                      fill="none"
+                      stroke={MAROON}
+                      strokeWidth="2.2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
                 </Box>
                 <Box
-                  x={655}
+                  x={636}
                   y={y}
-                  w={265}
+                  w={284}
                   h={60}
                   style={{
                     border: `0.08cqw solid ${MAROON}`,
                     justifyContent: 'center',
                     color: '#000',
-                    fontSize: fs(40),
+                    fontSize: fs(38),
                     fontWeight: 500,
                   }}
                 >
@@ -611,24 +654,27 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
                     y={y}
                     w={48}
                     h={48}
-                    style={{ border: `0.1cqw solid ${MAROON}`, justifyContent: 'center' }}
+                    style={{
+                      border: `0.1cqw solid ${MAROON}`,
+                      justifyContent: 'center',
+                      overflow: 'hidden',
+                    }}
                   >
                     {checked && (
                       <svg
-                        viewBox="0 0 64 64"
+                        viewBox="0 0 24 24"
                         style={{
-                          position: 'absolute',
-                          left: '-12%',
-                          top: '-38%',
-                          width: '135%',
-                          height: '135%',
+                          width: '78%',
+                          height: '78%',
+                          display: 'block',
                         }}
+                        aria-hidden="true"
                       >
                         <path
-                          d="M10 36L26 52L58 8"
+                          d="M4.5 12.5L9.5 17.5L19.5 6.5"
                           fill="none"
-                          stroke="#000"
-                          strokeWidth="8"
+                          stroke="#111"
+                          strokeWidth="2.8"
                           strokeLinecap="round"
                           strokeLinejoin="round"
                         />
