@@ -105,6 +105,17 @@ export default async function PalaiStockTab({
     const totalPaid = Math.max(0, totalRevenueRecorded - autoBilledRevenue)
     const balanceDue = Math.max(0, totalBilled - totalPaid)
     const clientName = a.client_name || 'Unnamed Client'
+
+    // Individual client payments (for 🧾 Receipt buttons), newest first
+    const payments = animalRevenueLogs
+      .filter((f: any) => f.category === 'Palai Boarding Fee')
+      .map((f: any) => ({
+        id: String(f.id),
+        amount: Number(f.amount) || 0,
+        date: String(f.transaction_date).split('T')[0],
+        receiptNo: (String(f.notes || '').match(/Receipt:\s*(\d+)/) || [])[1] || '',
+      }))
+      .sort((x: any, y: any) => y.date.localeCompare(x.date))
     const phone = contactPhoneByName[clientName.trim().toLowerCase()] || null
 
     const whatsappUrl =
@@ -138,6 +149,7 @@ export default async function PalaiStockTab({
       totalPaid,
       balanceDue,
       whatsappUrl,
+      payments,
     }
   })
 
@@ -416,14 +428,18 @@ export default async function PalaiStockTab({
     const amount = parseFloat((formData.get('amount') as string) || '0')
     const paymentDate =
       ((formData.get('payment_date') as string) || '').trim() || getPakistanDateString()
-    const notes =
-      ((formData.get('notes') as string) || '').trim() || 'Palai Client Boarding Payment'
+    const paymentMethod = ((formData.get('paymentMethod') as string) || '').trim()
 
     if (!animalId || isNaN(amount) || amount <= 0) {
       return redirect(
         `/finances?tab=palai&error=${encodeURIComponent(
           'Enter a valid payment amount greater than 0.'
         )}`
+      )
+    }
+    if (!['Cash', 'Online Bank Transfer', 'JazzCash'].includes(paymentMethod)) {
+      return redirect(
+        `/finances?tab=palai&error=${encodeURIComponent('Select a valid payment method.')}`
       )
     }
 
@@ -442,6 +458,22 @@ export default async function PalaiStockTab({
       )
     }
 
+    // Receipt No. = notes me se sab se bara Receipt: XXXX + 1
+    // Manual receipts 0027 tak ja chuki hain, is liye kam se kam 0027 se shuru karo
+    const { data: existingReceiptRows } = await supabaseClient
+      .from('animal_financial_logs')
+      .select('notes')
+      .eq('farm_id', farmId)
+      .eq('entry_type', 'Revenue')
+      .eq('category', 'Palai Boarding Fee')
+    let maxReceiptNo = 27
+    ;(existingReceiptRows || []).forEach((r: any) => {
+      const m = String(r.notes || '').match(/Receipt:\s*(\d+)/)
+      if (m) maxReceiptNo = Math.max(maxReceiptNo, parseInt(m[1], 10))
+    })
+    const receiptNo = String(maxReceiptNo + 1).padStart(4, '0')
+    const paymentNotes = `Palai Payment - ${palaiRow.tag_id} | Method: ${paymentMethod} | Receipt: ${receiptNo}`
+
     const { data: insertedPayLog, error: payErr } = await supabaseClient
       .from('animal_financial_logs')
       .insert([
@@ -452,7 +484,7 @@ export default async function PalaiStockTab({
           category: 'Palai Boarding Fee',
           amount,
           transaction_date: paymentDate,
-          notes: `${notes} (${palaiRow.client_name || palaiRow.tag_id})`,
+          notes: paymentNotes,
         },
       ])
       .select('id')
@@ -498,13 +530,7 @@ export default async function PalaiStockTab({
       await recalculateWalletBalance(supabaseClient, farmId, opWallet.id)
     }
 
-    return redirect(
-      `/finances?tab=palai&msg=${encodeURIComponent(
-        `Logged Palai payment of Rs. ${amount.toLocaleString()} for ${palaiRow.tag_id} (${
-          palaiRow.client_name || 'Client'
-        }) into Operating Cash.`
-      )}`
-    )
+    return redirect(`/receipts/${insertedPayLog.id}`)
   }
 
   return (
@@ -650,6 +676,28 @@ export default async function PalaiStockTab({
                           Statement
                         </Link>
                       </div>
+                      {row.payments.length > 0 && (
+                        <div className="mt-1.5 space-y-1 max-h-24 overflow-y-auto">
+                          {row.payments.map((p: any) => (
+                            <div
+                              key={p.id}
+                              className="flex items-center gap-1.5 text-[10px] font-mono text-slate-500"
+                            >
+                              <span>{formatDateDDMMYYYY(p.date)}</span>
+                              <span className="font-semibold text-emerald-700">
+                                Rs. {p.amount.toLocaleString()}
+                              </span>
+                              {p.receiptNo && <span className="text-slate-400">#{p.receiptNo}</span>}
+                              <Link
+                                href={`/receipts/${p.id}`}
+                                className="px-1.5 py-0.5 rounded bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 font-sans font-semibold"
+                              >
+                                🧾 Receipt
+                              </Link>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </td>
                     <td className="px-5 py-3.5 text-xs font-mono text-slate-700 whitespace-nowrap">
                       <div>Rs. {row.monthly_fee.toLocaleString()}/mo</div>
@@ -715,6 +763,15 @@ export default async function PalaiStockTab({
                               defaultValue={row.balanceDue}
                               className="w-24 px-2 py-1 border border-slate-300 rounded-lg text-xs font-mono text-right text-slate-900"
                             />
+                            <select
+                              name="paymentMethod"
+                              required
+                              className="px-2 py-1 border border-slate-300 rounded-lg text-xs text-slate-900 bg-white"
+                            >
+                              <option value="Cash">Cash</option>
+                              <option value="Online Bank Transfer">Online Bank Transfer</option>
+                              <option value="JazzCash">JazzCash</option>
+                            </select>
                             <button
                               type="submit"
                               className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold transition"
