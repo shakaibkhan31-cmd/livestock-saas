@@ -473,7 +473,19 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
             >
               Baa Baa Shed
             </Box>
-            <Box x={525} y={170} w={1000} h={54} style={{ ...label, fontWeight: 700 }}>
+            <Box
+              x={525}
+              y={170}
+              w={950}
+              h={54}
+              style={{
+                ...label,
+                fontSize: fs(28),
+                fontWeight: 700,
+                whiteSpace: 'normal',
+                overflow: 'hidden',
+              }}
+            >
               B-9, Rooftop C.G.E.C.H.S, Block 19, Gulistan-e-Johar, Karachi.
             </Box>
             <Box x={525} y={232} w={700} h={54} style={{ ...label, fontWeight: 700 }}>
@@ -520,10 +532,16 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
             </Box>
 
             {/* Left details */}
-            <Box x={240} y={325} w={250} h={56} style={{ ...label, fontWeight: 700 }}>
+            <Box
+              x={240}
+              y={325}
+              w={320}
+              h={56}
+              style={{ ...label, fontSize: fs(30), fontWeight: 700, whiteSpace: 'nowrap' }}
+            >
               Received From :
             </Box>
-            <Box x={500} y={325} w={1000} h={56} style={value}>
+            <Box x={580} y={325} w={920} h={56} style={{ ...value, whiteSpace: 'nowrap' }}>
               {clientName}
             </Box>
 
@@ -558,30 +576,30 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
               <div key={text}>
                 <div
                   style={{
-                    ...pos(247, y, 100, 60),
+                    ...pos(280, y, 100, 60),
                     background: MAROON,
                     clipPath: 'polygon(0 0, 78% 0, 100% 50%, 78% 100%, 0 100%)',
                     borderRadius: '0.4cqw',
                   }}
                 />
                 <Box
-                  x={335}
+                  x={365}
                   y={y}
-                  w={293}
+                  w={290}
                   h={60}
                   style={{
                     border: `0.08cqw solid ${MAROON}`,
                     paddingLeft: '2.6%',
                     ...label,
-                    fontSize: fs(30),
+                    fontSize: fs(26),
                   }}
                 >
                   {text}
                 </Box>
                 <Box
-                  x={628}
+                  x={655}
                   y={y}
-                  w={288}
+                  w={265}
                   h={60}
                   style={{
                     border: `0.08cqw solid ${MAROON}`,
@@ -658,20 +676,18 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
               Signature :
             </Box>
             <Box
-              x={1635}
+              x={1595}
               y={818}
-              w={340}
+              w={380}
               h={122}
               style={{
                 border: dotted,
                 justifyContent: 'center',
-                overflow: 'hidden',
+                overflow: 'visible',
                 color: '#111',
-                fontSize: fs(52),
+                fontSize: fs(38),
                 fontFamily: signFont.style.fontFamily,
-                whiteSpace: 'normal',
-                textAlign: 'center',
-                lineHeight: 1.1,
+                whiteSpace: 'nowrap',
               }}
             >
               {ownerName}
