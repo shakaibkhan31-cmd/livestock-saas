@@ -1,7 +1,7 @@
 import type { CSSProperties, ReactNode } from 'react'
 import { notFound, redirect } from 'next/navigation'
 import { headers } from 'next/headers'
-import { Gochi_Hand, Mrs_Saint_Delafield, Poppins } from 'next/font/google'
+import { Gochi_Hand, Poppins } from 'next/font/google'
 import { createClient } from '@/utils/supabase/server'
 import { getUserFarmAndRole } from '@/utils/rbac'
 import { daysBetweenDateStrings } from '@/utils/breakeven'
@@ -9,7 +9,6 @@ import { addDaysToDateString, isVoidText } from '@/utils/financesHelpers'
 import PrintButton from './PrintButton'
 
 const brandFont = Gochi_Hand({ weight: '400', subsets: ['latin'] })
-const signFont = Mrs_Saint_Delafield({ weight: '400', subsets: ['latin'] })
 const bodyFont = Poppins({ weight: ['400', '500', '600', '700'], subsets: ['latin'] })
 
 // ---------- Colors (from the reference receipt) ----------
@@ -248,13 +247,6 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
   const clientName = animal.client_name || 'Client'
   const amountInWords = numberToWords(paymentAmount) + ' only-'
 
-  const ownerName: string =
-    (farm as any).owner_name ||
-    (user.user_metadata as any)?.full_name ||
-    (user.user_metadata as any)?.name ||
-    (farm as any).farm_name ||
-    ''
-
   // 5) WhatsApp link to the client
   const contact = (contactsList || []).find(
     (c: any) => (c.name || '').trim().toLowerCase() === clientName.trim().toLowerCase()
@@ -426,39 +418,36 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
               <circle cx="320" cy="942" r="11" fill={MAROON} />
               <circle cx="365" cy="980" r="16" fill={GREEN} />
               <circle cx="432" cy="980" r="10" fill={MAROON} />
-              {/* Logo badge */}
-              <polygon
-                points="340,105 420,150 420,235 340,278 262,235 262,150"
-                fill="#fff"
-                stroke={MAROON}
-                strokeWidth="5"
-              />
-              <path d="M305 150L340 125L375 150V165H305Z" fill={MAROON} />
-              <rect x="325" y="148" width="30" height="17" fill="#fff" />
-              <g transform="rotate(-8 340 190)">
-                <rect
-                  x="237"
-                  y="170"
-                  width="206"
-                  height="46"
-                  fill="#fff"
-                  stroke={MAROON}
-                  strokeWidth="4"
-                />
-                <text
-                  x="340"
-                  y="204"
-                  textAnchor="middle"
-                  fontSize="34"
-                  fill={MAROON}
-                  style={{ fontFamily: brandFont.style.fontFamily }}
-                >
-                  Baa Baa Shed
-                </text>
-              </g>
             </svg>
 
-            {/* Header */}
+            {/* Left Logo + Header */}
+            <Box
+              x={260}
+              y={65}
+              w={180}
+              h={180}
+              style={{
+                justifyContent: 'center',
+                background: 'transparent',
+                border: 'none',
+                boxShadow: 'none',
+              }}
+            >
+              <img
+                src="/logo.png"
+                alt="Baa Baa Shed Logo"
+                width={170}
+                height={170}
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  objectFit: 'contain',
+                  background: 'transparent',
+                  display: 'block',
+                }}
+              />
+            </Box>
+
             <Box
               x={470}
               y={70}
@@ -659,7 +648,7 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
               )
             })}
 
-            {/* Next due + signature (compact width so nothing overflows right edge) */}
+            {/* Next due + computer generated note */}
             <Box x={1555} y={612} w={420} h={56} style={{ ...label, fontWeight: 700, fontSize: fs(30) }}>
               Next Payment Due Date :
             </Box>
@@ -672,25 +661,24 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
             >
               {fmtDate(nextBillingDate, false)}
             </Box>
-            <Box x={1555} y={752} w={420} h={56} style={{ ...label, fontWeight: 700 }}>
-              Signature :
-            </Box>
             <Box
-              x={1595}
-              y={818}
-              w={380}
-              h={122}
+              x={1555}
+              y={800}
+              w={420}
+              h={120}
               style={{
-                border: dotted,
                 justifyContent: 'center',
-                overflow: 'visible',
-                color: '#111',
-                fontSize: fs(38),
-                fontFamily: signFont.style.fontFamily,
-                whiteSpace: 'nowrap',
+                color: '#64748b',
+                fontSize: fs(24),
+                fontStyle: 'italic',
+                textAlign: 'center',
+                lineHeight: 1.3,
+                whiteSpace: 'normal',
               }}
             >
-              {ownerName}
+              This is a computer generated slip,
+              <br />
+              signature is not required.
             </Box>
           </div>
         </div>
