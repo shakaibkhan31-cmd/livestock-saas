@@ -7,6 +7,7 @@ import { getUserFarmAndRole } from '@/utils/rbac'
 import { daysBetweenDateStrings } from '@/utils/breakeven'
 import { addDaysToDateString, isVoidText } from '@/utils/financesHelpers'
 import PrintButton from './PrintButton'
+import WhatsAppPdfButton from './WhatsAppPdfButton'
 
 const brandFont = Gochi_Hand({ weight: '400', subsets: ['latin'] })
 const bodyFont = Poppins({ weight: ['400', '500', '600', '700'], subsets: ['latin'] })
@@ -321,25 +322,19 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
 
       <div className="receipt-shell max-w-[800px] mx-auto overflow-hidden">
         {/* Action buttons */}
-        <div
-          className="no-print"
-          style={{ width: '100%', margin: '0 0 12px', display: 'flex', flexWrap: 'wrap', gap: 8 }}
-        >
-          <PrintButton />
-          <a
-            href={whatsappUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            title={
-              waNumber
-                ? `Send to ${waNumber}`
-                : 'Client ka number contacts me nahi mila — WhatsApp me contact chunein'
-            }
-            className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-semibold shadow transition"
-          >
-            💬 WhatsApp
-          </a>
-        </div>
+<div
+  className="no-print"
+  style={{ width: '100%', margin: '0 0 12px', display: 'flex', flexWrap: 'wrap', gap: 8 }}
+>
+  <PrintButton />
+  <WhatsAppPdfButton
+    waNumber={waNumber}
+    clientName={clientName}
+    farmName={(farm as any).farm_name || 'Baa Baa Shed'}
+    amountFormatted={fmt(paymentAmount)}
+    receiptNo={receiptNo}
+  />
+</div>
 
         <div className="receipt-wrap max-w-[800px] mx-auto overflow-hidden">
           <div
